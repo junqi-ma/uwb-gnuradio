@@ -24,6 +24,9 @@ import sys
 import time
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from _common.paths import find_app  # noqa: E402
+
 DISTANCES = ['d0p8m', 'd1p6m', 'd2p5m', 'd3p5m', 'd3p8m', 'd4p2m', 'd5p2m']
 DEFAULT_ROOT = Path('/media/oi/Data/uwb/clean_distance/2026-11-16')
 DEFAULT_CAPTURE = 'rx_2s_r01.sc16'
@@ -169,7 +172,8 @@ def fmt_table(results):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('--binary', type=Path, required=True)
+    ap.add_argument('--binary', type=Path, default=None,
+                    help='receiver binary (default: discover openuwb_rx)')
     ap.add_argument('--root', type=Path, default=DEFAULT_ROOT)
     ap.add_argument('--out', type=Path, required=True)
     ap.add_argument('--distances', nargs='*', default=DISTANCES)
@@ -178,6 +182,8 @@ def main():
     ap.add_argument('args', nargs=argparse.REMAINDER,
                     help='extra live args after -- (defaults to the plan set)')
     args = ap.parse_args()
+    if args.binary is None:
+        args.binary = find_app('openuwb_rx')
     extra = args.args[1:] if args.args[:1] == ['--'] else args.args
     if not extra:
         extra = list(DEFAULT_ARGS)

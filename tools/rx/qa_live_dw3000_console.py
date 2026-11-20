@@ -8,7 +8,14 @@ import subprocess
 import sys
 import tempfile
 
-binary = str(Path(sys.argv[1]).resolve())
+# Phase 3: discover the receiver when no path is given, so the documented
+# `python3 tools/rx/qa_live_dw3000_console.py` works from a fresh preset build.
+# OPENUWB_BUILD_DIR overrides the search.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from _common.paths import find_app  # noqa: E402
+
+binary = (str(Path(sys.argv[1]).resolve()) if len(sys.argv) > 1
+          else str(find_app("openuwb_rx")))
 with tempfile.TemporaryDirectory(prefix='uwb-live-console-') as temporary:
     path = Path(temporary) / 'cw_burst.sc16'
     # A finite 6 ms stream with one 0.3 ms DC burst. Autocorrelation sees a

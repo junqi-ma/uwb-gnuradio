@@ -31,11 +31,18 @@ import statistics
 import subprocess
 import sys
 import time
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from _common.paths import find_app  # noqa: E402
 
 SCHEMA = "uwb-autocorr-suspend-abba/1"
 
-DEFAULT_BINARY = "gr-uwb/build-native-only/apps/uwb_dw3000_live"
+# Phase 3: prefer the configured preset build.  The old spelling stays as the
+# last-resort error target.
+# TODO(openuwb-compat-removal): require the official binary.
+DEFAULT_BINARY = str(find_app("openuwb_rx", required=False) or "uwb_dw3000_live")
 DEFAULT_OUT = "docs/performance/data_autocorr_suspend_20261120/abba.json"
 DEFAULT_ROUNDS = 4
 DEFAULT_WORKERS = 2
