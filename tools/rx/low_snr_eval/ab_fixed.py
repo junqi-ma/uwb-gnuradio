@@ -129,6 +129,8 @@ def main() -> int:
     ap.add_argument("--fixtures", type=Path, required=True)
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--only", help="case name substring filter")
+    ap.add_argument("--cases", default=None,
+                    help="comma-separated case names (default: control,seed1729,cfo40k)")
     ap.add_argument("--workers", type=int, default=1)
     ap.add_argument("--queue", type=int, default=256)
     ap.add_argument("--rounds", type=int, default=1,
@@ -139,7 +141,11 @@ def main() -> int:
                     help="record but do not fail on FCS/status differences")
     args = ap.parse_args()
 
-    cases = [c for c in DEFAULT_CASES if args.only is None or args.only in c]
+    cases = list(DEFAULT_CASES)
+    if args.cases:
+        cases = [c.strip() for c in args.cases.split(",") if c.strip()]
+    if args.only is not None:
+        cases = [c for c in cases if args.only in c]
     if not cases:
         ap.error("no cases selected")
 

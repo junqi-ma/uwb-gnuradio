@@ -1033,9 +1033,10 @@ bool run_prefix_cir_ns_sfd_and_phr(
             const bool supported =
                 phr_fusion_cfg_supported &&
                 !res.cir.cir_filter_taps.empty() &&
-                integer_chip_grid_at(res.cir.samples_per_chip,
-                                     rxfusion::kSamplesPerChip,
-                                     profile.fused_gate_ppm * 1e-6) &&
+                (profile.rx_fused_sfo_track ||
+                 integer_chip_grid_at(res.cir.samples_per_chip,
+                                      rxfusion::kSamplesPerChip,
+                                      profile.fused_gate_ppm * 1e-6)) &&
                 scratch.softchip.prepared;
             if (supported) {
                 ++res.stage_phr_fused_attempts;
@@ -1109,9 +1110,10 @@ FusedPayloadOutcome try_fused_payload_decode(
 
     const bool fused_supported =
         !res.cir.cir_filter_taps.empty() &&
-        integer_chip_grid_at(res.cir.samples_per_chip,
-                             rxfusion::kSamplesPerChip,
-                             profile.fused_gate_ppm * 1e-6) &&
+        (profile.rx_fused_sfo_track ||
+         integer_chip_grid_at(res.cir.samples_per_chip,
+                              rxfusion::kSamplesPerChip,
+                              profile.fused_gate_ppm * 1e-6)) &&
         profile.cir_rake_top_k == 0 &&
         profile.cir_soft_chip_mode != CirSoftChipMode::Rake &&
         profile.cir_soft_chip_mode != CirSoftChipMode::Bypass &&

@@ -287,9 +287,21 @@ inline bool stage_payload_fused_cmf(const std::complex<float>* rx,
         return false;
     if (tap_count != profile.cir_pre_samples + profile.cir_post_samples)
         return false;
-    if (!integer_chip_grid_at(cir.samples_per_chip,
+    const bool known_hop = profile.rx_bpm_known_hop;
+    const bool joint_ml = profile.rx_bpm_joint_ml;
+    const bool terminated = profile.rx_bpm_terminated_viterbi;
+    const bool sfo_track =
+        profile.rx_fused_sfo_track &&
+        !integer_chip_grid_at(cir.samples_per_chip,
+                              rxfusion::kSamplesPerChip,
+                              profile.fused_gate_ppm * 1e-6);
+    if (!sfo_track &&
+        !integer_chip_grid_at(cir.samples_per_chip,
                               rxfusion::kSamplesPerChip,
                               profile.fused_gate_ppm * 1e-6))
+        return false;
+    // The fractional-phase path is implemented by the 2-candidate kernel only.
+    if (sfo_track && !known_hop)
         return false;
     if (profile.cir_pre_samples > tap_count)
         return false;
@@ -340,6 +352,15 @@ inline bool stage_payload_fused_cmf(const std::complex<float>* rx,
         return false;
 
     const int8_t pol = (ns_sfd.polarity < 0) ? -1 : 1;
+    // PHR pilot refinement (M3): the refined rotation already includes the
+    // frozen preamble rotation, and its residual CFO is added to the kernel's
+    // exact-CFO ramp.
+    std::complex<float> rot = scratch.softchip.rot;
+    double cfo_eff = cfo_w_rad;
+    if (profile.rx_phr_phase_refine && scratch.phr_refine.applied) {
+        rot = scratch.phr_refine.rot_at_payload_start;
+        cfo_eff += scratch.phr_refine.delta_cfo_w_rad;
+    }
     rxfusion::Timings timings;
     {
         // PN build + four-candidate correlation is the fused "soft bit"
@@ -354,19 +375,53 @@ inline bool stage_payload_fused_cmf(const std::complex<float>* rx,
                                                                   t_plan0)
                 .count());
 
-        if (!rxfusion::correlate_payload_fused_cfo(
-                rx, n, cir.cir_filter_taps.data(), tap_count, chip_start,
-                rxfusion::kSamplesPerChip, payload_start,
-                scratch.fused.pn.data(), symbols, pol, scratch.softchip.rot,
-                cfo_w_rad, scratch.fused.metrics, scratch.fused.kernel,
-                &timings, /*write_complex=*/false))
-            return false;
+        if (known_hop) {
+            const std::complex<float>* bank = nullptr;
+            size_t bins = 0;
+            if (sfo_track) {
+                bins = rxopt::kSfoPhaseBins;
+                scratch.frac_cir_bank.resize(bins * tap_count);
+                if (!rxopt::build_fractional_cir_bank(
+                        cir.cir_filter_taps.data(), tap_count, bins,
+                        scratch.frac_cir_bank.data()))
+                    return false;
+                bank = scratch.frac_cir_bank.data();
+            }
+            rxfusion::DdPllConfig pll;
+            pll.enable = profile.rx_bpm_ddpll;
+            if (!rxfusion::correlate_payload_known_hop_fused_cfo(
+                    rx, n, cir.cir_filter_taps.data(), tap_count, chip_start,
+                    sfo_track
+                        ? cir.samples_per_chip
+                        : static_cast<double>(rxfusion::kSamplesPerChip),
+                    payload_start, scratch.fused.pn.data(), symbols, pol, rot,
+                    cfo_eff, pll, scratch.fused.metrics2,
+                    scratch.fused.kernel, &timings, /*write_complex=*/false,
+                    bank, bins))
+                return false;
+            scratch.fused.metrics2_valid = true;
+            for (float v : scratch.fused.metrics2.m0)
+                if (!std::isfinite(v))
+                    return false;
+            for (float v : scratch.fused.metrics2.m1)
+                if (!std::isfinite(v))
+                    return false;
+        } else {
+            if (!rxfusion::correlate_payload_fused_cfo(
+                    rx, n, cir.cir_filter_taps.data(), tap_count, chip_start,
+                    rxfusion::kSamplesPerChip, payload_start,
+                    scratch.fused.pn.data(), symbols, pol, rot, cfo_eff,
+                    scratch.fused.metrics, scratch.fused.kernel, &timings,
+                    /*write_complex=*/false))
+                return false;
+            scratch.fused.metrics2_valid = false;
+            for (float v : scratch.fused.metrics.signed_value) {
+                if (!std::isfinite(v))
+                    return false;
+            }
+        }
         template_us = plan_us + timings.template_update_us;
         correlate_us = timings.correlate_us;
-        for (float v : scratch.fused.metrics.signed_value) {
-            if (!std::isfinite(v))
-                return false;
-        }
     }
 
     const auto t_decode0 = std::chrono::steady_clock::now();
@@ -401,8 +456,21 @@ inline bool stage_payload_fused_cmf(const std::complex<float>* rx,
             g0p = &local_g0p;
             g1p = &local_g1p;
         }
-        rxfusion::decide_bpm(scratch.fused.metrics, g0, g1);
+        if (known_hop) {
+            const auto& a = scratch.fused.metrics2.m0;
+            const auto& b = scratch.fused.metrics2.m1;
+            g0.resize(symbols);
+            g1.resize(symbols);
+            for (size_t s = 0; s < symbols; ++s) {
+                g0[s] = (std::abs(a[s]) >= std::abs(b[s])) ? 0 : 1;
+                const float best = (g0[s] == 0) ? a[s] : b[s];
+                g1[s] = (best < 0.0f) ? 1 : 0;
+            }
+        } else {
+            rxfusion::decide_bpm(scratch.fused.metrics, g0, g1);
+        }
     }
+
     // Attempt 1 — the unchanged hard-decision path.  On success this is the
     // whole cost of a high-SNR packet: nothing below runs.
     const bool decoded = detail::decode_payload_hard(
@@ -412,7 +480,48 @@ inline bool stage_payload_fused_cmf(const std::complex<float>* rx,
         return true;
     }
 
-    // Attempt 2 — in-place soft-decision retry on the SAME four signed metrics.
+    // Attempt 2 (M2) — joint bi-orthogonal ML Viterbi on the same metrics.
+    // The PHR metrics come from the fused PHR stage (already in the same
+    // rotation frame when the pilot refinement ran).  If the ML attempt fails
+    // its FCS the legacy split-LLR soft attempt below still runs, so the
+    // switch can never lose a packet the old path could decode.
+    if (joint_ml && scratch.fused_phr.metrics2_valid &&
+        scratch.fused_phr.metrics2.m0.size() == 21) {
+        const float* bm0 = nullptr;
+        const float* bm1 = nullptr;
+        if (known_hop) {
+            bm0 = scratch.fused.metrics2.m0.data();
+            bm1 = scratch.fused.metrics2.m1.data();
+        } else {
+            auto& v0 = scratch.fused.biorth_m0;
+            auto& v1 = scratch.fused.biorth_m1;
+            v0.resize(symbols);
+            v1.resize(symbols);
+            const auto& sv = scratch.fused.metrics.signed_value;
+            for (size_t s = 0; s < symbols; ++s) {
+                const float h0 = std::max(std::abs(sv[4 * s + 0]),
+                                          std::abs(sv[4 * s + 1]));
+                const float h1 = std::max(std::abs(sv[4 * s + 2]),
+                                          std::abs(sv[4 * s + 3]));
+                const size_t h = (h1 > h0) ? 1 : 0;
+                v0[s] = sv[4 * s + 2 * h + 0];
+                v1[s] = sv[4 * s + 2 * h + 1];
+            }
+            bm0 = v0.data();
+            bm1 = v1.data();
+        }
+        const bool ml_decoded = detail::decode_payload_biorth_soft(
+            scratch.fused_phr.metrics2.m0.data(),
+            scratch.fused_phr.metrics2.m1.data(), bm0, bm1, symbols,
+            psdu_bits, out, sub, &scratch.fused.decode, terminated,
+            /*enable_clip=*/true);
+        if (ml_decoded && out.fcs_pass) {
+            stamp_decode();
+            return true;
+        }
+    }
+
+    // Attempt 3 — in-place soft-decision retry on the SAME four signed metrics.
     // No extra correlation and no extra derotation: the LLRs are a by-product
     // of the metrics the fused kernel already produced.  The PHR LLRs come from
     // the fused PHR cache when it is valid, otherwise from one bprf_demod_soft()
@@ -428,8 +537,19 @@ inline bool stage_payload_fused_cmf(const std::complex<float>* rx,
     const std::vector<float>* llr1p = phr_llr1;
     {
         detail::PayloadSubBucket soft_bucket(sub, &PayloadSubTimers::soft_us);
-        rxfusion::decide_bpm_soft(scratch.fused.metrics, soft_g0, soft_g1,
-                                  llr0, llr1);
+        if (known_hop) {
+            const auto& a = scratch.fused.metrics2.m0;
+            const auto& b = scratch.fused.metrics2.m1;
+            llr0.resize(symbols);
+            llr1.resize(symbols);
+            for (size_t s = 0; s < symbols; ++s) {
+                llr0[s] = std::abs(a[s]) - std::abs(b[s]);
+                llr1[s] = std::max(a[s], b[s]) - std::max(-a[s], -b[s]);
+            }
+        } else {
+            rxfusion::decide_bpm_soft(scratch.fused.metrics, soft_g0, soft_g1,
+                                      llr0, llr1);
+        }
         if (!llr0p || !llr1p || llr0p->size() != 21 || llr1p->size() != 21) {
             llr0p = nullptr;
             llr1p = nullptr;
@@ -449,6 +569,42 @@ inline bool stage_payload_fused_cmf(const std::complex<float>* rx,
         if (soft_decoded && out.fcs_pass) {
             stamp_decode();
             return true;
+        }
+    }
+
+    // Safety net: the known-hop / joint-ML path failed.  Before paying for the
+    // ~10 ms full-stream retry, replay the previous-round four-candidate fused
+    // decode on the same raw IQ (integer grid only).  This is exactly the M0
+    // fused path, so an edge case in the new metric/decoder combination can
+    // never cost a packet the old fused path could decode.
+    if (known_hop && !sfo_track) {
+        detail::PayloadSubBucket soft_bucket(sub, &PayloadSubTimers::soft_us);
+        rxfusion::Timings t4;
+        if (rxfusion::correlate_payload_fused_cfo(
+                rx, n, cir.cir_filter_taps.data(), tap_count, chip_start,
+                rxfusion::kSamplesPerChip, payload_start,
+                scratch.fused.pn.data(), symbols, pol, rot, cfo_eff,
+                scratch.fused.metrics, scratch.fused.kernel, &t4,
+                /*write_complex=*/false)) {
+            std::vector<int8_t> g0_4, g1_4;
+            rxfusion::decide_bpm(scratch.fused.metrics, g0_4, g1_4);
+            if (detail::decode_payload_hard(*g0p, *g1p, g0_4, g1_4, psdu_bits,
+                                            out, sub, &scratch.fused.decode) &&
+                out.fcs_pass) {
+                stamp_decode();
+                return true;
+            }
+            std::vector<int8_t> sg0, sg1;
+            std::vector<float> l0, l1;
+            rxfusion::decide_bpm_soft(scratch.fused.metrics, sg0, sg1, l0, l1);
+            if (llr0p && llr1p &&
+                detail::decode_payload_soft(*llr0p, *llr1p, l0, l1, psdu_bits,
+                                            out, sub,
+                                            &scratch.fused.decode) &&
+                out.fcs_pass) {
+                stamp_decode();
+                return true;
+            }
         }
     }
     stamp_decode();

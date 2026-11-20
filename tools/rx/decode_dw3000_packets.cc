@@ -4,6 +4,7 @@
 #include <gnuradio/uwb/uwb_demod_sfd.h>
 #include <gnuradio/uwb/uwb_rational_resampler_core.h>
 #include <gnuradio/uwb/uwb_resample_window.h>
+#include "../../gr-uwb/apps/bpm_ablation_env.h"
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -76,6 +77,9 @@ try {
             p.timing_max_backtrack_symbols = 128;
         }
     }
+    // Runtime ablation level (UWB_BPM_LEVEL=0..4).  Unset keeps the legacy
+    // on-demand defaults above; M0 forces the previous fused baseline.
+    apps::apply_bpm_ablation(p, true);
     const int64_t pre = std::stoll(argv[7]);
     const size_t n = std::stoull(argv[8]);
     if (pre < 0 || n == 0 || n > 10000000 || p.preamble_repetitions == 0)

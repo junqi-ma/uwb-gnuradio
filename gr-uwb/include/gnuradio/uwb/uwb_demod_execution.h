@@ -277,11 +277,28 @@ inline PacketExecutionPlan plan_packet_execution(
         const double spc_hat = (timing.measured_period > 0.0)
             ? timing.measured_period / static_cast<double>(kQm35ChipsPerSymbol)
             : 0.0;
-        plan.integer_grid_ok = integer_chip_grid(spc_hat, profile.fused_gate_ppm * 1e-6);
+        const bool int_ok =
+            integer_chip_grid(spc_hat, profile.fused_gate_ppm * 1e-6);
+        if (profile.rx_fused_sfo_track) {
+            // The fused SFO path keeps the on-demand prefix and tracks the
+            // fractional payload phase with the 8-bin CIR bank.  Accept the
+            // full +-65 ppm the bank is sized for; a larger offset still falls
+            // back to the legacy fractional full stream.  On an integer grid
+            // the SFO machinery is pure overhead, so it is switched off.
+            const double lo = 2.0 * (1.0 - 65e-6);
+            const double hi = 2.0 * (1.0 + 65e-6);
+            const bool sfo_ok = spc_hat >= lo && spc_hat <= hi;
+            plan.integer_grid_ok = int_ok || sfo_ok;
+            if (plan.integer_grid_ok && int_ok)
+                plan.effective_profile.rx_fused_sfo_track = false;
+        } else {
+            plan.integer_grid_ok = int_ok;
+        }
         if (!plan.integer_grid_ok) {
             plan.effective_profile.rx_softchip_on_demand = false;
             plan.effective_profile.rx_fused_payload_cmf = false;
             plan.effective_profile.rx_fused_phr_cmf = false;
+            plan.effective_profile.rx_fused_sfo_track = false;
         }
     }
     return plan;

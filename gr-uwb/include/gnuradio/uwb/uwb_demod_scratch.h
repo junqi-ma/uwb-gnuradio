@@ -6,6 +6,7 @@
 #include <gnuradio/uwb/uwb_rx_cfo_opt.h>
 #include <gnuradio/uwb/uwb_rx_sync_opt.h>
 #include <gnuradio/uwb/uwb_rx_fused_cmf.h>
+#include <gnuradio/uwb/uwb_rx_phase_sfo.h>
 
 #include <algorithm>
 #include <array>
@@ -182,6 +183,14 @@ struct DemodScratch {
         std::vector<float> llr0;
         std::vector<float> llr1;
         detail::PayloadDecodeWorkspace decode;
+        // Known-hop 2-candidate metrics (M1+).  m0/m1 are the signed real
+        // metrics; z0/z1 stay empty on the payload path (write_complex=false).
+        rxfusion::Metrics2 metrics2;
+        bool metrics2_valid = false;
+        // Payload m0/m1 projection when joint ML runs on the 4-candidate
+        // metrics (known-hop off).  Reserved once; never allocated per packet.
+        std::vector<float> biorth_m0;
+        std::vector<float> biorth_m1;
 
         void reset_metrics()
         {
@@ -207,6 +216,10 @@ struct DemodScratch {
         bool decisions_valid = false;
         rxfusion::Metrics metrics;
         rxfusion::Scratch kernel;
+        // Known-hop PHR metrics + the 21 raw complex pilot values (z0/z1)
+        // consumed by the PHR phase/CFO refinement.
+        rxfusion::Metrics2 metrics2;
+        bool metrics2_valid = false;
 
         void reset_decisions()
         {
@@ -218,10 +231,22 @@ struct DemodScratch {
         }
     } fused_phr;
 
+    // Fractional-phase CIR bank for fused SFO tracking (8 bins x tap_count).
+    // Built per packet from cir_filter_taps only when the SFO switch is on.
+    std::vector<std::complex<float>> frac_cir_bank;
+    // PHR 21-symbol pilot refinement for the current packet.
+    rxopt::PhrPhaseRefineResult phr_refine;
+
     // Packet decisions cannot survive a retry/new packet. Template caches and
     // allocated workspace capacities intentionally survive. Other phase state
     // is reset by its owning stage, preserving legacy initialization order.
-    void begin_packet() { fused_phr.reset_decisions(); }
+    void begin_packet()
+    {
+        fused_phr.reset_decisions();
+        fused.metrics2_valid = false;
+        fused_phr.metrics2_valid = false;
+        phr_refine = rxopt::PhrPhaseRefineResult{};
+    }
 
     void reserve(size_t n)
     {
@@ -277,6 +302,15 @@ struct DemodScratch {
             (rxfusion::kMaxTapCount +
              rxfusion::kSamplesPerChip *
                  (rxfusion::kPhrChipsPerBurst - 1)));
+        frac_cir_bank.reserve(rxopt::kSfoPhaseBins * rxfusion::kMaxTapCount);
+        fused.metrics2.m0.reserve(2048);
+        fused.metrics2.m1.reserve(2048);
+        fused.biorth_m0.reserve(2048);
+        fused.biorth_m1.reserve(2048);
+        fused_phr.metrics2.m0.reserve(rxfusion::kPhrSymbols);
+        fused_phr.metrics2.m1.reserve(rxfusion::kPhrSymbols);
+        fused_phr.metrics2.z0.reserve(rxfusion::kPhrSymbols);
+        fused_phr.metrics2.z1.reserve(rxfusion::kPhrSymbols);
     }
 };
 

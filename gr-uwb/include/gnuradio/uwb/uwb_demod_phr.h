@@ -400,7 +400,8 @@ inline bool stage_phr_fused_cmf(const std::complex<float>* rx,
         return false;
     if (tap_count != profile.cir_pre_samples + profile.cir_post_samples)
         return false;
-    if (!integer_chip_grid_at(cir.samples_per_chip,
+    if (!profile.rx_fused_sfo_track &&
+        !integer_chip_grid_at(cir.samples_per_chip,
                               rxfusion::kSamplesPerChip,
                               profile.fused_gate_ppm * 1e-6))
         return false;
@@ -413,6 +414,17 @@ inline bool stage_phr_fused_cmf(const std::complex<float>* rx,
     const int64_t chip_start =
         timing.preamble_start_sample + static_cast<int64_t>(tap_count) -
         static_cast<int64_t>(profile.cir_pre_samples) - 1;
+    // Under SFO the chip grid accumulates (spc - 2) samples per chip, so the
+    // PHR window origin computed on the nominal 2-sample grid is off by
+    // phr_start*(spc-2) samples.  Shift the integer origin by the rounded
+    // drift; the residual (< 0.5 sample) is well inside the 64-chip PHR burst
+    // tolerance.  The payload uses the exact fractional bank instead.
+    int64_t phr_chip_start = chip_start;
+    if (profile.rx_fused_sfo_track && cir.samples_per_chip > 0.0) {
+        const double drift =
+            static_cast<double>(phr_start) * (cir.samples_per_chip - 2.0);
+        phr_chip_start += static_cast<int64_t>(std::llround(drift));
+    }
     if (chip_start < 0 || static_cast<int64_t>(n) <= chip_start)
         return false;
 
@@ -425,27 +437,149 @@ inline bool stage_phr_fused_cmf(const std::complex<float>* rx,
             .count());
 
     const int8_t pol = (ns_sfd.polarity < 0) ? -1 : 1;
+    const double spc_phr =
+        (cir.samples_per_chip > 0.0) ? cir.samples_per_chip
+                                     : static_cast<double>(rxfusion::kSamplesPerChip);
     rxfusion::Timings timings;
-    if (!rxfusion::correlate_phr(
-            scratch.derotated.data(), n, cir.cir_filter_taps.data(), tap_count,
-            chip_start, rxfusion::kSamplesPerChip, phr_start,
-            scratch.fused_phr.pn.data(), pol, scratch.softchip.rot,
-            scratch.fused_phr.metrics, scratch.fused_phr.kernel, &timings))
-        return false;
+    rxfusion::Metrics2& pm = scratch.fused_phr.metrics2;
+    if (profile.rx_bpm_known_hop) {
+        // Known-hop 2-candidate PHR: the hop comes from pn[64*s], so only the
+        // two BPM halves are correlated.  z0/z1 are raw complex values on the
+        // same phase basis as Metrics::complex_value, ready for the pilot
+        // refinement below.
+        if (!rxfusion::correlate_phr_known_hop(
+                scratch.derotated.data(), n, cir.cir_filter_taps.data(),
+                tap_count, phr_chip_start, rxfusion::kSamplesPerChip, phr_start,
+                scratch.fused_phr.pn.data(), pol, scratch.softchip.rot, pm,
+                scratch.fused_phr.kernel, &timings))
+            return false;
+        scratch.fused_phr.metrics2_valid = true;
+    } else {
+        if (!rxfusion::correlate_phr(
+                scratch.derotated.data(), n, cir.cir_filter_taps.data(),
+                tap_count, phr_chip_start, rxfusion::kSamplesPerChip, phr_start,
+                scratch.fused_phr.pn.data(), pol, scratch.softchip.rot,
+                scratch.fused_phr.metrics, scratch.fused_phr.kernel,
+                &timings))
+            return false;
+        for (float v : scratch.fused_phr.metrics.signed_value) {
+            if (!std::isfinite(v))
+                return false;
+        }
+        // Project the four candidates onto the two known-hop metrics by
+        // picking the hop with the larger half energy.  The 21 raw complex
+        // values are kept for the pilot refinement.
+        pm.reset(rxfusion::kPhrSymbols, true);
+        const auto& sv = scratch.fused_phr.metrics.signed_value;
+        const auto& cv = scratch.fused_phr.metrics.complex_value;
+        for (size_t s = 0; s < rxfusion::kPhrSymbols; ++s) {
+            const float h0 = std::max(std::abs(sv[4 * s + 0]),
+                                      std::abs(sv[4 * s + 1]));
+            const float h1 = std::max(std::abs(sv[4 * s + 2]),
+                                      std::abs(sv[4 * s + 3]));
+            const size_t h = (h1 > h0) ? 1 : 0;
+            pm.m0[s] = sv[4 * s + 2 * h + 0];
+            pm.m1[s] = sv[4 * s + 2 * h + 1];
+            pm.z0[s] = cv[4 * s + 2 * h + 0];
+            pm.z1[s] = cv[4 * s + 2 * h + 1];
+        }
+        scratch.fused_phr.metrics2_valid = true;
+    }
     template_us = plan_us + timings.template_update_us;
     correlate_us = timings.correlate_us;
-    for (float v : scratch.fused_phr.metrics.signed_value) {
-        if (!std::isfinite(v))
-            return false;
+
+    // Decisions and LLRs from the two known-hop metrics.
+    auto& pg0 = scratch.fused_phr.g0;
+    auto& pg1 = scratch.fused_phr.g1;
+    auto& pll0 = scratch.fused_phr.llr0;
+    auto& pll1 = scratch.fused_phr.llr1;
+    pg0.resize(rxfusion::kPhrSymbols);
+    pg1.resize(rxfusion::kPhrSymbols);
+    pll0.resize(rxfusion::kPhrSymbols);
+    pll1.resize(rxfusion::kPhrSymbols);
+    for (size_t s = 0; s < rxfusion::kPhrSymbols; ++s) {
+        const float a = pm.m0[s];
+        const float b = pm.m1[s];
+        pg0[s] = (std::abs(a) >= std::abs(b)) ? 0 : 1;
+        const float best = (pg0[s] == 0) ? a : b;
+        pg1[s] = (best < 0.0f) ? 1 : 0;
+        pll0[s] = std::abs(a) - std::abs(b);
+        pll1[s] = std::max(a, b) - std::max(-a, -b);
     }
 
     const auto t_decode0 = std::chrono::steady_clock::now();
-    rxfusion::decide_bpm_soft(scratch.fused_phr.metrics, scratch.fused_phr.g0,
-                              scratch.fused_phr.g1, scratch.fused_phr.llr0,
-                              scratch.fused_phr.llr1);
-    const bool decoded = decode_phr_decisions_soft(
-        scratch.fused_phr.llr0, scratch.fused_phr.llr1, prefix_soft_chips,
-        ns_sfd, out);
+    const bool decoded =
+        profile.rx_bpm_joint_ml
+            ? detail::decode_phr_biorth_soft(
+                  pm.m0.data(), pm.m1.data(), prefix_soft_chips, ns_sfd, out)
+            : decode_phr_decisions_soft(pll0, pll1, prefix_soft_chips, ns_sfd,
+                                        out);
+
+    // PHR pilot refinement: only after a valid PHR decode, and only when the
+    // 21 winning complex pilot values are available.  A failed coherence gate
+    // leaves `applied=false` and the payload keeps the original rotation.
+    if (decoded && profile.rx_phr_phase_refine &&
+        scratch.fused_phr.metrics2_valid) {
+        auto& z0 = pm.z0;
+        auto& z1 = pm.z1;
+        for (size_t s = 0; s < rxfusion::kPhrSymbols; ++s) {
+            const std::complex<float> win =
+                (pg0[s] == 0) ? z0[s] : z1[s];
+            z0[s] = win; // alias the winning half into the pilot slot
+        }
+        const double phr_symbol_samples =
+            static_cast<double>(rxfusion::kPhrChipsPerSymbol) * spc_phr;
+        // Last PHR symbol window start -> payload s=0 window start is one PHR
+        // symbol; the refine helper adds the centre-symbol offset itself.
+        scratch.phr_refine = rxopt::refine_phase_cfo_from_phr(
+            z0.data(), rxfusion::kPhrSymbols, pg1.data(), pol,
+            scratch.softchip.rot, phr_symbol_samples, phr_symbol_samples);
+        // Reliability gate: the lag-1 phase-difference slope is extrapolated
+        // over ~11 PHR symbols, so a noisy estimate hurts marginal packets.
+        // Only accept the correction when the polarity-stripped adjacent
+        // products are nearly collinear, i.e. the pilot really follows one
+        // phase ramp.  UWB_BPM_REFINE_PROD overrides the 0.997 default.
+        double prod_re = 0.0, prod_abs = 0.0;
+        for (size_t k = 0; k + 1 < rxfusion::kPhrSymbols; ++k) {
+            const float s0 = static_cast<float>(
+                (1 - 2 * static_cast<int>(pg1[k])) *
+                static_cast<int>(pol));
+            const float s1 = static_cast<float>(
+                (1 - 2 * static_cast<int>(pg1[k + 1])) *
+                static_cast<int>(pol));
+            const std::complex<float> p = (s1 * z0[k + 1]) *
+                                          std::conj(s0 * z0[k]);
+            prod_re += p.real();
+            prod_abs += std::abs(p);
+        }
+        const double prod = (prod_abs > 0.0) ? prod_re / prod_abs : 0.0;
+        double prod_gate = 0.997;
+        if (const char* g = std::getenv("UWB_BPM_REFINE_PROD"))
+            prod_gate = std::atof(g);
+        if (prod < prod_gate) {
+            scratch.phr_refine.applied = false;
+            scratch.phr_refine.rot_at_payload_start = scratch.softchip.rot;
+            scratch.phr_refine.delta_cfo_w_rad = 0.0;
+        }
+        if (scratch.phr_refine.applied) {
+            // Re-express the 21 PHR metrics in the refined payload phase so
+            // the joint ML Viterbi sees one consistent frame.
+            const std::complex<float> corr =
+                std::conj(scratch.softchip.rot) *
+                scratch.phr_refine.rot_at_payload_start;
+            for (size_t s = 0; s < rxfusion::kPhrSymbols; ++s) {
+                const std::complex<float> y0 =
+                    scratch.softchip.rot * pm.z0[s];
+                const std::complex<float> y1 =
+                    scratch.softchip.rot * pm.z1[s];
+                const float r0 = (corr * y0).real();
+                const float r1 = (corr * y1).real();
+                pm.m0[s] = (pol < 0) ? -r0 : r0;
+                pm.m1[s] = (pol < 0) ? -r1 : r1;
+            }
+        }
+    }
+
     // Only publish the cache once the decode succeeded: a failed PHR must not
     // leave decisions/LLRs that a later stage could mistake for this packet's.
     scratch.fused_phr.decisions_valid = decoded;

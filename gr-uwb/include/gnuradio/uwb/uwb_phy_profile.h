@@ -211,6 +211,16 @@ struct Qm35825Profile {
     // and the on-demand prefix; it shortens the prefix to the SYNC/SFD/PHR
     // range.  Default off.
     bool rx_fused_phr_cmf = false;
+    // ---- BPM-BPSK algorithm switches (ablation levels M1..M4) ------------
+    // All default off so existing callers and the M0 baseline are unchanged.
+    // Every switch has a safe fallback: a failed fused attempt still returns
+    // to the legacy four-candidate + full-stream retry.
+    bool rx_bpm_known_hop = false;        // 2 candidates from pn[8*s] sign
+    bool rx_bpm_joint_ml = false;         // bi-orthogonal ML CL-3 Viterbi
+    bool rx_bpm_terminated_viterbi = false; // force CL-3 final state 0
+    bool rx_bpm_ddpll = false;            // symbol-level DD-PLL phase track
+    bool rx_phr_phase_refine = false;     // PHR 21-symbol pilot refine
+    bool rx_fused_sfo_track = false;      // fractional CIR bank SFO tracking
     // Admission tolerance for the integer chip grid, in ppm of the sample
     // clock.  Both the AVX2 soft-chip kernel and the fused CMF index samples
     // on an exact kSamplesPerChip grid, so a clock offset that accumulates more

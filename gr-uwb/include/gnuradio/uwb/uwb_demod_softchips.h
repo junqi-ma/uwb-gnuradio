@@ -333,8 +333,15 @@ inline bool stage_softchips_from_cir(const std::complex<float>* rx,
     const int64_t spc_i = std::max<int64_t>(1, std::llround(spc));
     // Integer grid unless the clock offset would drift the grid past the
     // correlation tolerance across the longest frame (see integer_chip_grid).
+    // With fused SFO tracking the on-demand prefix may run on the fractional
+    // grid: only the payload needs the fractional-phase CMF, but the prefix
+    // path already supports interpolation, so admit it instead of falling
+    // back to the full stream.  The extension path reuses the prefix and must
+    // not be rejected for starting inside the fractional stream.
     const bool fractional_grid =
         !integer_chip_grid(spc, profile.fused_gate_ppm * 1e-6);
+    // Only a genuinely fractional grid needs the SFO-specific phase path.
+    const bool sfo_active = profile.rx_fused_sfo_track && fractional_grid;
     const size_t num_chips =
         static_cast<size_t>(std::floor(
             static_cast<double>(last_pos - chip_start) / spc)) + 1;
@@ -422,9 +429,11 @@ inline bool stage_softchips_from_cir(const std::complex<float>* rx,
         }
     }
     // The on-demand experiment is limited to the production integer-grid,
-    // full-tap kernel.  Fractional SFO grids, sparse RAKE and bypass keep the
-    // complete legacy path, so their semantics are not changed or rounded.
-    if (on_demand && (fractional_grid || bypass_filter || rake_k > 0))
+    // full-tap kernel.  The fused SFO path explicitly admits the fractional
+    // grid because its payload decoder has a fractional-phase CIR bank.
+    if (on_demand &&
+        ((fractional_grid && !sfo_active) ||
+         bypass_filter || rake_k > 0))
         return false;
 
     // Only NS-SFD still consumes a soft-chip stream on the fused PHR path.
@@ -432,7 +441,21 @@ inline bool stage_softchips_from_cir(const std::complex<float>* rx,
     const bool skip_sync_fir = on_demand && !extending &&
         profile.rx_fused_phr_cmf && profile.rx_fused_payload_cmf && spc_i == 2;
     const size_t sync_end = profile.preamble_repetitions * kQm35ChipsPerSymbol;
-    const size_t fir_first = skip_sync_fir && sync_end > 8 ? sync_end - 8 : 0;
+    // Phase alignment reads the last min(32, preamble) SYNCs.  The plain
+    // integer path can restore that gain from estimate_cir's tail average;
+    // under SFO the tail average is smeared by the fractional drift, so the
+    // SFO path instead keeps those SYNC chips in `fir_out` and reuses the
+    // normal gain estimator on the fractional grid.
+    const size_t phase_sync_chips =
+        (profile.preamble_repetitions -
+         std::min<size_t>(32, profile.preamble_repetitions)) *
+        kQm35ChipsPerSymbol;
+    const size_t fir_first =
+        skip_sync_fir
+            ? (sfo_active
+                   ? std::min(sync_end > 8 ? sync_end - 8 : 0, phase_sync_chips)
+                   : (sync_end > 8 ? sync_end - 8 : 0))
+            : 0;
     if (fir_first >= num_chips)
         return false;
     const bool sparse_rake = rake_k > 0 && rake_k < tap_count;
@@ -464,7 +487,7 @@ inline bool stage_softchips_from_cir(const std::complex<float>* rx,
             }
             return clipped_chip(p);
         };
-        for (size_t i = 0; i < num_chips; ++i) {
+        for (size_t i = skip_sync_fir ? fir_first : 0; i < num_chips; ++i) {
             const double pd = static_cast<double>(chip_start) +
                               static_cast<double>(i) * spc;
             const int64_t p0 = static_cast<int64_t>(std::floor(pd));
@@ -473,7 +496,10 @@ inline bool stage_softchips_from_cir(const std::complex<float>* rx,
             const std::complex<float> y1 = dot_at(p0 + 1);
             fir_out[i] = y0 + frac * (y1 - y0);
         }
-        checked = num_chips; // fractional path completed the whole stream
+        checked = extending ? std::min(num_chips, begin_chip) : num_chips;
+        // The fractional loop writes the whole requested range; when this is
+        // an extension the prefix is already normalized and only the new tail
+        // is consumed below.
     } else if (chip_start < fwd) {
         const int64_t gap = fwd - chip_start;
         checked = std::min(num_chips,
@@ -598,7 +624,7 @@ inline bool stage_softchips_from_cir(const std::complex<float>* rx,
     if (extending) {
         // Frozen by the prefix pass: phase alignment runs once per packet.
         rot = scratch.softchip.rot;
-    } else if (skip_sync_fir) {
+    } else if (skip_sync_fir && !sfo_active) {
         const auto phase_begin = std::chrono::steady_clock::now();
         std::complex<float> gain{};
         bool gain_ok = false;

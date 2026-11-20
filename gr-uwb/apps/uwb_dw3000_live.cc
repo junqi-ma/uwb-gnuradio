@@ -22,6 +22,7 @@
 // scheduler-thread only).  DSP workers never touch the USRP or the lock; they
 // push bounded observations back.
 #include "uwb_live_packet_processor.h"
+#include "bpm_ablation_env.h"
 #include <gnuradio/uwb/uwb_demod_grid.h>
 #include <gnuradio/uwb/uwb_fixed_tone_cancel_source.h>
 #include <gnuradio/uwb/uwb_hrp_mod_core.h>
@@ -574,6 +575,8 @@ struct Workers {
             acq.rx_softchip_on_demand = o.ondemand_resolved;
             acq.rx_fused_payload_cmf = o.fused;
             acq.rx_fused_phr_cmf = o.fused;
+            // Runtime ablation level (UWB_BPM_LEVEL=0..4); unset keeps --fused.
+            apps::apply_bpm_ablation(acq, true);
             acq.fused_gate_ppm = o.fused_gate_ppm;
             acq.cfo_refit_mode = (o.cfo_refit == "auto") ? 1
                                : (o.cfo_refit == "skip") ? 2 : 0;
