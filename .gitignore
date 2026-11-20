@@ -74,7 +74,36 @@ docs/performance/data_chain_workers*/raw/
 docs/performance/data_single_worker_task_detail*/raw/
 
 # Local capture dumps under testdata/ (real X410/DW3000 recordings).
-testdata/**/*.sc16
+testdata/**/*sc16*
+testdata/**/*.npy
+testdata/**/*.npz
+
+# 2026-11-15/18 fixed-tone and SNR live probes: local windows and summaries.
+testdata/x410_fixed_tone_live_20261115/decode_windows
+testdata/x410_fixed_tone_live_20261115/diag_cfo
+testdata/x410_fixed_tone_live_20261115/first_window.cf32
+testdata/x410_snr_20261118/
+
+# Local experiment dumps: CIR/IQ blobs and logs from bench runs stay local.
+/logs/
+/out/
+
+# Scratch outputs at repo root.
+/probe_tmp.txt
+/frame_summary.csv
+/all_frames_cir.mat
+
+# 2026-11-19 9700X AVX-512 round: raw logs/JSON stay local, only the
+# report (AVX512实机验证结果_9700X_2026-11-19.md) is versioned.
+docs/performance/data_avx512_9700x_20261119/
+
+# 2026-11-16 failure-window dumps: regenerable, ~780 MiB total.
+docs/performance/d5p2m_sfd_failed_20_20261116/
+docs/performance/d5p2m_timing_failed_20_20261116/
+docs/performance/failure_windows_20261116/
+docs/performance/sfd_failed_20_20261116/
+docs/performance/sfd_failed_remaining_20261116/
+docs/performance/timing_failed_12_20261116/
 
 # Local delegated sessions and independent verification artifacts
 .opencode-task/
