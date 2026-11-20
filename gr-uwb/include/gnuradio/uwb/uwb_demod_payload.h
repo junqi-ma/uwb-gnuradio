@@ -471,20 +471,14 @@ inline bool stage_payload_fused_cmf(const std::complex<float>* rx,
         }
     }
 
-    // Attempt 1 — the unchanged hard-decision path.  On success this is the
-    // whole cost of a high-SNR packet: nothing below runs.
-    const bool decoded = detail::decode_payload_hard(
-        *g0p, *g1p, g0, g1, psdu_bits, out, sub, &scratch.fused.decode);
-    if (decoded && out.fcs_pass) {
-        stamp_decode();
-        return true;
-    }
-
-    // Attempt 2 (M2) — joint bi-orthogonal ML Viterbi on the same metrics.
+    // Attempt 1 (M2) — joint bi-orthogonal ML Viterbi on the same metrics.
     // The PHR metrics come from the fused PHR stage (already in the same
-    // rotation frame when the pilot refinement ran).  If the ML attempt fails
-    // its FCS the legacy split-LLR soft attempt below still runs, so the
-    // switch can never lose a packet the old path could decode.
+    // rotation frame when the pilot refinement ran).  One joint Viterbi costs
+    // ~8-10 us per 1208-symbol payload — about the same as the hard-decision
+    // round it replaces — so it runs first: at low SNR the hard attempt almost
+    // always fails and used to be paid for nothing.  A failed FCS falls
+    // through to the unchanged hard and split-LLR soft attempts below, so the
+    // switch can never lose a packet the legacy path could decode.
     if (joint_ml && scratch.fused_phr.metrics2_valid &&
         scratch.fused_phr.metrics2.m0.size() == 21) {
         const float* bm0 = nullptr;
@@ -519,6 +513,16 @@ inline bool stage_payload_fused_cmf(const std::complex<float>* rx,
             stamp_decode();
             return true;
         }
+    }
+
+    // Attempt 2 — the unchanged hard-decision path.  It is the only route for
+    // packets without fused PHR metrics and the first fallback whenever joint
+    // ML is disabled or misses.
+    const bool decoded = detail::decode_payload_hard(
+        *g0p, *g1p, g0, g1, psdu_bits, out, sub, &scratch.fused.decode);
+    if (decoded && out.fcs_pass) {
+        stamp_decode();
+        return true;
     }
 
     // Attempt 3 — in-place soft-decision retry on the SAME four signed metrics.

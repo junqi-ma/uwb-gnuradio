@@ -1780,21 +1780,36 @@ inline bool decode_payload_biorth_soft(const float* m0p,
     if (enable_clip)
         clip_biorth_metrics(m0j.data(), m1j.data(), total);
 
-    Cl3TrellisTrace tr;
+    // First attempt: the non-tracing Viterbi is bit-identical to the tracing
+    // one (QA-checked) but skips the ~24 KB of diff/alt scratch that only the
+    // rescue needs.  A clean packet therefore pays one Viterbi pass instead of
+    // a Viterbi pass plus a full margin trace build, which keeps this attempt
+    // as cheap as the plain hard-decision path it replaces.
+    std::vector<int8_t> local_bits;
+    std::vector<int8_t>& bits = ws ? ws->decoded : local_bits;
     const auto t_vit = std::chrono::steady_clock::now();
-    vitdec_cl3_biorth_trace(m0j.data(), m1j.data(), total, tr, terminated);
+    vitdec_cl3_biorth(m0j.data(), m1j.data(), total, bits, terminated);
     if (sub)
         sub->viterbi_us += payload_elapsed_us(t_vit);
-    if (tr.bits.size() < total)
+    if (bits.size() < total)
         return false;
 
     std::vector<int8_t> local_rs_cw;
     std::vector<int8_t>& rs_cw = ws ? ws->rs_cw : local_rs_cw;
-    rs_cw.assign(tr.bits.begin() + 19, tr.bits.begin() + (total - 2));
+    rs_cw.assign(bits.begin() + 19, bits.begin() + (total - 2));
     if (rs_cw.size() != payload_symbols)
         return false;
     if (finish_rs_crc_payload(rs_cw, psdu_bits, out, sub, ws) && out.fcs_pass)
         return true;
+
+    // Missed: rebuild the trace (margins / states / lose_u) for the rescue.
+    Cl3TrellisTrace tr;
+    const auto t_trace = std::chrono::steady_clock::now();
+    vitdec_cl3_biorth_trace(m0j.data(), m1j.data(), total, tr, terminated);
+    if (sub)
+        sub->viterbi_us += payload_elapsed_us(t_trace);
+    if (tr.bits.size() < total)
+        return out.ok;
 
     PayloadResult rescued;
     if (rescue_payload_biorth(m0j.data(), m1j.data(), total, psdu_bits, tr,

@@ -1685,6 +1685,70 @@ BOOST_AUTO_TEST_CASE(known_hop_matches_four_candidate)
     BOOST_CHECK_EQUAL(full_mismatch, size_t(0));
 }
 
+BOOST_AUTO_TEST_CASE(known_hop_inline_template_merge_is_bit_exact)
+{
+    // dot2_fused_fixed52() builds the merged 52-point template inside the MAC
+    // loop.  It must reproduce build_fused_symbol_template() followed by
+    // dot2_shared_fixed52() bit for bit, otherwise the known-hop metrics would
+    // drift from the verified materialised-template kernel (and from the
+    // 4-candidate reference).
+    std::mt19937 rng(987);
+    std::normal_distribution<float> nd(0.0f, 1.0f);
+    std::vector<cf> taps(kTap);
+    for (auto& h : taps)
+        h = cf(nd(rng), nd(rng));
+    cf chip_phase[rxfusion::kChipsPerBurst];
+    std::vector<cf> h_w(kTap);
+    rxfusion::build_fused_tap_ramp(h_w.data(), taps.data(), kTap, 0.0,
+                                   chip_phase);
+    std::vector<cf> lut_lo(rxfusion::kFusedHalfTemplates *
+                           rxfusion::kFusedHalfSpan);
+    std::vector<cf> lut_hi(lut_lo.size());
+    rxfusion::build_fused_half_lut(lut_lo.data(), lut_hi.data(), h_w.data(),
+                                   chip_phase);
+
+    std::vector<cf> rx(4 * rxfusion::kFusedFastLen + 16);
+    for (auto& x : rx)
+        x = cf(nd(rng), nd(rng));
+
+    std::complex<float> tpl[rxfusion::kFusedFastLen];
+    size_t checked = 0;
+    for (size_t off = 0; off < 7; ++off) {
+        const cf* x0 = rx.data() + off;
+        const cf* x1 = x0 + 64;
+        for (size_t idx_lo = 0; idx_lo < rxfusion::kFusedHalfTemplates;
+             ++idx_lo) {
+            for (size_t idx_hi = 0; idx_hi < rxfusion::kFusedHalfTemplates;
+                 ++idx_hi) {
+                for (int sgn = 0; sgn < 4; ++sgn) {
+                    const float sign_lo = (sgn & 1) ? -1.0f : 1.0f;
+                    const float sign_hi = (sgn & 2) ? -1.0f : 1.0f;
+                    rxfusion::build_fused_symbol_template(
+                        tpl, lut_lo.data(), lut_hi.data(), idx_lo, sign_lo,
+                        idx_hi, sign_hi);
+                    cf ref[2];
+                    rxfusion::dot2_shared_fixed52(x0, x1, tpl, ref);
+                    cf got[2];
+                    rxfusion::dot2_fused_fixed52(
+                        x0, x1, lut_lo.data(), lut_hi.data(), idx_lo,
+                        sign_lo, idx_hi, sign_hi, got);
+#if UWB_CIR_FIR_HAVE_AVX2
+                    BOOST_CHECK_EQUAL(got[0].real(), ref[0].real());
+                    BOOST_CHECK_EQUAL(got[0].imag(), ref[0].imag());
+                    BOOST_CHECK_EQUAL(got[1].real(), ref[1].real());
+                    BOOST_CHECK_EQUAL(got[1].imag(), ref[1].imag());
+#else
+                    BOOST_CHECK_CLOSE(got[0].real(), ref[0].real(), 1e-5);
+                    BOOST_CHECK_CLOSE(got[1].real(), ref[1].real(), 1e-5);
+#endif
+                    ++checked;
+                }
+            }
+        }
+    }
+    BOOST_CHECK_EQUAL(checked, size_t(7 * 8 * 8 * 4));
+}
+
 BOOST_AUTO_TEST_CASE(known_hop_ddpll_tracks_residual_cfo)
 {
     for (double cfo_hz : { 2000.0, -3500.0 }) {

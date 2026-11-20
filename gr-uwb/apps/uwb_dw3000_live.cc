@@ -390,6 +390,8 @@ struct Reporter {
                  // which payload backend ran and therefore how much of
                  // st_payload the children actually cover.
                  << " pay_soft=" << r->stage_payload_soft_us
+                 << " pay_templ=" << r->stage_fused_template_us
+                 << " pay_corr=" << r->stage_fused_correlate_us
                  << " pay_vit=" << r->stage_payload_viterbi_us
                  << " pay_rs=" << r->stage_payload_rs_us
                  << " pay_crc=" << r->stage_payload_crc_us

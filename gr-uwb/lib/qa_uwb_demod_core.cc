@@ -4717,6 +4717,50 @@ BOOST_AUTO_TEST_CASE(test_w1_joint_ml_exact_counterexample)
                                                << " exact ACS ties");
 }
 
+BOOST_AUTO_TEST_CASE(test_w1_joint_ml_non_trace_matches_trace)
+{
+    using namespace gr::uwb::demod::core::detail;
+
+    // decode_payload_biorth_soft() runs the non-tracing Viterbi first (no
+    // 24 KB diff/alt scratch) and only rebuilds the trace for the rescue.  The
+    // two entry points must therefore agree bit for bit, including the exact
+    // tie behaviour of the strict `<` ACS rule.
+    std::mt19937 rng(20261121u);
+    std::normal_distribution<float> nd(0.0f, 1.0f);
+    size_t sizes_checked = 0;
+    for (size_t N : { size_t(1), size_t(2), size_t(3), size_t(7), size_t(16),
+                      size_t(31), size_t(40), size_t(63), size_t(127),
+                      size_t(1229), size_t(2049) }) {
+        for (int trial = 0; trial < 4; ++trial) {
+            std::vector<float> m0(N), m1(N);
+            for (size_t t = 0; t < N; ++t)
+                if (trial == 0) {
+                    // All-zero metrics: every ACS comparison ties.
+                    m0[t] = 0.0f;
+                    m1[t] = 0.0f;
+                } else {
+                    m0[t] = nd(rng);
+                    m1[t] = nd(rng);
+                    if ((trial == 3) && (rng() % 4u) == 0u)
+                        m0[t] = m1[t]; // partial ties
+                }
+            for (bool terminated : { false, true }) {
+                std::vector<int8_t> fast;
+                vitdec_cl3_biorth(m0.data(), m1.data(), N, fast, terminated);
+                Cl3TrellisTrace tr;
+                vitdec_cl3_biorth_trace(m0.data(), m1.data(), N, tr,
+                                        terminated);
+                BOOST_REQUIRE_EQUAL(fast.size(), N);
+                BOOST_REQUIRE_EQUAL(tr.bits.size(), N);
+                BOOST_CHECK_EQUAL_COLLECTIONS(fast.begin(), fast.end(),
+                                              tr.bits.begin(), tr.bits.end());
+                ++sizes_checked;
+            }
+        }
+    }
+    BOOST_CHECK_EQUAL(sizes_checked, size_t(11 * 4 * 2));
+}
+
 BOOST_AUTO_TEST_CASE(test_w1_joint_ml_awgn_gain_over_split_llr)
 {
     using namespace gr::uwb::demod::core::detail;

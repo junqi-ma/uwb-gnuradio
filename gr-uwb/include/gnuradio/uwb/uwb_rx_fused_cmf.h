@@ -793,6 +793,93 @@ inline void dot2_shared_fixed52(const std::complex<float>* x0,
 #endif
 }
 
+// Two candidates with the merged 52-point template assembled in registers.
+//
+// build_fused_symbol_template() + dot2_shared_fixed52() materialise the 52
+// complex (416 B) merged template through the scratch buffer for every symbol.
+// The store-to-load round trip of a buffer that is written and read once per
+// symbol costs more than the merge itself.  Here the two 44-tap half LUTs stay
+// resident in L1D (16 x 44 complex = 5.6 KB) and the merged group is built
+// from them inside the MAC loop, then consumed by both candidate windows.
+//
+// The 44-tap lo half starts at sample 0 and the hi half at sample 8, so the
+// merged group g is
+//
+//   tpl[g] = sign_lo * lo[g]     (g = 0..10)
+//          + sign_hi * hi[g - 2] (g = 2..12)
+//
+// The group order, the even/odd two-chain reduction and the fused_mac_group
+// arithmetic are the same as dot2_shared_fixed52(), so the output is
+// bit-identical to the materialised-template kernel while removing 13 stores
+// and 13 loads per symbol.  MAC count and IQ traffic are unchanged: unlike a
+// plain split-half dot, the nine groups shared by the two halves are still
+// merged before the multiply instead of being accumulated twice.
+inline void dot2_fused_fixed52(const std::complex<float>* x0,
+                               const std::complex<float>* x1,
+                               const std::complex<float>* lut_lo,
+                               const std::complex<float>* lut_hi,
+                               size_t idx_lo,
+                               float sign_lo,
+                               size_t idx_hi,
+                               float sign_hi,
+                               std::complex<float> out[2])
+{
+#if UWB_CIR_FIR_HAVE_AVX2
+    const float* xp0 = reinterpret_cast<const float*>(x0);
+    const float* xp1 = reinterpret_cast<const float*>(x1);
+    const float* lp =
+        reinterpret_cast<const float*>(lut_lo + idx_lo * kFusedHalfSpan);
+    const float* hp =
+        reinterpret_cast<const float*>(lut_hi + idx_hi * kFusedHalfSpan);
+    const __m256 zero = _mm256_setzero_ps();
+    // Signs are exactly +/-1, so they are applied as a sign-bit XOR.
+    const __m256 mlo = (sign_lo < 0.0f) ? _mm256_set1_ps(-0.0f) : zero;
+    const __m256 mhi = (sign_hi < 0.0f) ? _mm256_set1_ps(-0.0f) : zero;
+    __m256 a0 = zero, a1 = zero;
+    __m256 b0 = zero, b1 = zero;
+
+    auto step = [&](int xo, int lo_off, int hi_off, __m256& acc0,
+                    __m256& acc1) {
+        __m256 t = zero;
+        if (lo_off >= 0)
+            t = _mm256_xor_ps(_mm256_loadu_ps(lp + lo_off), mlo);
+        if (hi_off >= 0)
+            t = _mm256_add_ps(
+                t, _mm256_xor_ps(_mm256_loadu_ps(hp + hi_off), mhi));
+        const __m256 hs = _mm256_permute_ps(t, 0xB1);
+        const __m256 xa = _mm256_loadu_ps(xp0 + xo);
+        const __m256 xb = _mm256_loadu_ps(xp1 + xo);
+        const __m256 ta = _mm256_mul_ps(_mm256_movehdup_ps(xa), hs);
+        acc0 = _mm256_add_ps(
+            acc0, _mm256_fmaddsub_ps(_mm256_moveldup_ps(xa), t, ta));
+        const __m256 tb = _mm256_mul_ps(_mm256_movehdup_ps(xb), hs);
+        acc1 = _mm256_add_ps(
+            acc1, _mm256_fmaddsub_ps(_mm256_moveldup_ps(xb), t, tb));
+    };
+
+    // Same group order and even/odd chain assignment as the materialised
+    // kernel: 0..11 in pairs, then group 12 into the even chain.
+    step(0, 0, -1, a0, a1);
+    step(8, 8, -1, b0, b1);
+    for (int g = 2; g < 10; g += 2) {
+        step(8 * g, 8 * g, 8 * (g - 2), a0, a1);
+        step(8 * (g + 1), 8 * (g + 1), 8 * (g - 1), b0, b1);
+    }
+    step(8 * 10, 8 * 10, 8 * 8, a0, a1);
+    step(8 * 11, -1, 8 * 9, b0, b1);
+    step(8 * 12, -1, 8 * 10, a0, a1);
+
+    out[0] = fused_hsum4(_mm256_add_ps(a0, b0));
+    out[1] = fused_hsum4(_mm256_add_ps(a1, b1));
+#else
+    std::complex<float> tpl[kFusedFastLen];
+    build_fused_symbol_template(tpl, lut_lo, lut_hi, idx_lo, sign_lo, idx_hi,
+                                sign_hi);
+    out[0] = cir_fir::dot_multi_acc8(x0, tpl, kFusedFastLen);
+    out[1] = cir_fir::dot_multi_acc8(x1, tpl, kFusedFastLen);
+#endif
+}
+
 // Window-origin and length validation shared by the payload kernels.  Mirrors
 // correlate_field()'s uint64 bounds logic exactly: symbol 0 starts at `base0`,
 // the furthest candidate window must end at or before sample n-1.
@@ -1678,6 +1765,7 @@ inline bool correlate_payload_known_hop_fused_cfo(
             }
         }
 
+        std::complex<float> m[2];
         if (fast) {
             size_t idx_lo = 0;
             size_t idx_hi = 0;
@@ -1696,8 +1784,10 @@ inline bool correlate_payload_known_hop_fused_cfo(
                 lut_lo = scratch.fused_lut_lo.data();
                 lut_hi = scratch.fused_lut_hi.data();
             }
-            build_fused_symbol_template(tpl, lut_lo, lut_hi, idx_lo, sign_lo,
-                                        idx_hi, sign_hi);
+            // Merge the two half templates in registers instead of writing a
+            // 52-point template to scratch and reading it straight back.
+            dot2_fused_fixed52(rx_raw + win0, rx_raw + win1, lut_lo, lut_hi,
+                               idx_lo, sign_lo, idx_hi, sign_hi, m);
         } else {
             const std::complex<float>* hw =
                 sfo_path ? scratch.kh_h_w.data() + bin * tap_count
@@ -1709,12 +1799,6 @@ inline bool correlate_payload_known_hop_fused_cfo(
                     tpl + kSamplesPerChip * c, hw, tap_count,
                     sgn * chip_phase[c].real(), sgn * chip_phase[c].imag());
             }
-        }
-
-        std::complex<float> m[2];
-        if (fast) {
-            dot2_shared_fixed52(rx_raw + win0, rx_raw + win1, tpl, m);
-        } else {
             m[0] = dot_generic(rx_raw + win0, tpl, len);
             m[1] = dot_generic(rx_raw + win1, tpl, len);
         }
