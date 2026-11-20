@@ -1,7 +1,7 @@
 // Offline paired SIC and bounded, real-clock arrival replay. No GNU Radio block.
 #include <gnuradio/uwb/uwb_fullpacket_sic_core.h>
 #include <gnuradio/uwb/uwb_discrete_cir_sic.h>
-#include "fullpacket_rx_pipeline.h"
+#include <gnuradio/uwb/fullpacket_rx_pipeline.h>
 #include <gnuradio/uwb/uwb_radar_cir_core.h>
 #include <boost/property_tree/ptree.hpp>
 #include <boost/property_tree/json_parser.hpp>

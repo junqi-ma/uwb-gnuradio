@@ -240,7 +240,7 @@ struct Qm35825Profile {
     // NOTE: the diagnostic-only segmented soft-chip FIR replay
     // (rx_diagnose_fir_segments) is NOT part of this public production
     // profile any more; it moved to demod::core::DemodScratch and is driven
-    // only by the experiment wrappers (apps/fullpacket_rx_pipeline.h).
+    // only by the experiment wrappers (include/gnuradio/uwb/fullpacket_rx_pipeline.h).
     // First seeded SYNC refine half-width.  0 keeps the legacy
     // max(256, timing_coarse_stride) radius.  A nonzero value is used only
     // when the caller explicitly supplies it (the SFD-anchored tail profile)

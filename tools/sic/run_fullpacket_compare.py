@@ -101,7 +101,7 @@ def provenance(binary, build, env, rx_pipeline, reconstruction):
         pass
     sources = [ROOT / p for p in (
         "gr-uwb/apps/benchmark_fullpacket_compare.cc",
-        "gr-uwb/apps/fullpacket_rx_pipeline.h",
+        "gr-uwb/include/gnuradio/uwb/fullpacket_rx_pipeline.h",
         "gr-uwb/include/gnuradio/uwb/uwb_fullpacket_sic_core.h",
         "gr-uwb/lib/uwb_fullpacket_sic_core.cc",
         "gr-uwb/lib/uwb_preamble_sic_core.cc",

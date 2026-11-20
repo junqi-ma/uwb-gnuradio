@@ -312,7 +312,7 @@ def main() -> int:
         "sources": {str(path.relative_to(ROOT)): sha256(path)
                     for path in [
                         ROOT / "gr-uwb/apps/benchmark_fullpacket_compare.cc",
-                        ROOT / "gr-uwb/apps/fullpacket_rx_pipeline.h",
+                        ROOT / "gr-uwb/include/gnuradio/uwb/fullpacket_rx_pipeline.h",
                         ROOT / "gr-uwb/include/gnuradio/uwb/uwb_demod_core.h",
                         ROOT / "gr-uwb/include/gnuradio/uwb/uwb_demod_result.h",
                         ROOT / "gr-uwb/include/gnuradio/uwb/uwb_phy_profile.h",

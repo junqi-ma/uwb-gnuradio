@@ -44,7 +44,7 @@ REJECT_REASONS = {"queue_full", "source_late", "cancelled", "not_submitted"}
 SCHEMA = "sic-discrete-cir-experiment/1"
 FIXED_SOURCES = (
     "gr-uwb/apps/benchmark_fullpacket_compare.cc",
-    "gr-uwb/apps/fullpacket_rx_pipeline.h",
+    "gr-uwb/include/gnuradio/uwb/fullpacket_rx_pipeline.h",
     "gr-uwb/include/gnuradio/uwb/uwb_fullpacket_sic_core.h",
     "gr-uwb/lib/uwb_fullpacket_sic_core.cc",
     "gr-uwb/include/gnuradio/uwb/uwb_discrete_cir_sic.h",
@@ -204,7 +204,7 @@ def source_inventory():
             relative = str(path)
         hashes[relative] = sha256(path)
     required = {"gr-uwb/apps/benchmark_fullpacket_compare.cc",
-                "gr-uwb/apps/fullpacket_rx_pipeline.h",
+                "gr-uwb/include/gnuradio/uwb/fullpacket_rx_pipeline.h",
                 "gr-uwb/include/gnuradio/uwb/uwb_discrete_cir_sic.h",
                 "gr-uwb/include/gnuradio/uwb/uwb_fullpacket_sic_core.h",
                 "tools/sic/verify_discrete_cir_compare.py"}

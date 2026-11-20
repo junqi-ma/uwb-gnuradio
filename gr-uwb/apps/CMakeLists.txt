@@ -120,7 +120,14 @@ add_executable(uwb_dw3000_decode ${CMAKE_SOURCE_DIR}/tools/rx/decode_dw3000_pack
 target_link_libraries(uwb_dw3000_decode uwb_core Threads::Threads)
 uwb_simd_apply(uwb_dw3000_decode)
 
-add_executable(uwb_dw3000_live uwb_dw3000_live.cc)
+# Phase 1 split (1E): CLI/config, stdout telemetry and the timed replay source
+# are separate translation units; this target is still one binary.
+add_executable(uwb_dw3000_live
+    uwb_dw3000_live.cc
+    live_rx_config.cc
+    console_reporter.cc
+    live_rx_session.cc
+)
 target_link_libraries(uwb_dw3000_live uwb_native Threads::Threads)
 uwb_simd_apply(uwb_dw3000_live)
 target_compile_definitions(uwb_dw3000_live PRIVATE

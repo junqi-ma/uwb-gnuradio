@@ -56,6 +56,14 @@ install(FILES
     uwb_demod_phr.h
     uwb_demod_payload.h
     uwb_demod_pipeline.h
+    # Phase 1: these were referenced by installed headers but never shipped,
+    # so the installed consumer could not compile uwb_demod_pipeline.h.
+    uwb_autocorr_gate.h
+    uwb_rx_phase_sfo.h
+    uwb_echo_multitx.h
+    uwb_live_packet_processor.h
+    uwb_live_acquisition.h
+    fullpacket_rx_pipeline.h
     uwb_demod_execution.h
     uwb_demod_finalize.h
     # TWR M0 contract layer.  These six headers ARE the public API for

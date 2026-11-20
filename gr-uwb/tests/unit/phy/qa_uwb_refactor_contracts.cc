@@ -7,7 +7,7 @@
 #include <gnuradio/uwb/uwb_demod_finalize.h>
 #include <gnuradio/uwb/uwb_demod_pipeline.h>
 #include <gnuradio/uwb/uwb_resample_window.h>
-#include "../../../apps/uwb_live_packet_processor.h"
+#include <gnuradio/uwb/uwb_live_packet_processor.h>
 #include <condition_variable>
 #include <map>
 #include <mutex>
