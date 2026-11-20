@@ -153,6 +153,7 @@ list(APPEND uwb_core_qa_sources
     qa_uwb_resampler_transposed.cc
     qa_uwb_rx_fused_cmf.cc
     qa_uwb_rx_fused_phr.cc
+    qa_uwb_rx_phase_sfo.cc
     qa_uwb_scheduled_dump_io.cc
     qa_uwb_sic_unified.cc
     qa_uwb_target_lock_core.cc
