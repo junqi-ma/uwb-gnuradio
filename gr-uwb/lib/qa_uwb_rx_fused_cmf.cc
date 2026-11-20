@@ -1387,3 +1387,692 @@ BOOST_AUTO_TEST_CASE(fused_cfo_rejects_unsupported_and_out_of_range)
         rx, n, h, kTap, kQaChipStart, 2, kQaPayloadStart, bad_zero.data(),
         in.symbols, 1, in.rot, w, out, scratch, nullptr, false, false));
 }
+
+// ---------------------------------------------------------------------------
+// Known-hop 2-candidate kernel + symbol-level DD-PLL.
+// ---------------------------------------------------------------------------
+namespace {
+
+// Synthetic BPM-BPSK payload with an exactly known answer.
+//
+// The CIR is a single unit tap at h[37], so the fused template has support only
+// at m = 2*c + 37 with coefficient pn[c].  Placing pn[c] at rx[win + 2*c + 37]
+// therefore makes the half correlation exactly 8 (times the complex gain) when
+// `win` is the true window, and ~0 on the other half/hop.  The whole buffer is
+// then multiplied by exp(j*2*pi*f_res*n/fs) so the entry can be called with
+// cfo_w_rad == 0 while the packet still carries a residual CFO.
+struct SynthBpmPayload {
+    std::vector<cf> rx;
+    std::vector<cf> taps;
+    std::vector<int8_t> pn;
+    std::vector<int8_t> expect_half;
+    size_t symbols = 0;
+    int64_t chip_start = 11;
+    int64_t payload_start = 40;
+};
+
+SynthBpmPayload make_synth_payload(size_t symbols,
+                                   double residual_cfo_hz,
+                                   float noise_sigma,
+                                   uint32_t seed,
+                                   bool alternate_half = true,
+                                   double static_phase_rad = 0.0)
+{
+    SynthBpmPayload in;
+    in.symbols = symbols;
+    std::mt19937 rng(seed);
+    std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
+    in.taps.assign(kTap, cf(0.0f, 0.0f));
+    in.taps[kTap - 1] = cf(1.0f, 0.0f);
+    in.pn.resize(symbols * rxfusion::kChipsPerBurst);
+    for (auto& a : in.pn)
+        a = (dist(rng) < 0.0f) ? int8_t(-1) : int8_t(1);
+    in.expect_half.resize(symbols);
+    for (size_t s = 0; s < symbols; ++s)
+        in.expect_half[s] = alternate_half ? int8_t(s & 1) : int8_t(0);
+
+    const int64_t base0 =
+        in.chip_start + in.payload_start * 2 - int64_t(kTap) + 1;
+    const size_t needed = static_cast<size_t>(
+        base0 + static_cast<int64_t>(symbols - 1) * 128 + 80 + 52 + 16);
+    in.rx.assign(needed, cf(0.0f, 0.0f));
+    for (size_t s = 0; s < symbols; ++s) {
+        const int hop = (in.pn[s * rxfusion::kChipsPerBurst] < 0) ? 1 : 0;
+        const int half = in.expect_half[s];
+        const int64_t win = base0 + static_cast<int64_t>(s) * 128 + hop * 16 +
+                            half * 64;
+        for (size_t c = 0; c < rxfusion::kChipsPerBurst; ++c) {
+            in.rx[static_cast<size_t>(win + 2 * int64_t(c) + int64_t(kTap) - 1)] +=
+                cf(static_cast<float>(in.pn[s * rxfusion::kChipsPerBurst + c]),
+                   0.0f);
+        }
+    }
+
+    const double w = kQaTwoPi * residual_cfo_hz / kQaSampleRate;
+    if (w != 0.0 || static_phase_rad != 0.0) {
+        std::complex<double> ramp(std::cos(static_phase_rad),
+                                  std::sin(static_phase_rad));
+        const std::complex<double> step(std::cos(w), std::sin(w));
+        for (auto& x : in.rx) {
+            x *= cf(static_cast<float>(ramp.real()),
+                    static_cast<float>(ramp.imag()));
+            ramp *= step;
+        }
+    }
+    if (noise_sigma > 0.0f) {
+        std::normal_distribution<float> nd(0.0f, noise_sigma);
+        for (auto& x : in.rx)
+            x += cf(nd(rng), nd(rng));
+    }
+    return in;
+}
+
+size_t count_reference_half_errors(const SynthBpmPayload& in,
+                                   const rxfusion::Metrics2& out,
+                                   size_t first_symbol)
+{
+    size_t errors = 0;
+    for (size_t s = first_symbol; s < in.symbols; ++s) {
+        const float v = in.expect_half[s] == 0 ? out.m0[s] : out.m1[s];
+        if (v < 0.0f)
+            ++errors;
+    }
+    return errors;
+}
+
+bool all_finite(const rxfusion::Metrics2& out)
+{
+    for (size_t s = 0; s < out.symbols; ++s) {
+        if (!std::isfinite(out.m0[s]) || !std::isfinite(out.m1[s]))
+            return false;
+        if (!out.z0.empty() &&
+            (!std::isfinite(out.z0[s].real()) ||
+             !std::isfinite(out.z0[s].imag()) ||
+             !std::isfinite(out.z1[s].real()) ||
+             !std::isfinite(out.z1[s].imag())))
+            return false;
+    }
+    return true;
+}
+
+struct KnownHopDiff {
+    double max_abs_m = 0.0;
+    double max_abs_z = 0.0;
+    double max_ref = 0.0;
+    size_t decision_mismatch = 0;
+    size_t decisions = 0;
+    size_t full_decision_checked = 0;
+    size_t full_decision_mismatch = 0;
+};
+
+// Run the 4-candidate exact-CFO entry and the known-hop entry on the same
+// buffer and compare the two known-hop columns element-wise.
+bool compare_known_hop(const FusedCfoInput& in,
+                       double cfo_hz,
+                       int8_t pol,
+                       bool unaligned,
+                       KnownHopDiff& diff)
+{
+    const double w = kQaTwoPi * cfo_hz / kQaSampleRate;
+    std::vector<cf> shifted;
+    const cf* rx_ptr = in.rx.data();
+    size_t n = in.rx.size();
+    if (unaligned) {
+        shifted.resize(in.rx.size() + 1);
+        shifted[0] = cf(0.0f, 0.0f);
+        std::copy(in.rx.begin(), in.rx.end(), shifted.begin() + 1);
+        rx_ptr = shifted.data() + 1;
+        n = in.rx.size();
+    }
+
+    rxfusion::Metrics ref;
+    rxfusion::Scratch scratch_ref;
+    if (!rxfusion::correlate_payload_fused_cfo(
+            rx_ptr, n, in.taps.data(), kTap, kQaChipStart,
+            rxfusion::kSamplesPerChip, kQaPayloadStart, in.pn.data(),
+            in.symbols, pol, in.rot, w, ref, scratch_ref, nullptr, true))
+        return false;
+
+    rxfusion::DdPllConfig pll; // enable == false
+    rxfusion::Metrics2 got;
+    rxfusion::Scratch scratch_got;
+    if (!rxfusion::correlate_payload_known_hop_fused_cfo(
+            rx_ptr, n, in.taps.data(), kTap, kQaChipStart,
+            static_cast<double>(rxfusion::kSamplesPerChip), kQaPayloadStart,
+            in.pn.data(), in.symbols, pol, in.rot, w, pll, got, scratch_got,
+            nullptr, true, nullptr, 0))
+        return false;
+
+    std::vector<int8_t> g0_ref, g1_ref;
+    rxfusion::decide_bpm(ref, g0_ref, g1_ref);
+
+    diff = KnownHopDiff{};
+    for (size_t s = 0; s < in.symbols; ++s) {
+        const int hop =
+            (in.pn[s * rxfusion::kChipsPerBurst] < 0) ? 1 : 0;
+        const size_t p = 2 * static_cast<size_t>(hop);
+        const float r0 = ref.signed_value[4 * s + p];
+        const float r1 = ref.signed_value[4 * s + p + 1];
+        diff.max_abs_m =
+            std::max(diff.max_abs_m,
+                     static_cast<double>(std::abs(got.m0[s] - r0)));
+        diff.max_abs_m =
+            std::max(diff.max_abs_m,
+                     static_cast<double>(std::abs(got.m1[s] - r1)));
+        diff.max_abs_z = std::max(
+            diff.max_abs_z,
+            static_cast<double>(std::abs(got.z0[s] -
+                                         ref.complex_value[4 * s + p])));
+        diff.max_abs_z = std::max(
+            diff.max_abs_z,
+            static_cast<double>(std::abs(got.z1[s] -
+                                         ref.complex_value[4 * s + p + 1])));
+        diff.max_ref = std::max(
+            diff.max_ref,
+            std::max(std::max(static_cast<double>(std::abs(r0)),
+                              static_cast<double>(std::abs(r1))),
+                     std::max(static_cast<double>(
+                                  std::abs(ref.complex_value[4 * s + p])),
+                              static_cast<double>(
+                                  std::abs(ref.complex_value[4 * s + p + 1])))));
+
+        // Known-hop decision on the two correlated halves.
+        const int ref_half = (std::abs(r0) >= std::abs(r1)) ? 0 : 1;
+        const int8_t ref_pol =
+            ((ref_half == 0 ? r0 : r1) < 0.0f) ? int8_t(1) : int8_t(0);
+        const int got_half =
+            (std::abs(got.m0[s]) >= std::abs(got.m1[s])) ? 0 : 1;
+        const int8_t got_pol =
+            ((got_half == 0 ? got.m0[s] : got.m1[s]) < 0.0f) ? int8_t(1)
+                                                              : int8_t(0);
+        if (ref_half != got_half || ref_pol != got_pol)
+            ++diff.decision_mismatch;
+        ++diff.decisions;
+
+        // When the known-hop candidates dominate both halves, the 4-candidate
+        // global decision must agree exactly with the known-hop decision.  On
+        // random noise input the other hop sometimes wins a half; that is not
+        // a disagreement, it is information the known-hop kernel never sees.
+        const size_t p0 = 4 * s + 2 * static_cast<size_t>(hop);
+        const size_t p1 = p0 + 1;
+        const size_t q0 = 4 * s + 2 * static_cast<size_t>(1 - hop);
+        const size_t q1 = q0 + 1;
+        const bool hop_dominates =
+            std::abs(ref.signed_value[p0]) >=
+                std::abs(ref.signed_value[q0]) &&
+            std::abs(ref.signed_value[p1]) >=
+                std::abs(ref.signed_value[q1]);
+        if (hop_dominates) {
+            ++diff.full_decision_checked;
+            if (g0_ref[s] != got_half || g1_ref[s] != got_pol)
+                ++diff.full_decision_mismatch;
+        }
+    }
+    return true;
+}
+
+} // namespace
+
+BOOST_AUTO_TEST_CASE(known_hop_matches_four_candidate)
+{
+    double max_abs_m = 0.0;
+    double max_abs_z = 0.0;
+    double max_ref = 0.0;
+    size_t decisions = 0;
+    size_t mismatch = 0;
+    size_t full_checked = 0;
+    size_t full_mismatch = 0;
+    size_t combinations = 0;
+
+    struct Spec {
+        size_t symbols;
+        int64_t chip_start;
+        int64_t payload_start;
+    };
+    const Spec specs[] = { { 1, kQaChipStart, kQaPayloadStart },
+                           { 64, kQaChipStart, kQaPayloadStart },
+                           { 65, 13, 900 },
+                           { 1208, kQaChipStart, kQaPayloadStart } };
+
+    for (const auto& spec : specs) {
+        const FusedCfoInput in =
+            make_fused_cfo_input(spec.symbols, kTap, 5100 + spec.symbols,
+                                 spec.chip_start, spec.payload_start);
+        for (double cfo_hz : { 0.0, 40000.0 }) {
+            for (int8_t pol : { int8_t(1), int8_t(-1) }) {
+                for (bool unaligned : { false, true }) {
+                    KnownHopDiff d;
+                    BOOST_REQUIRE(compare_known_hop(in, cfo_hz, pol, unaligned,
+                                                    d));
+                    BOOST_TEST_MESSAGE(
+                        "known_hop symbols=" << spec.symbols << " cfo="
+                        << cfo_hz << " pol=" << int(pol) << " unaligned="
+                        << unaligned << " m_err=" << d.max_abs_m
+                        << " z_err=" << d.max_abs_z << " ref=" << d.max_ref
+                        << " decision_mismatch=" << d.decision_mismatch << "/"
+                        << d.decisions << " global_checked="
+                        << d.full_decision_checked << " global_mismatch="
+                        << d.full_decision_mismatch);
+                    BOOST_CHECK_EQUAL(d.decision_mismatch, size_t(0));
+                    BOOST_CHECK_EQUAL(d.full_decision_mismatch, size_t(0));
+                    max_abs_m = std::max(max_abs_m, d.max_abs_m);
+                    max_abs_z = std::max(max_abs_z, d.max_abs_z);
+                    max_ref = std::max(max_ref, d.max_ref);
+                    decisions += d.decisions;
+                    mismatch += d.decision_mismatch;
+                    full_checked += d.full_decision_checked;
+                    full_mismatch += d.full_decision_mismatch;
+                    ++combinations;
+                }
+            }
+        }
+    }
+
+    BOOST_TEST_MESSAGE("known_hop overall: combinations="
+                       << combinations << " max_abs_m=" << max_abs_m
+                       << " max_abs_z=" << max_abs_z << " max_ref=" << max_ref
+                       << " max_rel=" << (max_abs_m / std::max(max_ref, 1e-12))
+                       << " decision_mismatch=" << mismatch << "/" << decisions
+                       << " global_mismatch=" << full_mismatch << "/"
+                       << full_checked);
+    // The two kernels share the template and the per-candidate arithmetic
+    // path; only the symbol-ramp anchor differs, so the tolerance is the same
+    // 1e-5 absolute bound as the 4-candidate exact-CFO QA.
+    BOOST_CHECK_LT(max_abs_m, 1e-5);
+    BOOST_CHECK_LT(max_abs_z, 1e-5);
+    BOOST_CHECK_LT(max_abs_m / std::max(max_ref, 1e-12), 1e-5);
+    BOOST_CHECK_EQUAL(mismatch, size_t(0));
+    BOOST_CHECK_EQUAL(full_mismatch, size_t(0));
+}
+
+BOOST_AUTO_TEST_CASE(known_hop_ddpll_tracks_residual_cfo)
+{
+    for (double cfo_hz : { 2000.0, -3500.0 }) {
+        const SynthBpmPayload in =
+            make_synth_payload(1208, cfo_hz, 0.05f, 4242u);
+
+        rxfusion::DdPllConfig off_cfg; // enable == false
+        rxfusion::Metrics2 off_out;
+        rxfusion::Scratch scratch_off;
+        BOOST_REQUIRE(rxfusion::correlate_payload_known_hop_fused_cfo(
+            in.rx.data(), in.rx.size(), in.taps.data(), kTap, in.chip_start,
+            2.0, in.payload_start, in.pn.data(), in.symbols, 1, cf(1.0f, 0.0f),
+            0.0, off_cfg, off_out, scratch_off, nullptr, true, nullptr, 0));
+        const size_t off_tail_errors =
+            count_reference_half_errors(in, off_out, in.symbols - 200);
+        const size_t off_errors = count_reference_half_errors(in, off_out, 0);
+
+        rxfusion::DdPllConfig on_cfg;
+        on_cfg.enable = true;
+        rxfusion::Metrics2 on_out;
+        rxfusion::Scratch scratch_on;
+        BOOST_REQUIRE(rxfusion::correlate_payload_known_hop_fused_cfo(
+            in.rx.data(), in.rx.size(), in.taps.data(), kTap, in.chip_start,
+            2.0, in.payload_start, in.pn.data(), in.symbols, 1, cf(1.0f, 0.0f),
+            0.0, on_cfg, on_out, scratch_on, nullptr, true, nullptr, 0));
+        const size_t on_errors = count_reference_half_errors(in, on_out, 32);
+        const double theory =
+            kQaTwoPi * cfo_hz / kQaSampleRate * 128.0;
+
+        BOOST_TEST_MESSAGE("ddpll cfo="
+                           << cfo_hz << "Hz off_tail_errors="
+                           << off_tail_errors << "/200 off_errors="
+                           << off_errors << "/" << in.symbols
+                           << " on_errors_after32=" << on_errors << "/"
+                           << (in.symbols - 32) << " freq="
+                           << on_out.pll_freq_rad << " theory=" << theory
+                           << " theta=" << on_out.pll_theta << " updates="
+                           << on_out.pll_updates);
+
+        // Without tracking the residual CFO rotates the packet well past 90
+        // degrees, so the tail polarity must break massively.
+        BOOST_CHECK_GT(off_tail_errors, size_t(100));
+        // With tracking, no polarity error at all after the ~32-symbol
+        // acquisition transient.
+        BOOST_CHECK_EQUAL(on_errors, size_t(0));
+        BOOST_CHECK(all_finite(on_out));
+        // The integrator state must converge to the true per-symbol rotation
+        // (within 15%; the loop still moves a little at the end).
+        BOOST_CHECK_LT(std::fabs(on_out.pll_freq_rad - theory),
+                       std::fabs(0.15 * theory));
+        BOOST_CHECK_GT(on_out.pll_updates, size_t(1000));
+    }
+}
+
+BOOST_AUTO_TEST_CASE(known_hop_ddpll_zero_cfo_low_snr_no_cycle_slip)
+{
+    // Zero residual CFO, AWGN only.  Two scenarios, both with cfo_w_rad == 0:
+    //
+    //  A) no phase offset, symbol SNR ~8 dB: the DD-PLL is not expected to
+    //     improve anything (the optimum at zero phase error is "do nothing"),
+    //     so the check is "never worse" over a fixed seed ensemble.  A cycle
+    //     slip would flip a long run of symbols and blow past the bound.
+    //  B) a constant 0.6 rad phase offset (still zero CFO): the loop must
+    //     acquire it and then stay locked, so the polarity error count has to
+    //     drop by a wide, robust margin.  This also exercises the
+    //     sign(Re)*Im/mag discriminator beyond the small-angle regime.
+    size_t off_a = 0, on_a = 0;
+    const size_t trials_a = 8;
+    for (uint32_t trial = 0; trial < trials_a; ++trial) {
+        const SynthBpmPayload in =
+            make_synth_payload(1208, 0.0, 0.8f, 777u + 131u * trial);
+
+        rxfusion::DdPllConfig off_cfg;
+        rxfusion::Metrics2 off_out;
+        rxfusion::Scratch scratch_off;
+        BOOST_REQUIRE(rxfusion::correlate_payload_known_hop_fused_cfo(
+            in.rx.data(), in.rx.size(), in.taps.data(), kTap, in.chip_start,
+            2.0, in.payload_start, in.pn.data(), in.symbols, 1, cf(1.0f, 0.0f),
+            0.0, off_cfg, off_out, scratch_off, nullptr, false, nullptr, 0));
+
+        rxfusion::DdPllConfig on_cfg;
+        on_cfg.enable = true;
+        rxfusion::Metrics2 on_out;
+        rxfusion::Scratch scratch_on;
+        BOOST_REQUIRE(rxfusion::correlate_payload_known_hop_fused_cfo(
+            in.rx.data(), in.rx.size(), in.taps.data(), kTap, in.chip_start,
+            2.0, in.payload_start, in.pn.data(), in.symbols, 1, cf(1.0f, 0.0f),
+            0.0, on_cfg, on_out, scratch_on, nullptr, false, nullptr, 0));
+
+        const size_t off_errors = count_reference_half_errors(in, off_out, 0);
+        const size_t on_errors = count_reference_half_errors(in, on_out, 0);
+        BOOST_TEST_MESSAGE("ddpll low-snr(A) trial="
+                           << trial << " off=" << off_errors << " on="
+                           << on_errors << " freq=" << on_out.pll_freq_rad
+                           << " theta=" << on_out.pll_theta);
+        BOOST_CHECK(all_finite(on_out));
+        // No cycle slip: bounded accumulated correction and near-zero
+        // frequency estimate.  A 180-degree slip is ~3.14 rad and a false
+        // frequency lock is far outside this window.
+        BOOST_CHECK_LT(std::fabs(on_out.pll_theta), 1.0f);
+        BOOST_CHECK_LT(std::fabs(on_out.pll_freq_rad), 0.02f);
+        off_a += off_errors;
+        on_a += on_errors;
+    }
+    BOOST_TEST_MESSAGE("ddpll zero-CFO AWGN aggregate: off="
+                       << off_a << " on=" << on_a << " over "
+                       << trials_a * 1208 << " symbols");
+    BOOST_CHECK_GT(off_a, size_t(0));
+    BOOST_CHECK_LE(on_a, off_a);
+
+    size_t off_b = 0, on_b = 0;
+    const size_t trials_b = 6;
+    for (uint32_t trial = 0; trial < trials_b; ++trial) {
+        const SynthBpmPayload in = make_synth_payload(
+            1208, 0.0, 1.0f, 4242u + 977u * trial, true, 0.6);
+
+        rxfusion::DdPllConfig off_cfg;
+        rxfusion::Metrics2 off_out;
+        rxfusion::Scratch scratch_off;
+        BOOST_REQUIRE(rxfusion::correlate_payload_known_hop_fused_cfo(
+            in.rx.data(), in.rx.size(), in.taps.data(), kTap, in.chip_start,
+            2.0, in.payload_start, in.pn.data(), in.symbols, 1, cf(1.0f, 0.0f),
+            0.0, off_cfg, off_out, scratch_off, nullptr, false, nullptr, 0));
+
+        rxfusion::DdPllConfig on_cfg;
+        on_cfg.enable = true;
+        rxfusion::Metrics2 on_out;
+        rxfusion::Scratch scratch_on;
+        BOOST_REQUIRE(rxfusion::correlate_payload_known_hop_fused_cfo(
+            in.rx.data(), in.rx.size(), in.taps.data(), kTap, in.chip_start,
+            2.0, in.payload_start, in.pn.data(), in.symbols, 1, cf(1.0f, 0.0f),
+            0.0, on_cfg, on_out, scratch_on, nullptr, false, nullptr, 0));
+
+        // Skip the first 32 symbols of acquisition before counting.
+        const size_t off_errors =
+            count_reference_half_errors(in, off_out, 32);
+        const size_t on_errors = count_reference_half_errors(in, on_out, 32);
+        BOOST_TEST_MESSAGE("ddpll low-snr(B) trial="
+                           << trial << " off=" << off_errors << " on="
+                           << on_errors << " freq=" << on_out.pll_freq_rad
+                           << " theta=" << on_out.pll_theta);
+        BOOST_CHECK(all_finite(on_out));
+        BOOST_CHECK_LT(std::fabs(on_out.pll_theta), 1.0f);
+        BOOST_CHECK_LT(std::fabs(on_out.pll_freq_rad), 0.02f);
+        off_b += off_errors;
+        on_b += on_errors;
+    }
+    BOOST_TEST_MESSAGE("ddpll zero-CFO constant-phase aggregate: off="
+                       << off_b << " on=" << on_b << " over "
+                       << trials_b * 1208 << " symbols");
+    BOOST_CHECK_GT(off_b, size_t(30));
+    BOOST_CHECK_LE(on_b, off_b);
+    BOOST_CHECK_LT(on_b * 2, off_b); // wide margin: the loop really re-locks
+}
+
+BOOST_AUTO_TEST_CASE(known_hop_rejects_invalid_and_out_of_range)
+{
+    const size_t symbols = 4;
+    const FusedCfoInput in =
+        make_fused_cfo_input(symbols, kTap, 31337);
+    rxfusion::Metrics2 out;
+    rxfusion::Scratch scratch;
+    const cf* rx = in.rx.data();
+    const size_t n = in.rx.size();
+    const cf* h = in.taps.data();
+    const int8_t* pn = in.pn.data();
+    const rxfusion::DdPllConfig pll_off;
+
+    auto call = [&](const cf* rx_p, size_t n_p, const cf* h_p, size_t taps,
+                    int64_t chip_start, double spc, int64_t payload_start,
+                    const int8_t* pn_p, size_t nsym, int8_t pol, double cfo,
+                    const cf* bank, size_t bins) {
+        return rxfusion::correlate_payload_known_hop_fused_cfo(
+            rx_p, n_p, h_p, taps, chip_start, spc, payload_start, pn_p, nsym,
+            pol, in.rot, cfo, pll_off, out, scratch, nullptr, false, bank,
+            bins);
+    };
+
+    // Null pointers.
+    BOOST_CHECK(!call(nullptr, n, h, kTap, kQaChipStart, 2.0, kQaPayloadStart,
+                      pn, symbols, 1, 0.0, nullptr, 0));
+    BOOST_CHECK(!call(rx, n, nullptr, kTap, kQaChipStart, 2.0, kQaPayloadStart,
+                      pn, symbols, 1, 0.0, nullptr, 0));
+    BOOST_CHECK(!call(rx, n, h, kTap, kQaChipStart, 2.0, kQaPayloadStart,
+                      nullptr, symbols, 1, 0.0, nullptr, 0));
+    // Argument domain.
+    BOOST_CHECK(!call(rx, n, h, 0, kQaChipStart, 2.0, kQaPayloadStart, pn,
+                      symbols, 1, 0.0, nullptr, 0));
+    BOOST_CHECK(!call(rx, n, h, rxfusion::kMaxTapCount + 1, kQaChipStart, 2.0,
+                      kQaPayloadStart, pn, symbols, 1, 0.0, nullptr, 0));
+    BOOST_CHECK(!call(rx, n, h, kTap, kQaChipStart, 2.0, kQaPayloadStart, pn, 0,
+                      1, 0.0, nullptr, 0));
+    BOOST_CHECK(!call(rx, n, h, kTap, kQaChipStart, 2.0, kQaPayloadStart, pn,
+                      symbols, 0, 0.0, nullptr, 0));
+    BOOST_CHECK(!call(rx, n, h, kTap, kQaChipStart, 2.0, kQaPayloadStart, pn,
+                      symbols, 1, std::nan(""), nullptr, 0));
+    BOOST_CHECK(!call(rx, n, h, kTap, -1, 2.0, kQaPayloadStart, pn, symbols, 1,
+                      0.0, nullptr, 0));
+    BOOST_CHECK(!call(rx, n, h, kTap, kQaChipStart, 2.0, -1, pn, symbols, 1,
+                      0.0, nullptr, 0));
+    BOOST_CHECK(!call(rx, n, h, kTap, 0, 2.0, 0, pn, symbols, 1, 0.0, nullptr,
+                      0));
+    // Sample spacing: only 2.0 is supported without a fractional bank.
+    BOOST_CHECK(!call(rx, n, h, kTap, kQaChipStart, 0.0, kQaPayloadStart, pn,
+                      symbols, 1, 0.0, nullptr, 0));
+    BOOST_CHECK(!call(rx, n, h, kTap, kQaChipStart, -1.0, kQaPayloadStart, pn,
+                      symbols, 1, 0.0, nullptr, 0));
+    BOOST_CHECK(!call(rx, n, h, kTap, kQaChipStart, std::nan(""),
+                      kQaPayloadStart, pn, symbols, 1, 0.0, nullptr, 0));
+    BOOST_CHECK(!call(rx, n, h, kTap, kQaChipStart,
+                      std::numeric_limits<double>::infinity(), kQaPayloadStart,
+                      pn, symbols, 1, 0.0, nullptr, 0));
+    BOOST_CHECK(!call(rx, n, h, kTap, kQaChipStart, 1.0, kQaPayloadStart, pn,
+                      symbols, 1, 0.0, nullptr, 0));
+    BOOST_CHECK(!call(rx, n, h, kTap, kQaChipStart, 4.0, kQaPayloadStart, pn,
+                      symbols, 1, 0.0, nullptr, 0));
+
+    // Fractional bank: bin 0 is the undistorted CIR.
+    std::vector<cf> bank(8 * kTap);
+    for (size_t b = 0; b < 8; ++b)
+        std::copy(in.taps.begin(), in.taps.end(), bank.begin() + b * kTap);
+    BOOST_CHECK(!call(rx, n, h, kTap, kQaChipStart, 2.0, kQaPayloadStart, pn,
+                      symbols, 1, 0.0, bank.data(), 0));
+    BOOST_CHECK(!call(rx, n, h, kTap, kQaChipStart, 2.0, kQaPayloadStart, pn,
+                      symbols, 1, 0.0, bank.data(),
+                      rxfusion::kKhMaxPhaseBins + 1));
+    BOOST_CHECK(call(rx, n, h, kTap, kQaChipStart, 2.0, kQaPayloadStart, pn,
+                     symbols, 1, 0.0, bank.data(), 8));
+    // The bank path with spc == 2.0 must reproduce the integer path.
+    {
+        rxfusion::Metrics2 a, b;
+        rxfusion::Scratch sa, sb;
+        BOOST_REQUIRE(rxfusion::correlate_payload_known_hop_fused_cfo(
+            rx, n, h, kTap, kQaChipStart, 2.0, kQaPayloadStart, pn, symbols, 1,
+            in.rot, 0.0, pll_off, a, sa, nullptr, true, nullptr, 0));
+        BOOST_REQUIRE(rxfusion::correlate_payload_known_hop_fused_cfo(
+            rx, n, h, kTap, kQaChipStart, 2.0, kQaPayloadStart, pn, symbols, 1,
+            in.rot, 0.0, pll_off, b, sb, nullptr, true, bank.data(), 8));
+        for (size_t s = 0; s < symbols; ++s) {
+            BOOST_CHECK_SMALL(b.m0[s] - a.m0[s], 1e-5f);
+            BOOST_CHECK_SMALL(b.m1[s] - a.m1[s], 1e-5f);
+        }
+    }
+
+    // Illegal spreading chips (including the hop chip) are rejected.
+    std::vector<int8_t> bad_zero = in.pn;
+    bad_zero[3] = 0;
+    BOOST_CHECK(!call(rx, n, h, kTap, kQaChipStart, 2.0, kQaPayloadStart,
+                      bad_zero.data(), symbols, 1, 0.0, nullptr, 0));
+    std::vector<int8_t> bad_two = in.pn;
+    bad_two[bad_two.size() - 1] = 2;
+    BOOST_CHECK(!call(rx, n, h, kTap, kQaChipStart, 2.0, kQaPayloadStart,
+                      bad_two.data(), symbols, 1, 0.0, nullptr, 0));
+    std::vector<int8_t> bad_neg = in.pn;
+    bad_neg[5] = -2;
+    BOOST_CHECK(!call(rx, n, h, kTap, kQaChipStart, 2.0, kQaPayloadStart,
+                      bad_neg.data(), symbols, 1, 0.0, nullptr, 0));
+
+    // Invalid DD-PLL configuration is rejected when the loop is enabled.
+    {
+        rxfusion::DdPllConfig bad;
+        bad.enable = true;
+        bad.alpha = std::nan("");
+        BOOST_CHECK(!rxfusion::correlate_payload_known_hop_fused_cfo(
+            rx, n, h, kTap, kQaChipStart, 2.0, kQaPayloadStart, pn, symbols, 1,
+            in.rot, 0.0, bad, out, scratch, nullptr, false, nullptr, 0));
+    }
+
+    // Exact last readable integer window succeeds; one sample shorter fails.
+    const size_t len = kTap + 14;
+    const int64_t base0 = kQaChipStart + kQaPayloadStart * 2 - kTap + 1;
+    const size_t needed = static_cast<size_t>(
+        base0 + static_cast<int64_t>(symbols - 1) * 128 + 80 +
+        static_cast<int64_t>(len));
+    BOOST_REQUIRE_LE(needed, in.rx.size());
+    BOOST_CHECK(call(rx, needed, h, kTap, kQaChipStart, 2.0, kQaPayloadStart,
+                     pn, symbols, 1, 0.0, nullptr, 0));
+    BOOST_CHECK(!call(rx, needed - 1, h, kTap, kQaChipStart, 2.0,
+                      kQaPayloadStart, pn, symbols, 1, 0.0, nullptr, 0));
+
+    // Same boundary on the fractional path (and with a non-2.0 spacing).
+    BOOST_CHECK(call(rx, needed, h, kTap, kQaChipStart, 2.0, kQaPayloadStart,
+                     pn, symbols, 1, 0.0, bank.data(), 8));
+    BOOST_CHECK(!call(rx, needed - 1, h, kTap, kQaChipStart, 2.0,
+                      kQaPayloadStart, pn, symbols, 1, 0.0, bank.data(), 8));
+    BOOST_CHECK(call(rx, n, h, kTap, kQaChipStart, 2.0001, kQaPayloadStart, pn,
+                     symbols, 1, 0.0, bank.data(), 8));
+    BOOST_CHECK(!call(rx, needed - 1, h, kTap, kQaChipStart, 2.0001,
+                      kQaPayloadStart, pn, symbols, 1, 0.0, bank.data(), 8));
+
+    // No write past the caller's `n` (canary bytes in a slack region).
+    {
+        std::vector<cf> guarded(needed + 8);
+        std::copy(in.rx.begin(), in.rx.begin() + needed, guarded.begin());
+        const cf sentinel(12345.5f, -54321.25f);
+        for (size_t i = needed; i < guarded.size(); ++i)
+            guarded[i] = sentinel;
+        BOOST_CHECK(rxfusion::correlate_payload_known_hop_fused_cfo(
+            guarded.data(), needed, h, kTap, kQaChipStart, 2.0,
+            kQaPayloadStart, pn, symbols, 1, in.rot, 0.0, pll_off, out,
+            scratch, nullptr, false, bank.data(), 8));
+        BOOST_CHECK(rxfusion::correlate_payload_known_hop_fused_cfo(
+            guarded.data(), needed - 1, h, kTap, kQaChipStart, 2.0,
+            kQaPayloadStart, pn, symbols, 1, in.rot, 0.0, pll_off, out,
+            scratch, nullptr, false, bank.data(), 8) == false);
+        for (size_t i = needed; i < guarded.size(); ++i)
+            BOOST_CHECK(guarded[i] == sentinel);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(known_hop_phr_matches_four_candidate)
+{
+    const int64_t chip_start = kQaChipStart;
+    const int64_t phr_start = 100;
+    const size_t len = kTap + 2 * (rxfusion::kPhrChipsPerBurst - 1);
+    std::mt19937 rng(20261120);
+    std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
+    const size_t base0 = static_cast<size_t>(
+        chip_start + phr_start * 2 - int64_t(kTap) + 1);
+    // Exact last readable sample: any shorter buffer must be rejected.
+    const size_t needed = base0 +
+                          (rxfusion::kPhrSymbols - 1) *
+                              rxfusion::kPhrChipsPerSymbol * 2 +
+                          320 * 2 + len;
+    std::vector<cf> rx(needed);
+    for (auto& x : rx)
+        x = cf(dist(rng), dist(rng));
+    std::vector<cf> taps(kTap);
+    for (auto& h : taps)
+        h = cf(dist(rng), dist(rng));
+    std::vector<int8_t> pn(rxfusion::kPhrSymbols *
+                           rxfusion::kPhrChipsPerBurst);
+    for (auto& a : pn)
+        a = (dist(rng) < 0.0f) ? int8_t(-1) : int8_t(1);
+    const float ang = dist(rng) * 3.0f;
+    const cf rot(std::cos(ang), std::sin(ang));
+
+    rxfusion::Metrics ref;
+    rxfusion::Scratch scratch_ref;
+    rxfusion::Metrics2 got;
+    rxfusion::Scratch scratch_got;
+    for (int8_t pol : { int8_t(1), int8_t(-1) }) {
+        BOOST_REQUIRE(rxfusion::correlate_phr(
+            rx.data(), rx.size(), taps.data(), kTap, chip_start,
+            rxfusion::kSamplesPerChip, phr_start, pn.data(), pol, rot, ref,
+            scratch_ref));
+        BOOST_REQUIRE(rxfusion::correlate_phr_known_hop(
+            rx.data(), rx.size(), taps.data(), kTap, chip_start,
+            rxfusion::kSamplesPerChip, phr_start, pn.data(), pol, rot, got,
+            scratch_got));
+        BOOST_REQUIRE_EQUAL(got.symbols, rxfusion::kPhrSymbols);
+        BOOST_REQUIRE_EQUAL(got.z0.size(), rxfusion::kPhrSymbols);
+        double max_m = 0.0, max_z = 0.0;
+        for (size_t s = 0; s < rxfusion::kPhrSymbols; ++s) {
+            const int hop =
+                (pn[s * rxfusion::kPhrChipsPerBurst] < 0) ? 1 : 0;
+            const size_t p = 2 * static_cast<size_t>(hop);
+            max_m = std::max(
+                max_m, static_cast<double>(std::abs(
+                           got.m0[s] - ref.signed_value[4 * s + p])));
+            max_m = std::max(
+                max_m, static_cast<double>(std::abs(
+                           got.m1[s] - ref.signed_value[4 * s + p + 1])));
+            max_z = std::max(
+                max_z,
+                static_cast<double>(std::abs(
+                    got.z0[s] - ref.complex_value[4 * s + p])));
+            max_z = std::max(
+                max_z,
+                static_cast<double>(std::abs(
+                    got.z1[s] - ref.complex_value[4 * s + p + 1])));
+        }
+        BOOST_TEST_MESSAGE("known_hop phr pol=" << int(pol) << " max_m="
+                                                << max_m << " max_z=" << max_z);
+        BOOST_CHECK_LT(max_m, 1e-5);
+        BOOST_CHECK_LT(max_z, 1e-5);
+    }
+
+    // Out-of-range PHR tail is rejected.
+    BOOST_CHECK(!rxfusion::correlate_phr_known_hop(
+        rx.data(), needed - 1, taps.data(), kTap, chip_start,
+        rxfusion::kSamplesPerChip, phr_start, pn.data(), 1, rot, got,
+        scratch_got));
+    // Invalid PN is rejected.
+    std::vector<int8_t> bad = pn;
+    bad[0] = 0;
+    BOOST_CHECK(!rxfusion::correlate_phr_known_hop(
+        rx.data(), rx.size(), taps.data(), kTap, chip_start,
+        rxfusion::kSamplesPerChip, phr_start, bad.data(), 1, rot, got,
+        scratch_got));
+}

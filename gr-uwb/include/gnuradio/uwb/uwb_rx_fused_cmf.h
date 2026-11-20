@@ -101,6 +101,11 @@ inline constexpr size_t kFusedHalfSpan =
 // Phase re-anchor interval for the exact-CFO symbol ramp (symbols).
 inline constexpr size_t kFusedPhaseAnchor = 32;
 
+// Known-hop SFO path: half-template values stored per fractional phase bin
+// (8 lo patterns followed by 8 hi patterns).
+inline constexpr size_t kKhLutPerBin = 2 * kFusedHalfTemplates * kFusedHalfSpan;
+inline constexpr size_t kKhMaxPhaseBins = 64;
+
 // Candidate order is fixed and is also the layout of Metrics below:
 //   0: hop 0, BPM half 0
 //   1: hop 0, BPM half 1
@@ -159,6 +164,72 @@ struct Metrics {
     }
 };
 
+// Known-hop 2-candidate metrics (payload/D-PHY hop and BPM half are known to
+// be `hop = (pn[8*s] < 0) ? 1 : 0`, so only two of the four candidates above
+// are evaluated).  `m0` is BPM half 0 of the known hop and `m1` half 1.
+//
+// `z0/z1` are the raw complex correlations on the same phase basis as
+// `Metrics::complex_value`: the exact-CFO fusion already removed the modelled
+// CFO (window ramp + per-chip ramp), but neither `rot`, `polarity` nor the
+// DD-PLL tracking rotation is applied.  Wave 2 can therefore feed them
+// directly to the PHR pilot refinement and biorthogonal decoder.
+//
+// `m0/m1` are the final signed metrics and match the corresponding
+// `signed_value` entries of the 4-candidate path:
+//   m_half = polarity * Re(rot_cur * z_half)
+// with rot_cur = rot when the DD-PLL is disabled; with the loop enabled
+// rot_cur is the per-symbol tracked rotation (rot times the loop phase).
+// `z0/z1` are only written when `write_complex == true` (always for the PHR
+// known-hop helper).
+struct Metrics2 {
+    size_t symbols = 0;
+    std::vector<float> m0, m1;
+    std::vector<std::complex<float>> z0, z1;
+
+    // DD-PLL diagnostics (all zero when the loop is disabled):
+    //   pll_freq_rad  final per-symbol frequency estimate (rad/symbol)
+    //   pll_theta     accumulated phase applied to rot_cur (rad)
+    //   pll_updates   number of symbols whose phase error was accepted
+    float pll_freq_rad = 0.0f;
+    float pll_theta = 0.0f;
+    size_t pll_updates = 0;
+
+    void reset(size_t count, bool want_complex = false)
+    {
+        symbols = count;
+        m0.resize(count);
+        m1.resize(count);
+        if (want_complex) {
+            z0.resize(count);
+            z1.resize(count);
+        } else {
+            z0.clear();
+            z1.clear();
+        }
+        pll_freq_rad = 0.0f;
+        pll_theta = 0.0f;
+        pll_updates = 0;
+    }
+};
+
+// Symbol-level decision-directed PLL for the known-hop payload kernel.
+//
+// The payload symbol correlation is already complex, so a residual CFO can be
+// tracked without touching the chips: rotate both candidate values by the
+// current tracking phase, pick the stronger half, and drive a second-order PI
+// loop with the normalized BPSK phase error
+//   err = sign(Re(z_win)) * Im(z_win) / (|z_win| + eps).
+// `min_mag_ratio` gates the update against deep fades; `max_freq_step` clamps
+// the per-symbol frequency state to roughly +/- 60 kHz at the production 128
+// samples/symbol (2*pi*62170/998.4e6 = 0.05 rad/symbol).
+struct DdPllConfig {
+    bool enable = false;
+    float alpha = 0.08f;         // proportional loop gain (rad)
+    float beta = 0.002f;         // residual CFO integrator gain (rad/symbol)
+    float max_freq_step = 0.05f; // per-symbol frequency clamp (rad/symbol)
+    float min_mag_ratio = 0.25f; // skip updates below this fraction of mag EMA
+};
+
 struct Timings {
     uint64_t template_update_us = 0;
     uint64_t correlate_us = 0;
@@ -181,6 +252,14 @@ struct Scratch {
     std::vector<std::complex<float>> fused_h_w;
     std::vector<std::complex<float>> fused_tpl;
 
+    // Known-hop kernel state.  `kh_lut` holds 2*8 half templates (lo block
+    // followed by hi block, kKhLutPerBin values) for each fractional SFO phase
+    // bin; `kh_h_w` holds the per-bin h[q]*exp(-j*w*q) used to build the
+    // generic (non-38-tap) fractional template on the fly.  The integer grid
+    // path keeps using fused_lut_lo/fused_lut_hi and never touches these.
+    std::vector<std::complex<float>> kh_lut;
+    std::vector<std::complex<float>> kh_h_w;
+
     void ensure(size_t block_symbols, size_t len)
     {
         if (template_len != len || templates.size() < block_symbols * len) {
@@ -202,6 +281,23 @@ struct Scratch {
             tap_count + kSamplesPerChip * (kChipsPerBurst - 1);
         if (fused_tpl.size() < tpl_len)
             fused_tpl.resize(tpl_len);
+    }
+
+    // Integer-grid known-hop kernel: identical template state to the
+    // 4-candidate exact-CFO kernel, only the dot kernel differs.
+    void ensure_known_hop(size_t tap_count) { ensure_fused_cfo(tap_count); }
+
+    // Fractional-phase (SFO) known-hop kernel: one lo/hi half-template LUT and
+    // one h*exp(-j*w*q) ramp per phase bin.  Allocated once per packet.
+    void ensure_known_hop_sfo(size_t tap_count, size_t phase_bins)
+    {
+        ensure_fused_cfo(tap_count);
+        const size_t lut = phase_bins * kKhLutPerBin;
+        if (kh_lut.size() < lut)
+            kh_lut.resize(lut);
+        const size_t hw = phase_bins * tap_count;
+        if (kh_h_w.size() < hw)
+            kh_h_w.resize(hw);
     }
 };
 
@@ -648,6 +744,52 @@ inline void dot4_shared_fixed52(const std::complex<float>* x0,
     m[1] = cir_fir::dot_multi_acc8(x1, tpl, kFusedFastLen);
     m[2] = cir_fir::dot_multi_acc8(x2, tpl, kFusedFastLen);
     m[3] = cir_fir::dot_multi_acc8(x3, tpl, kFusedFastLen);
+#endif
+}
+
+// Two candidates sharing one 52-point template (known-hop payload kernel).
+// Same 13 groups of four complex and the same even/odd two-chain reduction as
+// dot4_shared_fixed52(), so each output follows the arithmetic path of the
+// corresponding column in the 4-candidate kernel and only the two windows
+// actually needed are read.  The template group is loaded once per iteration
+// and feeds both candidates.  Non-AVX2 platforms fall back to the scalar
+// multi-accumulator dot.
+inline void dot2_shared_fixed52(const std::complex<float>* x0,
+                                const std::complex<float>* x1,
+                                const std::complex<float>* tpl,
+                                std::complex<float> out[2])
+{
+#if UWB_CIR_FIR_HAVE_AVX2
+    const float* hp = reinterpret_cast<const float*>(tpl);
+    const float* xp0 = reinterpret_cast<const float*>(x0);
+    const float* xp1 = reinterpret_cast<const float*>(x1);
+    const __m256 zero = _mm256_setzero_ps();
+    __m256 a0 = zero, a1 = zero;
+    __m256 b0 = zero, b1 = zero;
+    for (int g = 0; g < 12; g += 2) {
+        const int o0 = 8 * g;
+        const int o1 = o0 + 8;
+        const __m256 ht0 = _mm256_loadu_ps(hp + o0);
+        const __m256 hs0 = _mm256_permute_ps(ht0, 0xB1);
+        fused_mac_group(xp0, o0, ht0, hs0, a0);
+        fused_mac_group(xp1, o0, ht0, hs0, a1);
+        const __m256 ht1 = _mm256_loadu_ps(hp + o1);
+        const __m256 hs1 = _mm256_permute_ps(ht1, 0xB1);
+        fused_mac_group(xp0, o1, ht1, hs1, b0);
+        fused_mac_group(xp1, o1, ht1, hs1, b1);
+    }
+    {
+        const int o = 96; // group 12 of 13
+        const __m256 ht = _mm256_loadu_ps(hp + o);
+        const __m256 hs = _mm256_permute_ps(ht, 0xB1);
+        fused_mac_group(xp0, o, ht, hs, a0);
+        fused_mac_group(xp1, o, ht, hs, a1);
+    }
+    out[0] = fused_hsum4(_mm256_add_ps(a0, b0));
+    out[1] = fused_hsum4(_mm256_add_ps(a1, b1));
+#else
+    out[0] = cir_fir::dot_multi_acc8(x0, tpl, kFusedFastLen);
+    out[1] = cir_fir::dot_multi_acc8(x1, tpl, kFusedFastLen);
 #endif
 }
 
@@ -1191,6 +1333,584 @@ inline void decide_bpm_soft(const Metrics& metrics,
                             std::vector<float>& llr0, std::vector<float>& llr1)
 {
     decide_bpm_impl(metrics, g0, g1, &llr0, &llr1);
+}
+
+// ---------------------------------------------------------------------------
+// Known-hop 2-candidate kernel + symbol-level DD-PLL.
+// ---------------------------------------------------------------------------
+
+// Nearest fractional-phase-bin decomposition with correct floor semantics for
+// positions on either side of zero:
+//   int_pos + bin/phase_bins  ==  round(pos_samples * phase_bins) / phase_bins
+// and the residual is always within +/-0.5/phase_bins of pos_samples.
+inline bool decompose_frac_position(double pos_samples,
+                                    size_t phase_bins,
+                                    int64_t& int_pos,
+                                    size_t& bin)
+{
+    if (phase_bins == 0 || !std::isfinite(pos_samples))
+        return false;
+    const double bins = static_cast<double>(phase_bins);
+    const double scaled = pos_samples * bins;
+    if (!std::isfinite(scaled) || std::fabs(scaled) > 9.0e15)
+        return false;
+    const double rounded = std::floor(scaled + 0.5);
+    const int64_t n = static_cast<int64_t>(rounded);
+    const int64_t ibins = static_cast<int64_t>(phase_bins);
+    int64_t q = n / ibins;
+    int64_t r = n % ibins;
+    if (r < 0) {
+        r += ibins;
+        --q;
+    }
+    int_pos = q;
+    bin = static_cast<size_t>(r);
+    return true;
+}
+
+// exp(-j*theta) for one DD-PLL correction step.  With the default gains
+// |theta| <= alpha*1 + max_freq_step ~ 0.13 rad, where the truncated series is
+// accurate to better than 1e-8; angles that large never happen on the
+// production path but still fall back to libm instead of degrading.
+inline std::complex<float> ddpll_rot_neg(float theta)
+{
+    if (std::fabs(theta) <= 0.25f) {
+        const float t2 = theta * theta;
+        const float c = 1.0f - t2 * (0.5f - t2 * (1.0f / 24.0f));
+        const float s =
+            theta * (1.0f - t2 * (1.0f / 6.0f - t2 * (1.0f / 120.0f)));
+        return std::complex<float>(c, -s);
+    }
+    return std::complex<float>(std::cos(theta), -std::sin(theta));
+}
+
+// Known-hop exact-CFO payload correlation (D-PHY BPM-BPSK, 6.81 Mb/s).
+//
+// The hop is fully determined by the spreading stream -- the IEEE 802.15.4-2020
+// BPRF BPM hop index is `hop = (pn[8*s] < 0) ? 1 : 0`, the same rule the TX
+// uses -- so only the two BPM-half candidates of that hop are correlated:
+//
+//   half 0: rx_raw[win0 + hop*16]        (8 chips at hop*8)
+//   half 1: rx_raw[win0 + hop*16 + 64]   (8 chips at hop*8 + 32)
+//
+// Both windows share one 52-point template built from the same 8+8 half-LUT as
+// correlate_payload_fused_cfo(), and dot2_shared_fixed52() reads each template
+// group once, so exactly half the IQ traffic of the 4-candidate kernel is
+// issued.  The CFO phase uses the same double symbol ramp re-anchored every
+// kFusedPhaseAnchor symbols; the per-symbol hop constant exp(-j*w*hop*16)
+// anchors it at the true known-hop window origin `win0 + hop*16`, and half 1
+// adds exp(-j*w*64).
+//
+// `samples_per_chip_actual == 2.0 && frac_cir_bank == nullptr` selects the
+// integer fast path.  Otherwise `frac_cir_bank[bin*tap_count + q]` supplies a
+// per-fractional-phase CIR bank (`frac_phase_bins` entries): the symbol
+// position is `base_d + s*64*spc_actual`, split into an integer sample start
+// and a nearest phase bin, and the template is drawn from that bin.  The CFO
+// phase anchors to the integer window start on this path.  `bin == 0` must be
+// the undistorted CIR so an integer grid with a bank reproduces the fast path.
+//
+// With `pll_cfg.enable == false` the output is the 4-candidate signed metric of
+// the known hop: m0 == signed_value[4*s + 2*hop], m1 ==
+// signed_value[4*s + 2*hop + 1] (up to float reduction order).  With the PLL
+// enabled, rot_cur starts at `rot` and is driven by the normalized BPSK phase
+// error of the stronger half; m0/m1 are the real parts after tracking, which
+// is the same quantity a genie phase would produce.  In both cases z0/z1 are
+// the raw correlations before rot/polarity/PLL (same basis as
+// Metrics::complex_value), and polarity is applied only to m0/m1.
+//
+// Returns false (without reading outside rx_raw) for any null pointer, illegal
+// polarity/CFO/rotation/tap count, non-positive or non-finite sample spacing,
+// unsupported fractional request, PN chip outside {+1,-1}, zero symbols, or a
+// candidate window that is not fully readable.  The caller keeps the legacy /
+// 4-candidate fallback; this entry never truncates or zero-pads a field.
+inline bool correlate_payload_known_hop_fused_cfo(
+    const std::complex<float>* rx_raw,
+    size_t n,
+    const std::complex<float>* fir_taps,
+    size_t tap_count,
+    int64_t chip_start,
+    double samples_per_chip_actual,
+    int64_t payload_start,
+    const int8_t* pn,
+    size_t symbols,
+    int8_t polarity,
+    std::complex<float> rot,
+    double cfo_w_rad,
+    const DdPllConfig& pll_cfg,
+    Metrics2& out,
+    Scratch& scratch,
+    Timings* timings,
+    bool write_complex,
+    const std::complex<float>* frac_cir_bank,
+    size_t frac_phase_bins)
+{
+    if (!rx_raw || !fir_taps || !pn)
+        return false;
+    if (polarity != 1 && polarity != -1)
+        return false;
+    if (!std::isfinite(cfo_w_rad) || !std::isfinite(rot.real()) ||
+        !std::isfinite(rot.imag()))
+        return false;
+    if (tap_count == 0 || tap_count > kMaxTapCount)
+        return false;
+    if (symbols == 0 || symbols > (static_cast<size_t>(1) << 20))
+        return false;
+    if (chip_start < 0 || payload_start < 0)
+        return false;
+    if (!std::isfinite(samples_per_chip_actual) ||
+        !(samples_per_chip_actual > 0.0))
+        return false;
+    if (pll_cfg.enable) {
+        if (!std::isfinite(pll_cfg.alpha) || !std::isfinite(pll_cfg.beta) ||
+            !std::isfinite(pll_cfg.max_freq_step) ||
+            !std::isfinite(pll_cfg.min_mag_ratio) || pll_cfg.beta < 0.0f ||
+            pll_cfg.max_freq_step < 0.0f || pll_cfg.min_mag_ratio < 0.0f)
+            return false;
+    }
+
+    const bool sfo = (frac_cir_bank != nullptr);
+    if (sfo) {
+        if (frac_phase_bins == 0 || frac_phase_bins > kKhMaxPhaseBins)
+            return false;
+    } else if (samples_per_chip_actual !=
+               static_cast<double>(kSamplesPerChip)) {
+        // Non-integer spacing without a phase bank is unsupported.
+        return false;
+    }
+
+    // The hop is taken from the same chip as the first half template sign, so
+    // the +/-1 scan also protects the hop rule from a zero chip.
+    if (!pn_stream_is_pm1(pn, symbols * kChipsPerBurst))
+        return false;
+
+    const size_t len =
+        template_length(tap_count, kSamplesPerChip, kChipsPerBurst);
+    const double w = cfo_w_rad;
+    const bool has_cfo = (w != 0.0);
+    const bool fast = (tap_count == kFusedFastTaps);
+    const bool sfo_path = sfo;
+    const double spc_d =
+        sfo_path ? samples_per_chip_actual
+                 : static_cast<double>(kSamplesPerChip);
+    const size_t bins = sfo_path ? frac_phase_bins : 0;
+
+    int64_t base0 = 0;
+    double base_d = 0.0;
+    const int64_t stride_i =
+        static_cast<int64_t>(kChipsPerSymbol) *
+        static_cast<int64_t>(kSamplesPerChip); // 128
+    const double stride_d = static_cast<double>(kChipsPerSymbol) * spc_d;
+
+    if (!sfo_path) {
+        const int64_t spc = static_cast<int64_t>(kSamplesPerChip);
+        if (payload_start >
+            (std::numeric_limits<int64_t>::max() - chip_start) / spc)
+            return false;
+        const int64_t window0 = chip_start + payload_start * spc;
+        base0 = window0 - static_cast<int64_t>(tap_count) + 1;
+        if (base0 < 0)
+            return false;
+        // Furthest window: known hop 1, BPM half 1 = 16 + 64 samples.
+        const int64_t max_off = 16 + 64;
+        const uint64_t add =
+            static_cast<uint64_t>(symbols - 1) *
+                static_cast<uint64_t>(stride_i) +
+            static_cast<uint64_t>(max_off) + static_cast<uint64_t>(len) - 1;
+        const uint64_t last = static_cast<uint64_t>(base0) + add;
+        if (last < static_cast<uint64_t>(base0) ||
+            last >= static_cast<uint64_t>(n))
+            return false;
+        base_d = static_cast<double>(base0);
+    } else {
+        base_d = static_cast<double>(chip_start) +
+                 static_cast<double>(payload_start) * spc_d -
+                 static_cast<double>(tap_count) + 1.0;
+        if (base_d < 0.0 || !std::isfinite(base_d))
+            return false;
+        const double last_d = base_d +
+                              static_cast<double>(symbols - 1) * stride_d +
+                              40.0 * spc_d; // hop 1 + half 1 = 40 chips
+        if (!std::isfinite(last_d) || last_d > 9.0e15)
+            return false;
+        int64_t last_int = 0;
+        size_t last_bin = 0;
+        if (!decompose_frac_position(last_d, bins, last_int, last_bin))
+            return false;
+        if (last_int < 0)
+            return false;
+        const uint64_t last =
+            static_cast<uint64_t>(last_int) + static_cast<uint64_t>(len) - 1;
+        if (last >= static_cast<uint64_t>(n))
+            return false;
+        (void)last_bin;
+    }
+
+    scratch.ensure_known_hop(tap_count);
+    if (sfo_path)
+        scratch.ensure_known_hop_sfo(tap_count, bins);
+
+    using clock = std::chrono::steady_clock;
+    clock::time_point t_begin{};
+    clock::time_point t_templ{};
+    if (timings)
+        t_begin = clock::now();
+
+    std::complex<float> chip_phase[kChipsPerBurst];
+    std::complex<float>* tpl = scratch.fused_tpl.data();
+    if (!sfo_path) {
+        build_fused_tap_ramp(scratch.fused_h_w.data(), fir_taps, tap_count, w,
+                             chip_phase);
+        if (fast) {
+            build_fused_half_lut(scratch.fused_lut_lo.data(),
+                                 scratch.fused_lut_hi.data(),
+                                 scratch.fused_h_w.data(), chip_phase);
+        }
+    } else {
+        for (size_t b = 0; b < bins; ++b) {
+            build_fused_tap_ramp(scratch.kh_h_w.data() + b * tap_count,
+                                 frac_cir_bank + b * tap_count, tap_count, w,
+                                 chip_phase);
+        }
+        if (fast) {
+            for (size_t b = 0; b < bins; ++b) {
+                std::complex<float>* lo =
+                    scratch.kh_lut.data() + b * kKhLutPerBin;
+                std::complex<float>* hi =
+                    lo + kFusedHalfTemplates * kFusedHalfSpan;
+                build_fused_half_lut(lo, hi,
+                                     scratch.kh_h_w.data() + b * tap_count,
+                                     chip_phase);
+            }
+        }
+    }
+    if (timings)
+        t_templ = clock::now();
+
+    // Per-packet constants.  hop_phase[1] and half_phase are the same
+    // single-rounded values as the 4-candidate cand_phase[] entries for chip
+    // offsets 8 and 32, so the integer path stays close to bit-identical.
+    std::complex<float> hop_phase[2] = {
+        std::complex<float>(1.0f, 0.0f), std::complex<float>(1.0f, 0.0f)
+    };
+    std::complex<float> half_phase(1.0f, 0.0f);
+    if (!sfo_path && has_cfo) {
+        hop_phase[1] = std::complex<float>(
+            static_cast<float>(std::cos(-w * 16.0)),
+            static_cast<float>(std::sin(-w * 16.0)));
+        half_phase = std::complex<float>(
+            static_cast<float>(std::cos(-w * 64.0)),
+            static_cast<float>(std::sin(-w * 64.0)));
+    }
+    const double dphi = -w * static_cast<double>(stride_i);
+    const std::complex<double> ramp_step(std::cos(dphi), std::sin(dphi));
+    std::complex<double> ramp(1.0, 0.0);
+
+    out.reset(symbols, write_complex);
+
+    const bool pll_on = pll_cfg.enable;
+    // rot_cur is the per-symbol tracking rotation.  Polarity is applied only
+    // to the final real metric, never folded into z0/z1 or the phase detector.
+    std::complex<float> rot_cur = rot;
+    float pll_freq = 0.0f;
+    float pll_theta = 0.0f;
+    float mag_ema = 0.0f;
+    bool mag_init = false;
+    size_t pll_updates = 0;
+
+    for (size_t s = 0; s < symbols; ++s) {
+        const int8_t* ps = pn + s * kChipsPerBurst;
+        const int hop = (ps[0] < 0) ? 1 : 0;
+        const float sign_lo = (ps[0] < 0) ? -1.0f : 1.0f;
+        const float sign_hi = (ps[4] < 0) ? -1.0f : 1.0f;
+
+        int64_t win0 = 0;
+        int64_t win1 = 0;
+        size_t bin = 0;
+        std::complex<float> phase0(1.0f, 0.0f);
+        std::complex<float> phase1(1.0f, 0.0f);
+
+        if (!sfo_path) {
+            if (has_cfo) {
+                if ((s % kFusedPhaseAnchor) == 0) {
+                    const double ang =
+                        -w * static_cast<double>(
+                                 base0 + static_cast<int64_t>(s) * stride_i);
+                    ramp = std::complex<double>(std::cos(ang), std::sin(ang));
+                }
+                // Anchor at win0 + hop*16, i.e. the true half-0 window.
+                phase0 = std::complex<float>(static_cast<float>(ramp.real()),
+                                             static_cast<float>(ramp.imag())) *
+                         hop_phase[hop];
+                phase1 = phase0 * half_phase;
+                ramp *= ramp_step;
+            }
+            win0 = base0 + static_cast<int64_t>(s) * stride_i + hop * 16;
+            win1 = win0 + 64;
+        } else {
+            // Half 0 starts at the known-hop offset (hop*8 chips); half 1 is
+            // another 32 chips later, matching the integer path.
+            const double pos0 =
+                base_d + static_cast<double>(s) * stride_d +
+                static_cast<double>(hop * 8) * spc_d;
+            int64_t int0 = 0;
+            int64_t int1 = 0;
+            size_t bin0 = 0;
+            size_t bin1 = 0;
+            if (!decompose_frac_position(pos0, bins, int0, bin0))
+                return false;
+            if (!decompose_frac_position(
+                    pos0 + static_cast<double>(kChipsPerSymbol / 2) * spc_d,
+                    bins, int1, bin1))
+                return false;
+            win0 = int0;
+            win1 = int1;
+            bin = bin0;
+            (void)bin1;
+            if (has_cfo) {
+                const double ang0 = -w * static_cast<double>(int0);
+                const double ang1 = -w * static_cast<double>(int1);
+                phase0 = std::complex<float>(
+                    static_cast<float>(std::cos(ang0)),
+                    static_cast<float>(std::sin(ang0)));
+                phase1 = std::complex<float>(
+                    static_cast<float>(std::cos(ang1)),
+                    static_cast<float>(std::sin(ang1)));
+            }
+        }
+
+        if (fast) {
+            size_t idx_lo = 0;
+            size_t idx_hi = 0;
+            for (size_t c = 1; c < 4; ++c) {
+                if (ps[c] != ps[0])
+                    idx_lo |= (static_cast<size_t>(1) << (c - 1));
+                if (ps[c + 4] != ps[4])
+                    idx_hi |= (static_cast<size_t>(1) << (c - 1));
+            }
+            const std::complex<float>* lut_lo;
+            const std::complex<float>* lut_hi;
+            if (sfo_path) {
+                lut_lo = scratch.kh_lut.data() + bin * kKhLutPerBin;
+                lut_hi = lut_lo + kFusedHalfTemplates * kFusedHalfSpan;
+            } else {
+                lut_lo = scratch.fused_lut_lo.data();
+                lut_hi = scratch.fused_lut_hi.data();
+            }
+            build_fused_symbol_template(tpl, lut_lo, lut_hi, idx_lo, sign_lo,
+                                        idx_hi, sign_hi);
+        } else {
+            const std::complex<float>* hw =
+                sfo_path ? scratch.kh_h_w.data() + bin * tap_count
+                         : scratch.fused_h_w.data();
+            std::fill(tpl, tpl + len, std::complex<float>(0.0f, 0.0f));
+            for (size_t c = 0; c < kChipsPerBurst; ++c) {
+                const float sgn = (ps[c] < 0) ? -1.0f : 1.0f;
+                accumulate_scaled_complex(
+                    tpl + kSamplesPerChip * c, hw, tap_count,
+                    sgn * chip_phase[c].real(), sgn * chip_phase[c].imag());
+            }
+        }
+
+        std::complex<float> m[2];
+        if (fast) {
+            dot2_shared_fixed52(rx_raw + win0, rx_raw + win1, tpl, m);
+        } else {
+            m[0] = dot_generic(rx_raw + win0, tpl, len);
+            m[1] = dot_generic(rx_raw + win1, tpl, len);
+        }
+        // Raw complex correlation on the same phase basis as
+        // Metrics::complex_value: CFO fusion applied, rot/polarity/PLL not.
+        const std::complex<float> v0 = has_cfo ? phase0 * m[0] : m[0];
+        const std::complex<float> v1 = has_cfo ? phase1 * m[1] : m[1];
+        if (write_complex) {
+            out.z0[s] = v0;
+            out.z1[s] = v1;
+        }
+
+        if (pll_on) {
+            // rot_cur is the per-symbol tracked rotation (starts at rot).
+            const std::complex<float> r0 = rot_cur * v0;
+            const std::complex<float> r1 = rot_cur * v1;
+            const float re0 = r0.real();
+            const float re1 = r1.real();
+            out.m0[s] = (polarity < 0) ? -re0 : re0;
+            out.m1[s] = (polarity < 0) ? -re1 : re1;
+
+            const float norm0 = std::norm(r0);
+            const float norm1 = std::norm(r1);
+            const std::complex<float> z_win =
+                (norm0 >= norm1) ? r0 : r1;
+            const float mag = std::sqrt(std::norm(z_win));
+            if (!std::isfinite(mag)) {
+                // Never propagate a non-finite phase error into the loop.
+                continue;
+            }
+            if (!mag_init) {
+                mag_ema = mag;
+                mag_init = true;
+            } else {
+                mag_ema += 0.05f * (mag - mag_ema);
+            }
+            if (!(mag_ema > 0.0f) ||
+                mag < pll_cfg.min_mag_ratio * mag_ema)
+                continue;
+            const float sgn = (z_win.real() >= 0.0f) ? 1.0f : -1.0f;
+            const float err = (sgn * z_win.imag()) / (mag + 1e-12f);
+            pll_freq += pll_cfg.beta * err;
+            pll_freq = std::max(-pll_cfg.max_freq_step,
+                                std::min(pll_cfg.max_freq_step, pll_freq));
+            const float dtheta = pll_cfg.alpha * err + pll_freq;
+            pll_theta -= dtheta;
+            rot_cur *= ddpll_rot_neg(dtheta);
+            ++pll_updates;
+            if ((pll_updates % 64) == 0) {
+                const float rmag = std::sqrt(std::norm(rot_cur));
+                if (rmag > 0.0f && std::isfinite(rmag))
+                    rot_cur /= rmag;
+            }
+        } else {
+            // PLL disabled: rot_cur == rot, and the arithmetic matches the
+            // 4-candidate signed_value expression exactly.
+            const float re0 = rot.real() * v0.real() -
+                              rot.imag() * v0.imag();
+            const float re1 = rot.real() * v1.real() -
+                              rot.imag() * v1.imag();
+            out.m0[s] = (polarity < 0) ? -re0 : re0;
+            out.m1[s] = (polarity < 0) ? -re1 : re1;
+        }
+    }
+
+    out.pll_freq_rad = pll_freq;
+    out.pll_theta = pll_theta;
+    out.pll_updates = pll_updates;
+
+    if (timings) {
+        const clock::time_point t_end = clock::now();
+        timings->template_update_us = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(t_templ -
+                                                                 t_begin)
+                .count());
+        timings->correlate_us = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(t_end -
+                                                                 t_templ)
+                .count());
+    }
+    return true;
+}
+
+// Known-hop 2-candidate PHR correlation (64 chips/burst, 512 chips/symbol).
+//
+// The PHR hop follows the same rule as the payload (`hop = pn[64*s] < 0`).
+// The two BPM-half windows are 64 chips (hop offset) and 64 + 256 chips from
+// the symbol start, matching candidates 0/1/2/3 of correlate_phr() for the
+// known hop.  Only 21 symbols are processed, so the template is built per
+// symbol instead of being LUT-cached; m0/m1 are the signed real parts, and z0/
+// z1 are ALWAYS filled because Wave 2 needs the 21 complex pilot values for
+// PHR frequency/phase refinement and biorthogonal decoding.
+inline bool correlate_phr_known_hop(const std::complex<float>* rx,
+                                    size_t n,
+                                    const std::complex<float>* fir_taps,
+                                    size_t tap_count,
+                                    int64_t chip_start,
+                                    size_t samples_per_chip,
+                                    int64_t phr_start,
+                                    const int8_t* pn,
+                                    int8_t polarity,
+                                    std::complex<float> rot,
+                                    Metrics2& out,
+                                    Scratch& scratch,
+                                    Timings* timings = nullptr)
+{
+    if (!rx || !fir_taps || !pn)
+        return false;
+    if (polarity != 1 && polarity != -1)
+        return false;
+    if (tap_count == 0 || tap_count > kMaxTapCount)
+        return false;
+    if (samples_per_chip != kSamplesPerChip)
+        return false;
+    if (chip_start < 0 || phr_start < 0)
+        return false;
+    if (!std::isfinite(rot.real()) || !std::isfinite(rot.imag()))
+        return false;
+    if (!pn_stream_is_pm1(pn, kPhrSymbols * kPhrChipsPerBurst))
+        return false;
+
+    const int64_t spc = static_cast<int64_t>(samples_per_chip);
+    if (phr_start > (std::numeric_limits<int64_t>::max() - chip_start) / spc)
+        return false;
+    const size_t len = template_length(tap_count, kSamplesPerChip,
+                                       kPhrChipsPerBurst);
+    const int64_t base0 = chip_start + phr_start * spc -
+                          static_cast<int64_t>(tap_count) + 1;
+    if (base0 < 0)
+        return false;
+    // Furthest window: known hop 1, BPM half 1 = (64 + 256) chips.
+    const int64_t max_off =
+        static_cast<int64_t>(kPhrChipsPerBurst + kPhrChipsPerSymbol / 2) * spc;
+    const int64_t stride_i =
+        static_cast<int64_t>(kPhrChipsPerSymbol) * spc;
+    const uint64_t add = static_cast<uint64_t>(kPhrSymbols - 1) *
+                             static_cast<uint64_t>(stride_i) +
+                         static_cast<uint64_t>(max_off) +
+                         static_cast<uint64_t>(len) - 1;
+    const uint64_t last = static_cast<uint64_t>(base0) + add;
+    if (last < static_cast<uint64_t>(base0) || last >= static_cast<uint64_t>(n))
+        return false;
+
+    using clock = std::chrono::steady_clock;
+    clock::time_point t_begin{};
+    clock::time_point t_templ{};
+    if (timings)
+        t_begin = clock::now();
+
+    scratch.ensure(kPhrSymbols, len);
+    std::complex<float>* templates = scratch.templates.data();
+    for (size_t s = 0; s < kPhrSymbols; ++s) {
+        build_template_geometry(templates + s * len, fir_taps, tap_count,
+                                pn + s * kPhrChipsPerBurst,
+                                kPhrChipsPerBurst, kSamplesPerChip);
+    }
+    if (timings)
+        t_templ = clock::now();
+
+    out.reset(kPhrSymbols, true);
+    for (size_t s = 0; s < kPhrSymbols; ++s) {
+        const int hop =
+            (pn[s * kPhrChipsPerBurst] < 0) ? 1 : 0;
+        const int64_t win0 = base0 + static_cast<int64_t>(s) * stride_i +
+                             static_cast<int64_t>(hop * kPhrChipsPerBurst) *
+                                 spc;
+        const int64_t win1 =
+            win0 + static_cast<int64_t>(kPhrChipsPerSymbol / 2) * spc;
+        const std::complex<float>* tpl = templates + s * len;
+        // Raw complex correlation on the Metrics::complex_value phase basis:
+        // no rot, no polarity.  Wave 2 consumes these 21 pilot values
+        // directly, so they are always written.
+        const std::complex<float> z0 = dot_generic(rx + win0, tpl, len);
+        const std::complex<float> z1 = dot_generic(rx + win1, tpl, len);
+        out.z0[s] = z0;
+        out.z1[s] = z1;
+        const float re0 = rot.real() * z0.real() -
+                          rot.imag() * z0.imag();
+        const float re1 = rot.real() * z1.real() -
+                          rot.imag() * z1.imag();
+        out.m0[s] = (polarity < 0) ? -re0 : re0;
+        out.m1[s] = (polarity < 0) ? -re1 : re1;
+    }
+
+    if (timings) {
+        const clock::time_point t_end = clock::now();
+        timings->template_update_us = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(t_templ -
+                                                                 t_begin)
+                .count());
+        timings->correlate_us = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(t_end -
+                                                                 t_templ)
+                .count());
+    }
+    return true;
 }
 
 } // namespace rxfusion
