@@ -1,54 +1,39 @@
-# OpenUWB
+# OpenUWB — 802.15.4a/z-Compatible UWB Software Baseband
 
-原生 C++17 UWB 基带与运行时：HRP 调制/解调、重采样、CIR、SIC、Sensing 和离线
-TWR，入口是 `openuwb_rx`（实时接收或 SC16 回放）。GNU Radio blocks、PMT/PDU
-适配与 GRC 流程归档在 `archive/gnuradio-adapter`（`d5dfd30`）。
+English | [简体中文](README.zh-CN.md)
 
-2026-11-20 完成 Phase 0–4 架构重构：仓库根即 CMake 工程，公共头文件在
-`include/openuwb/<domain>/`，库源码在 `lib/<domain>/`，命名空间为 `openuwb`，
-可执行程序统一 `openuwb_*`。验收结论与 ABBA 数据见
-[重构验收报告](docs/performance/openUWB架构重构验收报告_2026-11-20.md)。
+> [!NOTE]
+> **Work in Progress**: This project is under active early development. Interfaces, CLI options, and features are evolving rapidly; API stability is not guaranteed, and no performance benchmarks are listed here yet.
 
-## 快速开始
+## Motivation & Vision
 
-依赖 C++17、CMake、VOLK、Boost.Test；连接 USRP 时需 UHD 开发包，仅回放可用
-`no-uhd` 预设。Python 3 用于辅助工具和部分测试。
+Most existing UWB research relies on dedicated commercial transceivers such as the DW1000 and DW3000. Because their baseband processing is fixed in hardware and closed firmware, researchers have very limited freedom to inspect or modify physical-layer waveforms, synchronization, channel estimation, interference cancellation, or protocol timing.
 
-```sh
-env -u LD_LIBRARY_PATH cmake --preset native-avx2
-env -u LD_LIBRARY_PATH cmake --build --preset native-avx2 -j
-env -u LD_LIBRARY_PATH ctest --preset native-avx2 --output-on-failure
+Our goal is to implement an open, software-defined UWB radio on modern wide-bandwidth SDRs (such as the USRP X410 and X420) while maintaining IEEE 802.15.4a/z compliance so that it can interoperate directly with commercial standard UWB devices (e.g., NXP, Qorvo, Apple).
 
-build/native-avx2/apps/openuwb_rx --replay capture.sc16
-```
+We believe that bringing full SDR programmability together with commercial standard interoperability will unlock many new research opportunities across UWB communication, wireless sensing, ranging (TWR), and physical-layer signal processing.
 
-预设：`native-avx2`（默认）、`native-avx512`、`scalar-debug`、`no-uhd`。
-完整参数、安装和消费者示例见
-[原生 UHD/C++ 构建使用说明](docs/原生UHD与C++构建使用说明.md)。
+## Development Timeline (Core Milestones)
 
-## 结构
+- **2026-08 — Real-Time Demodulation, Commercial Interop & Windowed Resampling**
+  - Established the windowed native-rate capture (`737.28 MS/s`) + per-window `65/48` polyphase resampling (`998.4 MS/s` working rate) architecture for blind acquisition, periodic slot locking, and decoding of real QM35825 and DW1000 captures.
+  - Aligned HRP BPRF demodulation (preamble codes, SFD search, CFO compensation) with MATLAB references.
+- **2026-09 — X410 Timed Echo CIR Sensing, Dual-TX Interference & DPDK**
+  - Built timed echo-CIR sensing on USRP X410 (CG400/CG600) with per-repetition CIR output, runtime frequency sweep/hopping, and UHD DPDK support.
+  - Implemented C++ dual-TX timed transmission (sensing + synchronized interference generation) with continuous multi-TX buffer scheduling.
+- **2026-09 ~ 2026-10 — SS-TWR / DS-TWR Protocol Core & Offline Native PHY Loopback**
+  - Delivered the UHD-free TWR configuration contract, ToF math library (verified against a MATLAB oracle), SS/DS-TWR protocol FSM, and offline native PHY loopback (hardware ToA/ranging is not yet implemented).
+- **2026-11 (Mid) — Low-SNR Demodulation, SIMD Sparse Correlation & Unified SIC**
+  - Enhanced low-SNR acquisition and decoding (folded sync, discrete SFD grid rescue, BPM soft decisions) and added AVX2 / AVX-512 sparse ternary correlation kernels.
+  - Unified single-packet Successive Interference Cancellation (SIC: decode → CIR estimation → waveform reconstruction → cancellation) with the standard demodulation pipeline (runtime integration pending).
+- **2026-11-20 — Native C++17 Refactor & Rename to OpenUWB (Phase 0–4)**
+  - Removed the runtime dependency on GNU Radio (archived under `archive/gnuradio-adapter`) and promoted the native C++17 / UHD codebase to the repository root.
+  - Renamed the project to **OpenUWB**, introducing the `openuwb` namespace, unidirectional domain libraries (`support → dsp → phy_hrp → {sic, sensing, twr_core}`, with `openuwb_radio` isolating UHD and `openuwb_runtime` assembling the pipeline), and unified `openuwb_*` applications.
 
-```
-include/openuwb/{support,dsp,phy/hrp/{common,tx,rx},sic,sensing,twr,radio,runtime}
-lib/<domain>/            与 include 镜像的静态库源码
-apps/                    openuwb_rx / pipeline_runner / capture / twr_*
-tests/{unit,integration,benchmarks}
-tools/{rx,sic,perf,performance,twr,_common}
-python/openuwb/          twr_config 纯 Python 层
-```
+## Repository Navigation
 
-单向依赖：`support → dsp → phy_hrp → {sic, sensing, twr_core}`；`radio → dsp`
-（唯一可链接 UHD）；`runtime → phy_hrp + sic + sensing + radio`。
+For current build instructions and detailed status (currently documented in Chinese):
 
-外部工程用 `find_package(OpenUWB CONFIG REQUIRED)` +
-`openuwb::runtime`（或 `openuwb::twr_core`）。旧包名 `find_package(uwb)`、
-旧头文件 `<gnuradio/uwb/...>` 与 `gr::uwb` 命名空间在过渡期保留，全部标注
-`TODO(openuwb-compat-removal)`。
-
-## 文档
-
-- [原生构建、运行与安装](docs/原生UHD与C++构建使用说明.md)
-- [当前开发状态](开发状态.md)
-- [解调与窗口执行边界](docs/架构_解调与窗口执行.md)
-- [文档索引](docs/README.md)
-- [接收与离线回放工具](tools/rx/README.md)
+- Build & usage guide: [docs/原生UHD与C++构建使用说明.md](docs/原生UHD与C++构建使用说明.md)
+- Detailed development status: [开发状态.md](开发状态.md)
+- Documentation index: [docs/README.md](docs/README.md)
