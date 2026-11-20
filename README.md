@@ -1,25 +1,54 @@
-# UWB 接收与信号处理
+# openUWB
 
-当前分支以原生 UHD/C++ 为开发基线。可以直接从 UHD 接收 SC16，也可以回放同格式文件，再执行单音消除、候选捕获、窗口重采样、DW3000 解调和周期锁定。原生库还提供 HRP 调制、SIC、CIR 和离线 TWR。GNU Radio blocks、PMT/PDU 适配、Python 绑定及 GRC 流程保存在本地分支 `archive/gnuradio-adapter`（`d5dfd30`）。
+原生 C++17 UWB 基带与运行时：HRP 调制/解调、重采样、CIR、SIC、Sensing 和离线
+TWR，入口是 `openuwb_rx`（实时接收或 SC16 回放）。GNU Radio blocks、PMT/PDU
+适配与 GRC 流程归档在 `archive/gnuradio-adapter`（`d5dfd30`）。
 
-在仓库根目录构建。依赖 C++17、CMake、VOLK、Boost.Test。连接 USRP 时需 UHD 开发包。Python 3 用于辅助工具和部分测试。
+2026-11-20 完成 Phase 0–4 架构重构：仓库根即 CMake 工程，公共头文件在
+`include/openuwb/<domain>/`，库源码在 `lib/<domain>/`，命名空间为 `openuwb`，
+可执行程序统一 `openuwb_*`。验收结论与 ABBA 数据见
+[重构验收报告](docs/performance/openUWB架构重构验收报告_2026-11-20.md)。
+
+## 快速开始
+
+依赖 C++17、CMake、VOLK、Boost.Test；连接 USRP 时需 UHD 开发包，仅回放可用
+`no-uhd` 预设。Python 3 用于辅助工具和部分测试。
 
 ```sh
-cmake -S gr-uwb -B gr-uwb/build-native-only -DENABLE_UHD_BACKEND=ON
-cmake --build gr-uwb/build-native-only -j4
-env -u LD_LIBRARY_PATH ctest --test-dir gr-uwb/build-native-only --output-on-failure -j1
+env -u LD_LIBRARY_PATH cmake --preset native-avx2
+env -u LD_LIBRARY_PATH cmake --build --preset native-avx2 -j
+env -u LD_LIBRARY_PATH ctest --preset native-avx2 --output-on-failure
+
+build/native-avx2/apps/openuwb_rx --replay capture.sc16
 ```
 
-仅做文件回放时，配置 `-DENABLE_UHD_BACKEND=OFF`。默认 `ENABLE_UHD_BACKEND=AUTO` 会按机器上是否有 UHD 开发包选择后端。`UWB_SIMD=AUTO` 在目标 Linux 机器上配置时按 CPU 和编译器能力选择 AVX-512、AVX2/FMA 或标量档位。以下示例从 737.28 MS/s SC16 文件解调。
+预设：`native-avx2`（默认）、`native-avx512`、`scalar-debug`、`no-uhd`。
+完整参数、安装和消费者示例见
+[原生 UHD/C++ 构建使用说明](docs/原生UHD与C++构建使用说明.md)。
 
-```sh
-gr-uwb/build-native-only/apps/uwb_dw3000_live --replay capture.sc16
+## 结构
+
+```
+include/openuwb/{support,dsp,phy/hrp/{common,tx,rx},sic,sensing,twr,radio,runtime}
+lib/<domain>/            与 include 镜像的静态库源码
+apps/                    openuwb_rx / pipeline_runner / capture / twr_*
+tests/{unit,integration,benchmarks}
+tools/{rx,sic,perf,performance,twr,_common}
+python/openuwb/          twr_config 纯 Python 层
 ```
 
-`uwb_core` 提供 DSP，`uwb_native` 提供原生设备源、回放和窗口运行时。外部 C++ 工程可安装后通过 `find_package(uwb CONFIG REQUIRED)` 链接 `uwb::uwb_native`。源码目录 `gr-uwb/`、公共头文件 `<gnuradio/uwb/...>` 和命名空间 `gr::uwb` 沿用既有名称，方便原生调用者继续编译。
+单向依赖：`support → dsp → phy_hrp → {sic, sensing, twr_core}`；`radio → dsp`
+（唯一可链接 UHD）；`runtime → phy_hrp + sic + sensing + radio`。
 
-- [原生构建、运行与安装说明](docs/原生UHD与C++构建使用说明.md)
+外部工程用 `find_package(OpenUWB CONFIG REQUIRED)` +
+`openuwb::runtime`（或 `openuwb::twr_core`）。旧包名 `find_package(uwb)`、
+旧头文件 `<gnuradio/uwb/...>` 与 `gr::uwb` 命名空间在过渡期保留，全部标注
+`TODO(openuwb-compat-removal)`。
+
+## 文档
+
+- [原生构建、运行与安装](docs/原生UHD与C++构建使用说明.md)
 - [当前开发状态](开发状态.md)
-- [接收与离线回放工具](tools/rx/README.md)
-- [解调与窗口执行的代码边界](docs/架构_解调与窗口执行.md)
+- [解调与窗口执行边界](docs/架构_解调与窗口执行.md)
 - [文档索引](docs/README.md)
+- [接收与离线回放工具](tools/rx/README.md)

@@ -1,0 +1,2182 @@
+{
+  "schema": "openuwb-abba-acceptance/1",
+  "baseline_commit": "d0365644bd0ad71d95a2a9b943e5725f003e664e",
+  "current_commit": "60153b7746671099ac1d5fab69e986cc71e00f82",
+  "cpu": "AMD Ryzen 7 9700X 8-Core Processor",
+  "nproc": 8,
+  "affinity": "0",
+  "isa": "native-avx2 (steady/replay), native-avx512 (kernel bench)",
+  "compiler": "g++-14 (Ubuntu 14.3.0-12ubuntu1~22~ppa2) 14.3.0",
+  "fixture": "/home/oi/Desktop/uwb-gnuradio/testdata/x410_fixed_tone_live_20261115/rx_1ms_1s.sc16",
+  "fixture_sha256": "5c90ee84754c13a6bf2038aea22e78dfa117da359de850bcc0f334588736bfc7",
+  "cycles": 3,
+  "cases": {
+    "kernel_avx512": {
+      "order": [
+        "A",
+        "B",
+        "B",
+        "A",
+        "A",
+        "B",
+        "B",
+        "A",
+        "A",
+        "B",
+        "B",
+        "A"
+      ],
+      "runs": {
+        "A": [
+          {
+            "tag": "kernel_avx512.A.0",
+            "wall_s": 0.1014,
+            "metrics": {
+              "K1  real-template dot, L=1016: 4lag AVX2 -> 8lag AVX-512 (bcast) | avx2_ns": 39.0,
+              "K1  real-template dot, L=1016: 4lag AVX2 -> 8lag AVX-512 (bcast) | cand_ns": 26.5,
+              "K1  real-template dot, L=1016: 4lag AVX2 -> 8lag AVX-512 (dup) | avx2_ns": 39.0,
+              "K1  real-template dot, L=1016: 4lag AVX2 -> 8lag AVX-512 (dup) | cand_ns": 28.0,
+              "K2  element-wise complex ops: accumulate n=1053 | avx2_ns": 64.7,
+              "K2  element-wise complex ops: accumulate n=1053 | cand_ns": 40.2,
+              "K2  element-wise complex ops: sub n=1053 | avx2_ns": 64.2,
+              "K2  element-wise complex ops: sub n=1053 | cand_ns": 39.9,
+              "K2  element-wise complex ops: scale n=1053 | avx2_ns": 73.1,
+              "K2  element-wise complex ops: scale n=1053 | cand_ns": 25.7,
+              "K2  element-wise complex ops: accumulate n=2032 | avx2_ns": 122.1,
+              "K2  element-wise complex ops: accumulate n=2032 | cand_ns": 77.8,
+              "K2  element-wise complex ops: sub n=2032 | avx2_ns": 122.1,
+              "K2  element-wise complex ops: sub n=2032 | cand_ns": 77.9,
+              "K2  element-wise complex ops: scale n=2032 | avx2_ns": 118.4,
+              "K2  element-wise complex ops: scale n=2032 | cand_ns": 53.2,
+              "K2  element-wise complex ops: accumulate n=135568 | avx2_ns": 16279.6,
+              "K2  element-wise complex ops: accumulate n=135568 | cand_ns": 16081.3,
+              "K2  element-wise complex ops: sub n=135568 | avx2_ns": 16363.5,
+              "K2  element-wise complex ops: sub n=135568 | cand_ns": 16129.1,
+              "K2  element-wise complex ops: scale n=135568 | avx2_ns": 9143.7,
+              "K2  element-wise complex ops: scale n=135568 | cand_ns": 6830.0,
+              "K3  fold_sfd_window: fold_sfd_window | avx2_ns": 370.5,
+              "K3  fold_sfd_window: fold_sfd_window | cand_ns": 308.2,
+              "K4  SIC 20-tap pulse accumulation: accumulate 20-tap pulses | avx2_ns": 28583.5,
+              "K4  SIC 20-tap pulse accumulation: accumulate 20-tap pulses | cand_ns": 28569.7,
+              "K5/K6  fixed-length complex dots: dot_fixed52 (payload CMF) | avx2_ns": 4.0,
+              "K5/K6  fixed-length complex dots: dot_fixed52 (payload CMF) | cand_ns": 5.1,
+              "K5/K6  fixed-length complex dots: dot_fixed38 (CIR FIR) | avx2_ns": 3.2,
+              "K5/K6  fixed-length complex dots: dot_fixed38 (CIR FIR) | cand_ns": 5.6
+            }
+          },
+          {
+            "tag": "kernel_avx512.A.1",
+            "wall_s": 0.1013,
+            "metrics": {
+              "K1  real-template dot, L=1016: 4lag AVX2 -> 8lag AVX-512 (bcast) | avx2_ns": 36.5,
+              "K1  real-template dot, L=1016: 4lag AVX2 -> 8lag AVX-512 (bcast) | cand_ns": 27.0,
+              "K1  real-template dot, L=1016: 4lag AVX2 -> 8lag AVX-512 (dup) | avx2_ns": 36.5,
+              "K1  real-template dot, L=1016: 4lag AVX2 -> 8lag AVX-512 (dup) | cand_ns": 28.4,
+              "K2  element-wise complex ops: accumulate n=1053 | avx2_ns": 65.9,
+              "K2  element-wise complex ops: accumulate n=1053 | cand_ns": 40.7,
+              "K2  element-wise complex ops: sub n=1053 | avx2_ns": 65.3,
+              "K2  element-wise complex ops: sub n=1053 | cand_ns": 40.5,
+              "K2  element-wise complex ops: scale n=1053 | avx2_ns": 73.6,
+              "K2  element-wise complex ops: scale n=1053 | cand_ns": 26.3,
+              "K2  element-wise complex ops: accumulate n=2032 | avx2_ns": 124.2,
+              "K2  element-wise complex ops: accumulate n=2032 | cand_ns": 79.0,
+              "K2  element-wise complex ops: sub n=2032 | avx2_ns": 123.3,
+              "K2  element-wise complex ops: sub n=2032 | cand_ns": 79.2,
+              "K2  element-wise complex ops: scale n=2032 | avx2_ns": 120.1,
+              "K2  element-wise complex ops: scale n=2032 | cand_ns": 54.1,
+              "K2  element-wise complex ops: accumulate n=135568 | avx2_ns": 16479.3,
+              "K2  element-wise complex ops: accumulate n=135568 | cand_ns": 16150.4,
+              "K2  element-wise complex ops: sub n=135568 | avx2_ns": 16466.1,
+              "K2  element-wise complex ops: sub n=135568 | cand_ns": 16222.2,
+              "K2  element-wise complex ops: scale n=135568 | avx2_ns": 9139.0,
+              "K2  element-wise complex ops: scale n=135568 | cand_ns": 6806.8,
+              "K3  fold_sfd_window: fold_sfd_window | avx2_ns": 347.1,
+              "K3  fold_sfd_window: fold_sfd_window | cand_ns": 320.7,
+              "K4  SIC 20-tap pulse accumulation: accumulate 20-tap pulses | avx2_ns": 28666.6,
+              "K4  SIC 20-tap pulse accumulation: accumulate 20-tap pulses | cand_ns": 28908.3,
+              "K5/K6  fixed-length complex dots: dot_fixed52 (payload CMF) | avx2_ns": 4.0,
+              "K5/K6  fixed-length complex dots: dot_fixed52 (payload CMF) | cand_ns": 5.2,
+              "K5/K6  fixed-length complex dots: dot_fixed38 (CIR FIR) | avx2_ns": 3.2,
+              "K5/K6  fixed-length complex dots: dot_fixed38 (CIR FIR) | cand_ns": 5.7
+            }
+          },
+          {
+            "tag": "kernel_avx512.A.2",
+            "wall_s": 0.0995,
+            "metrics": {
+              "K1  real-template dot, L=1016: 4lag AVX2 -> 8lag AVX-512 (bcast) | avx2_ns": 39.6,
+              "K1  real-template dot, L=1016: 4lag AVX2 -> 8lag AVX-512 (bcast) | cand_ns": 27.0,
+              "K1  real-template dot, L=1016: 4lag AVX2 -> 8lag AVX-512 (dup) | avx2_ns": 39.6,
+              "K1  real-template dot, L=1016: 4lag AVX2 -> 8lag AVX-512 (dup) | cand_ns": 28.4,
+              "K2  element-wise complex ops: accumulate n=1053 | avx2_ns": 65.8,
+              "K2  element-wise complex ops: accumulate n=1053 | cand_ns": 40.7,
+              "K2  element-wise complex ops: sub n=1053 | avx2_ns": 65.3,
+              "K2  element-wise complex ops: sub n=1053 | cand_ns": 40.6,
+              "K2  element-wise complex ops: scale n=1053 | avx2_ns": 73.8,
+              "K2  element-wise complex ops: scale n=1053 | cand_ns": 26.1,
+              "K2  element-wise complex ops: accumulate n=2032 | avx2_ns": 123.3,
+              "K2  element-wise complex ops: accumulate n=2032 | cand_ns": 78.9,
+              "K2  element-wise complex ops: sub n=2032 | avx2_ns": 123.9,
+              "K2  element-wise complex ops: sub n=2032 | cand_ns": 79.1,
+              "K2  element-wise complex ops: scale n=2032 | avx2_ns": 119.2,
+              "K2  element-wise complex ops: scale n=2032 | cand_ns": 54.0,
+              "K2  element-wise complex ops: accumulate n=135568 | avx2_ns": 15356.4,
+              "K2  element-wise complex ops: accumulate n=135568 | cand_ns": 16416.4,
+              "K2  element-wise complex ops: sub n=135568 | avx2_ns": 15378.6,
+              "K2  element-wise complex ops: sub n=135568 | cand_ns": 16431.8,
+              "K2  element-wise complex ops: scale n=135568 | avx2_ns": 9110.9,
+              "K2  element-wise complex ops: scale n=135568 | cand_ns": 6701.2,
+              "K3  fold_sfd_window: fold_sfd_window | avx2_ns": 377.0,
+              "K3  fold_sfd_window: fold_sfd_window | cand_ns": 326.3,
+              "K4  SIC 20-tap pulse accumulation: accumulate 20-tap pulses | avx2_ns": 28879.6,
+              "K4  SIC 20-tap pulse accumulation: accumulate 20-tap pulses | cand_ns": 29018.7,
+              "K5/K6  fixed-length complex dots: dot_fixed52 (payload CMF) | avx2_ns": 4.0,
+              "K5/K6  fixed-length complex dots: dot_fixed52 (payload CMF) | cand_ns": 5.2,
+              "K5/K6  fixed-length complex dots: dot_fixed38 (CIR FIR) | avx2_ns": 3.2,
+              "K5/K6  fixed-length complex dots: dot_fixed38 (CIR FIR) | cand_ns": 5.6
+            }
+          },
+          {
+            "tag": "kernel_avx512.A.3",
+            "wall_s": 0.1002,
+            "metrics": {
+              "K1  real-template dot, L=1016: 4lag AVX2 -> 8lag AVX-512 (bcast) | avx2_ns": 39.6,
+              "K1  real-template dot, L=1016: 4lag AVX2 -> 8lag AVX-512 (bcast) | cand_ns": 26.9,
+              "K1  real-template dot, L=1016: 4lag AVX2 -> 8lag AVX-512 (dup) | avx2_ns": 39.6,
+              "K1  real-template dot, L=1016: 4lag AVX2 -> 8lag AVX-512 (dup) | cand_ns": 28.4,
+              "K2  element-wise complex ops: accumulate n=1053 | avx2_ns": 65.8,
+              "K2  element-wise complex ops: accumulate n=1053 | cand_ns": 40.5,
+              "K2  element-wise complex ops: sub n=1053 | avx2_ns": 65.6,
+              "K2  element-wise complex ops: sub n=1053 | cand_ns": 40.6,
+              "K2  element-wise complex ops: scale n=1053 | avx2_ns": 74.3,
+              "K2  element-wise complex ops: scale n=1053 | cand_ns": 26.1,
+              "K2  element-wise complex ops: accumulate n=2032 | avx2_ns": 122.9,
+              "K2  element-wise complex ops: accumulate n=2032 | cand_ns": 78.9,
+              "K2  element-wise complex ops: sub n=2032 | avx2_ns": 123.5,
+              "K2  element-wise complex ops: sub n=2032 | cand_ns": 79.0,
+              "K2  element-wise complex ops: scale n=2032 | avx2_ns": 121.0,
+              "K2  element-wise complex ops: scale n=2032 | cand_ns": 54.0,
+              "K2  element-wise complex ops: accumulate n=135568 | avx2_ns": 15636.7,
+              "K2  element-wise complex ops: accumulate n=135568 | cand_ns": 16465.7,
+              "K2  element-wise complex ops: sub n=135568 | avx2_ns": 15444.2,
+              "K2  element-wise complex ops: sub n=135568 | cand_ns": 16525.4,
+              "K2  element-wise complex ops: scale n=135568 | avx2_ns": 9198.0,
+              "K2  element-wise complex ops: scale n=135568 | cand_ns": 6780.0,
+              "K3  fold_sfd_window: fold_sfd_window | avx2_ns": 351.6,
+              "K3  fold_sfd_window: fold_sfd_window | cand_ns": 312.9,
+              "K4  SIC 20-tap pulse accumulation: accumulate 20-tap pulses | avx2_ns": 29209.3,
+              "K4  SIC 20-tap pulse accumulation: accumulate 20-tap pulses | cand_ns": 28920.1,
+              "K5/K6  fixed-length complex dots: dot_fixed52 (payload CMF) | avx2_ns": 4.0,
+              "K5/K6  fixed-length complex dots: dot_fixed52 (payload CMF) | cand_ns": 5.2,
+              "K5/K6  fixed-length complex dots: dot_fixed38 (CIR FIR) | avx2_ns": 3.2,
+              "K5/K6  fixed-length complex dots: dot_fixed38 (CIR FIR) | cand_ns": 5.7
+            }
+          },
+          {
+            "tag": "kernel_avx512.A.4",
+            "wall_s": 0.1011,
+            "metrics": {
+              "K1  real-template dot, L=1016: 4lag AVX2 -> 8lag AVX-512 (bcast) | avx2_ns": 39.8,
+              "K1  real-template dot, L=1016: 4lag AVX2 -> 8lag AVX-512 (bcast) | cand_ns": 27.1,
+              "K1  real-template dot, L=1016: 4lag AVX2 -> 8lag AVX-512 (dup) | avx2_ns": 39.8,
+              "K1  real-template dot, L=1016: 4lag AVX2 -> 8lag AVX-512 (dup) | cand_ns": 28.5,
+              "K2  element-wise complex ops: accumulate n=1053 | avx2_ns": 66.0,
+              "K2  element-wise complex ops: accumulate n=1053 | cand_ns": 40.9,
+              "K2  element-wise complex ops: sub n=1053 | avx2_ns": 65.4,
+              "K2  element-wise complex ops: sub n=1053 | cand_ns": 40.6,
+              "K2  element-wise complex ops: scale n=1053 | avx2_ns": 74.6,
+              "K2  element-wise complex ops: scale n=1053 | cand_ns": 26.2,
+              "K2  element-wise complex ops: accumulate n=2032 | avx2_ns": 123.8,
+              "K2  element-wise complex ops: accumulate n=2032 | cand_ns": 79.1,
+              "K2  element-wise complex ops: sub n=2032 | avx2_ns": 124.1,
+              "K2  element-wise complex ops: sub n=2032 | cand_ns": 79.3,
+              "K2  element-wise complex ops: scale n=2032 | avx2_ns": 120.3,
+              "K2  element-wise complex ops: scale n=2032 | cand_ns": 54.2,
+              "K2  element-wise complex ops: accumulate n=135568 | avx2_ns": 16359.1,
+              "K2  element-wise complex ops: accumulate n=135568 | cand_ns": 16170.7,
+              "K2  element-wise complex ops: sub n=135568 | avx2_ns": 16343.9,
+              "K2  element-wise complex ops: sub n=135568 | cand_ns": 16216.6,
+              "K2  element-wise complex ops: scale n=135568 | avx2_ns": 9140.0,
+              "K2  element-wise complex ops: scale n=135568 | cand_ns": 6727.1,
+              "K3  fold_sfd_window: fold_sfd_window | avx2_ns": 371.4,
+              "K3  fold_sfd_window: fold_sfd_window | cand_ns": 322.9,
+              "K4  SIC 20-tap pulse accumulation: accumulate 20-tap pulses | avx2_ns": 29174.6,
+              "K4  SIC 20-tap pulse accumulation: accumulate 20-tap pulses | cand_ns": 28973.4,
+              "K5/K6  fixed-length complex dots: dot_fixed52 (payload CMF) | avx2_ns": 4.0,
+              "K5/K6  fixed-length complex dots: dot_fixed52 (payload CMF) | cand_ns": 5.2,
+              "K5/K6  fixed-length complex dots: dot_fixed38 (CIR FIR) | avx2_ns": 3.2,
+              "K5/K6  fixed-length complex dots: dot_fixed38 (CIR FIR) | cand_ns": 5.7
+            }
+          },
+          {
+            "tag": "kernel_avx512.A.5",
+            "wall_s": 0.1001,
+            "metrics": {
+              "K1  real-template dot, L=1016: 4lag AVX2 -> 8lag AVX-512 (bcast) | avx2_ns": 39.8,
+              "K1  real-template dot, L=1016: 4lag AVX2 -> 8lag AVX-512 (bcast) | cand_ns": 27.1,
+              "K1  real-template dot, L=1016: 4lag AVX2 -> 8lag AVX-512 (dup) | avx2_ns": 39.8,
+              "K1  real-template dot, L=1016: 4lag AVX2 -> 8lag AVX-512 (dup) | cand_ns": 28.5,
+              "K2  element-wise complex ops: accumulate n=1053 | avx2_ns": 66.0,
+              "K2  element-wise complex ops: accumulate n=1053 | cand_ns": 40.8,
+              "K2  element-wise complex ops: sub n=1053 | avx2_ns": 65.5,
+              "K2  element-wise complex ops: sub n=1053 | cand_ns": 40.6,
+              "K2  element-wise complex ops: scale n=1053 | avx2_ns": 73.7,
+              "K2  element-wise complex ops: scale n=1053 | cand_ns": 26.2,
+              "K2  element-wise complex ops: accumulate n=2032 | avx2_ns": 123.6,
+              "K2  element-wise complex ops: accumulate n=2032 | cand_ns": 79.1,
+              "K2  element-wise complex ops: sub n=2032 | avx2_ns": 123.5,
+              "K2  element-wise complex ops: sub n=2032 | cand_ns": 79.3,
+              "K2  element-wise complex ops: scale n=2032 | avx2_ns": 119.9,
+              "K2  element-wise complex ops: scale n=2032 | cand_ns": 53.9,
+              "K2  element-wise complex ops: accumulate n=135568 | avx2_ns": 15444.5,
+              "K2  element-wise complex ops: accumulate n=135568 | cand_ns": 16461.8,
+              "K2  element-wise complex ops: sub n=135568 | avx2_ns": 15444.5,
+              "K2  element-wise complex ops: sub n=135568 | cand_ns": 16504.7,
+              "K2  element-wise complex ops: scale n=135568 | avx2_ns": 9073.8,
+              "K2  element-wise complex ops: scale n=135568 | cand_ns": 6624.9,
+              "K3  fold_sfd_window: fold_sfd_window | avx2_ns": 358.9,
+              "K3  fold_sfd_window: fold_sfd_window | cand_ns": 309.2,
+              "K4  SIC 20-tap pulse accumulation: accumulate 20-tap pulses | avx2_ns": 29429.7,
+              "K4  SIC 20-tap pulse accumulation: accumulate 20-tap pulses | cand_ns": 28935.9,
+              "K5/K6  fixed-length complex dots: dot_fixed52 (payload CMF) | avx2_ns": 4.0,
+              "K5/K6  fixed-length complex dots: dot_fixed52 (payload CMF) | cand_ns": 5.2,
+              "K5/K6  fixed-length complex dots: dot_fixed38 (CIR FIR) | avx2_ns": 3.2,
+              "K5/K6  fixed-length complex dots: dot_fixed38 (CIR FIR) | cand_ns": 5.7
+            }
+          }
+        ],
+        "B": [
+          {
+            "tag": "kernel_avx512.B.0",
+            "wall_s": 0.1018,
+            "metrics": {
+              "K1  real-template dot, L=1016: 4lag AVX2 -> 8lag AVX-512 (bcast) | avx2_ns": 39.4,
+              "K1  real-template dot, L=1016: 4lag AVX2 -> 8lag AVX-512 (bcast) | cand_ns": 26.8,
+              "K1  real-template dot, L=1016: 4lag AVX2 -> 8lag AVX-512 (dup) | avx2_ns": 39.4,
+              "K1  real-template dot, L=1016: 4lag AVX2 -> 8lag AVX-512 (dup) | cand_ns": 28.2,
+              "K2  element-wise complex ops: accumulate n=1053 | avx2_ns": 66.8,
+              "K2  element-wise complex ops: accumulate n=1053 | cand_ns": 40.3,
+              "K2  element-wise complex ops: sub n=1053 | avx2_ns": 64.8,
+              "K2  element-wise complex ops: sub n=1053 | cand_ns": 40.2,
+              "K2  element-wise complex ops: scale n=1053 | avx2_ns": 73.7,
+              "K2  element-wise complex ops: scale n=1053 | cand_ns": 25.7,
+              "K2  element-wise complex ops: accumulate n=2032 | avx2_ns": 122.3,
+              "K2  element-wise complex ops: accumulate n=2032 | cand_ns": 78.2,
+              "K2  element-wise complex ops: sub n=2032 | avx2_ns": 122.5,
+              "K2  element-wise complex ops: sub n=2032 | cand_ns": 78.4,
+              "K2  element-wise complex ops: scale n=2032 | avx2_ns": 118.4,
+              "K2  element-wise complex ops: scale n=2032 | cand_ns": 53.6,
+              "K2  element-wise complex ops: accumulate n=135568 | avx2_ns": 16538.0,
+              "K2  element-wise complex ops: accumulate n=135568 | cand_ns": 16217.9,
+              "K2  element-wise complex ops: sub n=135568 | avx2_ns": 16565.6,
+              "K2  element-wise complex ops: sub n=135568 | cand_ns": 16186.2,
+              "K2  element-wise complex ops: scale n=135568 | avx2_ns": 9176.1,
+              "K2  element-wise complex ops: scale n=135568 | cand_ns": 6929.7,
+              "K3  fold_sfd_window: fold_sfd_window | avx2_ns": 351.5,
+              "K3  fold_sfd_window: fold_sfd_window | cand_ns": 319.2,
+              "K4  SIC 20-tap pulse accumulation: accumulate 20-tap pulses | avx2_ns": 28772.2,
+              "K4  SIC 20-tap pulse accumulation: accumulate 20-tap pulses | cand_ns": 28874.2,
+              "K5/K6  fixed-length complex dots: dot_fixed52 (payload CMF) | avx2_ns": 4.0,
+              "K5/K6  fixed-length complex dots: dot_fixed52 (payload CMF) | cand_ns": 5.2,
+              "K5/K6  fixed-length complex dots: dot_fixed38 (CIR FIR) | avx2_ns": 3.2,
+              "K5/K6  fixed-length complex dots: dot_fixed38 (CIR FIR) | cand_ns": 5.6
+            }
+          },
+          {
+            "tag": "kernel_avx512.B.1",
+            "wall_s": 0.1001,
+            "metrics": {
+              "K1  real-template dot, L=1016: 4lag AVX2 -> 8lag AVX-512 (bcast) | avx2_ns": 39.4,
+              "K1  real-template dot, L=1016: 4lag AVX2 -> 8lag AVX-512 (bcast) | cand_ns": 27.1,
+              "K1  real-template dot, L=1016: 4lag AVX2 -> 8lag AVX-512 (dup) | avx2_ns": 39.4,
+              "K1  real-template dot, L=1016: 4lag AVX2 -> 8lag AVX-512 (dup) | cand_ns": 28.6,
+              "K2  element-wise complex ops: accumulate n=1053 | avx2_ns": 65.4,
+              "K2  element-wise complex ops: accumulate n=1053 | cand_ns": 41.4,
+              "K2  element-wise complex ops: sub n=1053 | avx2_ns": 65.3,
+              "K2  element-wise complex ops: sub n=1053 | cand_ns": 41.6,
+              "K2  element-wise complex ops: scale n=1053 | avx2_ns": 73.0,
+              "K2  element-wise complex ops: scale n=1053 | cand_ns": 26.6,
+              "K2  element-wise complex ops: accumulate n=2032 | avx2_ns": 122.6,
+              "K2  element-wise complex ops: accumulate n=2032 | cand_ns": 78.5,
+              "K2  element-wise complex ops: sub n=2032 | avx2_ns": 122.3,
+              "K2  element-wise complex ops: sub n=2032 | cand_ns": 78.7,
+              "K2  element-wise complex ops: scale n=2032 | avx2_ns": 120.8,
+              "K2  element-wise complex ops: scale n=2032 | cand_ns": 53.9,
+              "K2  element-wise complex ops: accumulate n=135568 | avx2_ns": 15393.5,
+              "K2  element-wise complex ops: accumulate n=135568 | cand_ns": 16555.2,
+              "K2  element-wise complex ops: sub n=135568 | avx2_ns": 15370.0,
+              "K2  element-wise complex ops: sub n=135568 | cand_ns": 16456.1,
+              "K2  element-wise complex ops: scale n=135568 | avx2_ns": 9157.7,
+              "K2  element-wise complex ops: scale n=135568 | cand_ns": 6789.9,
+              "K3  fold_sfd_window: fold_sfd_window | avx2_ns": 375.5,
+              "K3  fold_sfd_window: fold_sfd_window | cand_ns": 313.2,
+              "K4  SIC 20-tap pulse accumulation: accumulate 20-tap pulses | avx2_ns": 28813.9,
+              "K4  SIC 20-tap pulse accumulation: accumulate 20-tap pulses | cand_ns": 28906.9,
+              "K5/K6  fixed-length complex dots: dot_fixed52 (payload CMF) | avx2_ns": 4.0,
+              "K5/K6  fixed-length complex dots: dot_fixed52 (payload CMF) | cand_ns": 5.2,
+              "K5/K6  fixed-length complex dots: dot_fixed38 (CIR FIR) | avx2_ns": 3.2,
+              "K5/K6  fixed-length complex dots: dot_fixed38 (CIR FIR) | cand_ns": 5.6
+            }
+          },
+          {
+            "tag": "kernel_avx512.B.2",
+            "wall_s": 0.1011,
+            "metrics": {
+              "K1  real-template dot, L=1016: 4lag AVX2 -> 8lag AVX-512 (bcast) | avx2_ns": 39.8,
+              "K1  real-template dot, L=1016: 4lag AVX2 -> 8lag AVX-512 (bcast) | cand_ns": 27.1,
+              "K1  real-template dot, L=1016: 4lag AVX2 -> 8lag AVX-512 (dup) | avx2_ns": 39.8,
+              "K1  real-template dot, L=1016: 4lag AVX2 -> 8lag AVX-512 (dup) | cand_ns": 28.5,
+              "K2  element-wise complex ops: accumulate n=1053 | avx2_ns": 66.0,
+              "K2  element-wise complex ops: accumulate n=1053 | cand_ns": 40.7,
+              "K2  element-wise complex ops: sub n=1053 | avx2_ns": 65.6,
+              "K2  element-wise complex ops: sub n=1053 | cand_ns": 40.7,
+              "K2  element-wise complex ops: scale n=1053 | avx2_ns": 75.1,
+              "K2  element-wise complex ops: scale n=1053 | cand_ns": 27.4,
+              "K2  element-wise complex ops: accumulate n=2032 | avx2_ns": 123.6,
+              "K2  element-wise complex ops: accumulate n=2032 | cand_ns": 79.0,
+              "K2  element-wise complex ops: sub n=2032 | avx2_ns": 124.1,
+              "K2  element-wise complex ops: sub n=2032 | cand_ns": 79.3,
+              "K2  element-wise complex ops: scale n=2032 | avx2_ns": 121.6,
+              "K2  element-wise complex ops: scale n=2032 | cand_ns": 54.1,
+              "K2  element-wise complex ops: accumulate n=135568 | avx2_ns": 16442.4,
+              "K2  element-wise complex ops: accumulate n=135568 | cand_ns": 16125.9,
+              "K2  element-wise complex ops: sub n=135568 | avx2_ns": 16376.1,
+              "K2  element-wise complex ops: sub n=135568 | cand_ns": 16165.2,
+              "K2  element-wise complex ops: scale n=135568 | avx2_ns": 9132.4,
+              "K2  element-wise complex ops: scale n=135568 | cand_ns": 6639.4,
+              "K3  fold_sfd_window: fold_sfd_window | avx2_ns": 361.5,
+              "K3  fold_sfd_window: fold_sfd_window | cand_ns": 309.8,
+              "K4  SIC 20-tap pulse accumulation: accumulate 20-tap pulses | avx2_ns": 28781.3,
+              "K4  SIC 20-tap pulse accumulation: accumulate 20-tap pulses | cand_ns": 28948.8,
+              "K5/K6  fixed-length complex dots: dot_fixed52 (payload CMF) | avx2_ns": 4.0,
+              "K5/K6  fixed-length complex dots: dot_fixed52 (payload CMF) | cand_ns": 5.2,
+              "K5/K6  fixed-length complex dots: dot_fixed38 (CIR FIR) | avx2_ns": 3.2,
+              "K5/K6  fixed-length complex dots: dot_fixed38 (CIR FIR) | cand_ns": 5.7
+            }
+          },
+          {
+            "tag": "kernel_avx512.B.3",
+            "wall_s": 0.1003,
+            "metrics": {
+              "K1  real-template dot, L=1016: 4lag AVX2 -> 8lag AVX-512 (bcast) | avx2_ns": 39.7,
+              "K1  real-template dot, L=1016: 4lag AVX2 -> 8lag AVX-512 (bcast) | cand_ns": 27.0,
+              "K1  real-template dot, L=1016: 4lag AVX2 -> 8lag AVX-512 (dup) | avx2_ns": 39.7,
+              "K1  real-template dot, L=1016: 4lag AVX2 -> 8lag AVX-512 (dup) | cand_ns": 28.4,
+              "K2  element-wise complex ops: accumulate n=1053 | avx2_ns": 65.9,
+              "K2  element-wise complex ops: accumulate n=1053 | cand_ns": 40.8,
+              "K2  element-wise complex ops: sub n=1053 | avx2_ns": 65.3,
+              "K2  element-wise complex ops: sub n=1053 | cand_ns": 40.5,
+              "K2  element-wise complex ops: scale n=1053 | avx2_ns": 74.3,
+              "K2  element-wise complex ops: scale n=1053 | cand_ns": 26.4,
+              "K2  element-wise complex ops: accumulate n=2032 | avx2_ns": 123.2,
+              "K2  element-wise complex ops: accumulate n=2032 | cand_ns": 79.0,
+              "K2  element-wise complex ops: sub n=2032 | avx2_ns": 124.7,
+              "K2  element-wise complex ops: sub n=2032 | cand_ns": 79.3,
+              "K2  element-wise complex ops: scale n=2032 | avx2_ns": 120.4,
+              "K2  element-wise complex ops: scale n=2032 | cand_ns": 54.0,
+              "K2  element-wise complex ops: accumulate n=135568 | avx2_ns": 15328.0,
+              "K2  element-wise complex ops: accumulate n=135568 | cand_ns": 16467.5,
+              "K2  element-wise complex ops: sub n=135568 | avx2_ns": 15662.9,
+              "K2  element-wise complex ops: sub n=135568 | cand_ns": 16859.0,
+              "K2  element-wise complex ops: scale n=135568 | avx2_ns": 9149.1,
+              "K2  element-wise complex ops: scale n=135568 | cand_ns": 6711.7,
+              "K3  fold_sfd_window: fold_sfd_window | avx2_ns": 349.1,
+              "K3  fold_sfd_window: fold_sfd_window | cand_ns": 309.0,
+              "K4  SIC 20-tap pulse accumulation: accumulate 20-tap pulses | avx2_ns": 29018.7,
+              "K4  SIC 20-tap pulse accumulation: accumulate 20-tap pulses | cand_ns": 29090.0,
+              "K5/K6  fixed-length complex dots: dot_fixed52 (payload CMF) | avx2_ns": 4.0,
+              "K5/K6  fixed-length complex dots: dot_fixed52 (payload CMF) | cand_ns": 5.2,
+              "K5/K6  fixed-length complex dots: dot_fixed38 (CIR FIR) | avx2_ns": 3.2,
+              "K5/K6  fixed-length complex dots: dot_fixed38 (CIR FIR) | cand_ns": 5.7
+            }
+          },
+          {
+            "tag": "kernel_avx512.B.4",
+            "wall_s": 0.1002,
+            "metrics": {
+              "K1  real-template dot, L=1016: 4lag AVX2 -> 8lag AVX-512 (bcast) | avx2_ns": 39.8,
+              "K1  real-template dot, L=1016: 4lag AVX2 -> 8lag AVX-512 (bcast) | cand_ns": 27.0,
+              "K1  real-template dot, L=1016: 4lag AVX2 -> 8lag AVX-512 (dup) | avx2_ns": 39.8,
+              "K1  real-template dot, L=1016: 4lag AVX2 -> 8lag AVX-512 (dup) | cand_ns": 28.5,
+              "K2  element-wise complex ops: accumulate n=1053 | avx2_ns": 65.9,
+              "K2  element-wise complex ops: accumulate n=1053 | cand_ns": 40.7,
+              "K2  element-wise complex ops: sub n=1053 | avx2_ns": 65.5,
+              "K2  element-wise complex ops: sub n=1053 | cand_ns": 40.7,
+              "K2  element-wise complex ops: scale n=1053 | avx2_ns": 75.2,
+              "K2  element-wise complex ops: scale n=1053 | cand_ns": 26.9,
+              "K2  element-wise complex ops: accumulate n=2032 | avx2_ns": 124.4,
+              "K2  element-wise complex ops: accumulate n=2032 | cand_ns": 79.0,
+              "K2  element-wise complex ops: sub n=2032 | avx2_ns": 124.7,
+              "K2  element-wise complex ops: sub n=2032 | cand_ns": 79.2,
+              "K2  element-wise complex ops: scale n=2032 | avx2_ns": 119.7,
+              "K2  element-wise complex ops: scale n=2032 | cand_ns": 54.1,
+              "K2  element-wise complex ops: accumulate n=135568 | avx2_ns": 15714.1,
+              "K2  element-wise complex ops: accumulate n=135568 | cand_ns": 16413.4,
+              "K2  element-wise complex ops: sub n=135568 | avx2_ns": 15431.6,
+              "K2  element-wise complex ops: sub n=135568 | cand_ns": 16502.0,
+              "K2  element-wise complex ops: scale n=135568 | avx2_ns": 9280.7,
+              "K2  element-wise complex ops: scale n=135568 | cand_ns": 6817.9,
+              "K3  fold_sfd_window: fold_sfd_window | avx2_ns": 350.2,
+              "K3  fold_sfd_window: fold_sfd_window | cand_ns": 313.4,
+              "K4  SIC 20-tap pulse accumulation: accumulate 20-tap pulses | avx2_ns": 28685.7,
+              "K4  SIC 20-tap pulse accumulation: accumulate 20-tap pulses | cand_ns": 28919.7,
+              "K5/K6  fixed-length complex dots: dot_fixed52 (payload CMF) | avx2_ns": 4.0,
+              "K5/K6  fixed-length complex dots: dot_fixed52 (payload CMF) | cand_ns": 5.2,
+              "K5/K6  fixed-length complex dots: dot_fixed38 (CIR FIR) | avx2_ns": 3.2,
+              "K5/K6  fixed-length complex dots: dot_fixed38 (CIR FIR) | cand_ns": 5.7
+            }
+          },
+          {
+            "tag": "kernel_avx512.B.5",
+            "wall_s": 0.0999,
+            "metrics": {
+              "K1  real-template dot, L=1016: 4lag AVX2 -> 8lag AVX-512 (bcast) | avx2_ns": 39.8,
+              "K1  real-template dot, L=1016: 4lag AVX2 -> 8lag AVX-512 (bcast) | cand_ns": 27.1,
+              "K1  real-template dot, L=1016: 4lag AVX2 -> 8lag AVX-512 (dup) | avx2_ns": 39.8,
+              "K1  real-template dot, L=1016: 4lag AVX2 -> 8lag AVX-512 (dup) | cand_ns": 28.5,
+              "K2  element-wise complex ops: accumulate n=1053 | avx2_ns": 66.0,
+              "K2  element-wise complex ops: accumulate n=1053 | cand_ns": 40.8,
+              "K2  element-wise complex ops: sub n=1053 | avx2_ns": 65.5,
+              "K2  element-wise complex ops: sub n=1053 | cand_ns": 40.9,
+              "K2  element-wise complex ops: scale n=1053 | avx2_ns": 74.6,
+              "K2  element-wise complex ops: scale n=1053 | cand_ns": 26.2,
+              "K2  element-wise complex ops: accumulate n=2032 | avx2_ns": 123.7,
+              "K2  element-wise complex ops: accumulate n=2032 | cand_ns": 79.2,
+              "K2  element-wise complex ops: sub n=2032 | avx2_ns": 123.7,
+              "K2  element-wise complex ops: sub n=2032 | cand_ns": 82.2,
+              "K2  element-wise complex ops: scale n=2032 | avx2_ns": 119.8,
+              "K2  element-wise complex ops: scale n=2032 | cand_ns": 54.2,
+              "K2  element-wise complex ops: accumulate n=135568 | avx2_ns": 15440.9,
+              "K2  element-wise complex ops: accumulate n=135568 | cand_ns": 16506.5,
+              "K2  element-wise complex ops: sub n=135568 | avx2_ns": 15467.1,
+              "K2  element-wise complex ops: sub n=135568 | cand_ns": 16465.7,
+              "K2  element-wise complex ops: scale n=135568 | avx2_ns": 9154.5,
+              "K2  element-wise complex ops: scale n=135568 | cand_ns": 6654.1,
+              "K3  fold_sfd_window: fold_sfd_window | avx2_ns": 356.6,
+              "K3  fold_sfd_window: fold_sfd_window | cand_ns": 313.4,
+              "K4  SIC 20-tap pulse accumulation: accumulate 20-tap pulses | avx2_ns": 28945.4,
+              "K4  SIC 20-tap pulse accumulation: accumulate 20-tap pulses | cand_ns": 28929.3,
+              "K5/K6  fixed-length complex dots: dot_fixed52 (payload CMF) | avx2_ns": 4.0,
+              "K5/K6  fixed-length complex dots: dot_fixed52 (payload CMF) | cand_ns": 5.2,
+              "K5/K6  fixed-length complex dots: dot_fixed38 (CIR FIR) | avx2_ns": 3.2,
+              "K5/K6  fixed-length complex dots: dot_fixed38 (CIR FIR) | cand_ns": 5.7
+            }
+          }
+        ]
+      },
+      "summary": {
+        "K1  real-template dot, L=1016: 4lag AVX2 -> 8lag AVX-512 (bcast) | avx2_ns": {
+          "baseline_median": 39.6,
+          "current_median": 39.75,
+          "delta_pct": 0.379,
+          "baseline_values": [
+            39.0,
+            36.5,
+            39.6,
+            39.6,
+            39.8,
+            39.8
+          ],
+          "current_values": [
+            39.4,
+            39.4,
+            39.8,
+            39.7,
+            39.8,
+            39.8
+          ]
+        },
+        "K1  real-template dot, L=1016: 4lag AVX2 -> 8lag AVX-512 (bcast) | cand_ns": {
+          "baseline_median": 27.0,
+          "current_median": 27.05,
+          "delta_pct": 0.185,
+          "baseline_values": [
+            26.5,
+            27.0,
+            27.0,
+            26.9,
+            27.1,
+            27.1
+          ],
+          "current_values": [
+            26.8,
+            27.1,
+            27.1,
+            27.0,
+            27.0,
+            27.1
+          ]
+        },
+        "K1  real-template dot, L=1016: 4lag AVX2 -> 8lag AVX-512 (dup) | avx2_ns": {
+          "baseline_median": 39.6,
+          "current_median": 39.75,
+          "delta_pct": 0.379,
+          "baseline_values": [
+            39.0,
+            36.5,
+            39.6,
+            39.6,
+            39.8,
+            39.8
+          ],
+          "current_values": [
+            39.4,
+            39.4,
+            39.8,
+            39.7,
+            39.8,
+            39.8
+          ]
+        },
+        "K1  real-template dot, L=1016: 4lag AVX2 -> 8lag AVX-512 (dup) | cand_ns": {
+          "baseline_median": 28.4,
+          "current_median": 28.5,
+          "delta_pct": 0.352,
+          "baseline_values": [
+            28.0,
+            28.4,
+            28.4,
+            28.4,
+            28.5,
+            28.5
+          ],
+          "current_values": [
+            28.2,
+            28.6,
+            28.5,
+            28.4,
+            28.5,
+            28.5
+          ]
+        },
+        "K2  element-wise complex ops: accumulate n=1053 | avx2_ns": {
+          "baseline_median": 65.85,
+          "current_median": 65.95,
+          "delta_pct": 0.152,
+          "baseline_values": [
+            64.7,
+            65.9,
+            65.8,
+            65.8,
+            66.0,
+            66.0
+          ],
+          "current_values": [
+            66.8,
+            65.4,
+            66.0,
+            65.9,
+            65.9,
+            66.0
+          ]
+        },
+        "K2  element-wise complex ops: accumulate n=1053 | cand_ns": {
+          "baseline_median": 40.7,
+          "current_median": 40.75,
+          "delta_pct": 0.123,
+          "baseline_values": [
+            40.2,
+            40.7,
+            40.7,
+            40.5,
+            40.9,
+            40.8
+          ],
+          "current_values": [
+            40.3,
+            41.4,
+            40.7,
+            40.8,
+            40.7,
+            40.8
+          ]
+        },
+        "K2  element-wise complex ops: accumulate n=135568 | avx2_ns": {
+          "baseline_median": 15958.15,
+          "current_median": 15577.5,
+          "delta_pct": -2.385,
+          "baseline_values": [
+            16279.6,
+            16479.3,
+            15356.4,
+            15636.7,
+            16359.1,
+            15444.5
+          ],
+          "current_values": [
+            16538.0,
+            15393.5,
+            16442.4,
+            15328.0,
+            15714.1,
+            15440.9
+          ]
+        },
+        "K2  element-wise complex ops: accumulate n=135568 | cand_ns": {
+          "baseline_median": 16293.55,
+          "current_median": 16440.45,
+          "delta_pct": 0.902,
+          "baseline_values": [
+            16081.3,
+            16150.4,
+            16416.4,
+            16465.7,
+            16170.7,
+            16461.8
+          ],
+          "current_values": [
+            16217.9,
+            16555.2,
+            16125.9,
+            16467.5,
+            16413.4,
+            16506.5
+          ]
+        },
+        "K2  element-wise complex ops: accumulate n=2032 | avx2_ns": {
+          "baseline_median": 123.45,
+          "current_median": 123.4,
+          "delta_pct": -0.041,
+          "baseline_values": [
+            122.1,
+            124.2,
+            123.3,
+            122.9,
+            123.8,
+            123.6
+          ],
+          "current_values": [
+            122.3,
+            122.6,
+            123.6,
+            123.2,
+            124.4,
+            123.7
+          ]
+        },
+        "K2  element-wise complex ops: accumulate n=2032 | cand_ns": {
+          "baseline_median": 78.95,
+          "current_median": 79.0,
+          "delta_pct": 0.063,
+          "baseline_values": [
+            77.8,
+            79.0,
+            78.9,
+            78.9,
+            79.1,
+            79.1
+          ],
+          "current_values": [
+            78.2,
+            78.5,
+            79.0,
+            79.0,
+            79.0,
+            79.2
+          ]
+        },
+        "K2  element-wise complex ops: scale n=1053 | avx2_ns": {
+          "baseline_median": 73.75,
+          "current_median": 74.45,
+          "delta_pct": 0.949,
+          "baseline_values": [
+            73.1,
+            73.6,
+            73.8,
+            74.3,
+            74.6,
+            73.7
+          ],
+          "current_values": [
+            73.7,
+            73.0,
+            75.1,
+            74.3,
+            75.2,
+            74.6
+          ]
+        },
+        "K2  element-wise complex ops: scale n=1053 | cand_ns": {
+          "baseline_median": 26.15,
+          "current_median": 26.5,
+          "delta_pct": 1.338,
+          "baseline_values": [
+            25.7,
+            26.3,
+            26.1,
+            26.1,
+            26.2,
+            26.2
+          ],
+          "current_values": [
+            25.7,
+            26.6,
+            27.4,
+            26.4,
+            26.9,
+            26.2
+          ]
+        },
+        "K2  element-wise complex ops: scale n=135568 | avx2_ns": {
+          "baseline_median": 9139.5,
+          "current_median": 9156.1,
+          "delta_pct": 0.182,
+          "baseline_values": [
+            9143.7,
+            9139.0,
+            9110.9,
+            9198.0,
+            9140.0,
+            9073.8
+          ],
+          "current_values": [
+            9176.1,
+            9157.7,
+            9132.4,
+            9149.1,
+            9280.7,
+            9154.5
+          ]
+        },
+        "K2  element-wise complex ops: scale n=135568 | cand_ns": {
+          "baseline_median": 6753.55,
+          "current_median": 6750.8,
+          "delta_pct": -0.041,
+          "baseline_values": [
+            6830.0,
+            6806.8,
+            6701.2,
+            6780.0,
+            6727.1,
+            6624.9
+          ],
+          "current_values": [
+            6929.7,
+            6789.9,
+            6639.4,
+            6711.7,
+            6817.9,
+            6654.1
+          ]
+        },
+        "K2  element-wise complex ops: scale n=2032 | avx2_ns": {
+          "baseline_median": 120.0,
+          "current_median": 120.1,
+          "delta_pct": 0.083,
+          "baseline_values": [
+            118.4,
+            120.1,
+            119.2,
+            121.0,
+            120.3,
+            119.9
+          ],
+          "current_values": [
+            118.4,
+            120.8,
+            121.6,
+            120.4,
+            119.7,
+            119.8
+          ]
+        },
+        "K2  element-wise complex ops: scale n=2032 | cand_ns": {
+          "baseline_median": 54.0,
+          "current_median": 54.05,
+          "delta_pct": 0.093,
+          "baseline_values": [
+            53.2,
+            54.1,
+            54.0,
+            54.0,
+            54.2,
+            53.9
+          ],
+          "current_values": [
+            53.6,
+            53.9,
+            54.1,
+            54.0,
+            54.1,
+            54.2
+          ]
+        },
+        "K2  element-wise complex ops: sub n=1053 | avx2_ns": {
+          "baseline_median": 65.35,
+          "current_median": 65.4,
+          "delta_pct": 0.077,
+          "baseline_values": [
+            64.2,
+            65.3,
+            65.3,
+            65.6,
+            65.4,
+            65.5
+          ],
+          "current_values": [
+            64.8,
+            65.3,
+            65.6,
+            65.3,
+            65.5,
+            65.5
+          ]
+        },
+        "K2  element-wise complex ops: sub n=1053 | cand_ns": {
+          "baseline_median": 40.6,
+          "current_median": 40.7,
+          "delta_pct": 0.246,
+          "baseline_values": [
+            39.9,
+            40.5,
+            40.6,
+            40.6,
+            40.6,
+            40.6
+          ],
+          "current_values": [
+            40.2,
+            41.6,
+            40.7,
+            40.5,
+            40.7,
+            40.9
+          ]
+        },
+        "K2  element-wise complex ops: sub n=135568 | avx2_ns": {
+          "baseline_median": 15894.2,
+          "current_median": 15565.0,
+          "delta_pct": -2.071,
+          "baseline_values": [
+            16363.5,
+            16466.1,
+            15378.6,
+            15444.2,
+            16343.9,
+            15444.5
+          ],
+          "current_values": [
+            16565.6,
+            15370.0,
+            16376.1,
+            15662.9,
+            15431.6,
+            15467.1
+          ]
+        },
+        "K2  element-wise complex ops: sub n=135568 | cand_ns": {
+          "baseline_median": 16327.0,
+          "current_median": 16460.9,
+          "delta_pct": 0.82,
+          "baseline_values": [
+            16129.1,
+            16222.2,
+            16431.8,
+            16525.4,
+            16216.6,
+            16504.7
+          ],
+          "current_values": [
+            16186.2,
+            16456.1,
+            16165.2,
+            16859.0,
+            16502.0,
+            16465.7
+          ]
+        },
+        "K2  element-wise complex ops: sub n=2032 | avx2_ns": {
+          "baseline_median": 123.5,
+          "current_median": 123.9,
+          "delta_pct": 0.324,
+          "baseline_values": [
+            122.1,
+            123.3,
+            123.9,
+            123.5,
+            124.1,
+            123.5
+          ],
+          "current_values": [
+            122.5,
+            122.3,
+            124.1,
+            124.7,
+            124.7,
+            123.7
+          ]
+        },
+        "K2  element-wise complex ops: sub n=2032 | cand_ns": {
+          "baseline_median": 79.15,
+          "current_median": 79.25,
+          "delta_pct": 0.126,
+          "baseline_values": [
+            77.9,
+            79.2,
+            79.1,
+            79.0,
+            79.3,
+            79.3
+          ],
+          "current_values": [
+            78.4,
+            78.7,
+            79.3,
+            79.3,
+            79.2,
+            82.2
+          ]
+        },
+        "K3  fold_sfd_window: fold_sfd_window | avx2_ns": {
+          "baseline_median": 364.7,
+          "current_median": 354.05,
+          "delta_pct": -2.92,
+          "baseline_values": [
+            370.5,
+            347.1,
+            377.0,
+            351.6,
+            371.4,
+            358.9
+          ],
+          "current_values": [
+            351.5,
+            375.5,
+            361.5,
+            349.1,
+            350.2,
+            356.6
+          ]
+        },
+        "K3  fold_sfd_window: fold_sfd_window | cand_ns": {
+          "baseline_median": 316.8,
+          "current_median": 313.3,
+          "delta_pct": -1.105,
+          "baseline_values": [
+            308.2,
+            320.7,
+            326.3,
+            312.9,
+            322.9,
+            309.2
+          ],
+          "current_values": [
+            319.2,
+            313.2,
+            309.8,
+            309.0,
+            313.4,
+            313.4
+          ]
+        },
+        "K4  SIC 20-tap pulse accumulation: accumulate 20-tap pulses | avx2_ns": {
+          "baseline_median": 29027.1,
+          "current_median": 28797.6,
+          "delta_pct": -0.791,
+          "baseline_values": [
+            28583.5,
+            28666.6,
+            28879.6,
+            29209.3,
+            29174.6,
+            29429.7
+          ],
+          "current_values": [
+            28772.2,
+            28813.9,
+            28781.3,
+            29018.7,
+            28685.7,
+            28945.4
+          ]
+        },
+        "K4  SIC 20-tap pulse accumulation: accumulate 20-tap pulses | cand_ns": {
+          "baseline_median": 28928.0,
+          "current_median": 28924.5,
+          "delta_pct": -0.012,
+          "baseline_values": [
+            28569.7,
+            28908.3,
+            29018.7,
+            28920.1,
+            28973.4,
+            28935.9
+          ],
+          "current_values": [
+            28874.2,
+            28906.9,
+            28948.8,
+            29090.0,
+            28919.7,
+            28929.3
+          ]
+        },
+        "K5/K6  fixed-length complex dots: dot_fixed38 (CIR FIR) | avx2_ns": {
+          "baseline_median": 3.2,
+          "current_median": 3.2,
+          "delta_pct": 0.0,
+          "baseline_values": [
+            3.2,
+            3.2,
+            3.2,
+            3.2,
+            3.2,
+            3.2
+          ],
+          "current_values": [
+            3.2,
+            3.2,
+            3.2,
+            3.2,
+            3.2,
+            3.2
+          ]
+        },
+        "K5/K6  fixed-length complex dots: dot_fixed38 (CIR FIR) | cand_ns": {
+          "baseline_median": 5.7,
+          "current_median": 5.7,
+          "delta_pct": 0.0,
+          "baseline_values": [
+            5.6,
+            5.7,
+            5.6,
+            5.7,
+            5.7,
+            5.7
+          ],
+          "current_values": [
+            5.6,
+            5.6,
+            5.7,
+            5.7,
+            5.7,
+            5.7
+          ]
+        },
+        "K5/K6  fixed-length complex dots: dot_fixed52 (payload CMF) | avx2_ns": {
+          "baseline_median": 4.0,
+          "current_median": 4.0,
+          "delta_pct": 0.0,
+          "baseline_values": [
+            4.0,
+            4.0,
+            4.0,
+            4.0,
+            4.0,
+            4.0
+          ],
+          "current_values": [
+            4.0,
+            4.0,
+            4.0,
+            4.0,
+            4.0,
+            4.0
+          ]
+        },
+        "K5/K6  fixed-length complex dots: dot_fixed52 (payload CMF) | cand_ns": {
+          "baseline_median": 5.2,
+          "current_median": 5.2,
+          "delta_pct": 0.0,
+          "baseline_values": [
+            5.1,
+            5.2,
+            5.2,
+            5.2,
+            5.2,
+            5.2
+          ],
+          "current_values": [
+            5.2,
+            5.2,
+            5.2,
+            5.2,
+            5.2,
+            5.2
+          ]
+        }
+      },
+      "cpus": "0"
+    },
+    "steady_avx2": {
+      "order": [
+        "A",
+        "B",
+        "B",
+        "A",
+        "A",
+        "B",
+        "B",
+        "A",
+        "A",
+        "B",
+        "B",
+        "A"
+      ],
+      "runs": {
+        "A": [
+          {
+            "tag": "steady_avx2.A.0",
+            "wall_s": 0.0203,
+            "metrics": {
+              "e2e_us_mean": 51.0442738,
+              "e2e_us_p95": 51.837,
+              "steady_window_us": 51.5270305,
+              "sic_us_mean": 38.5917795,
+              "resample_us_mean": 12.3775551,
+              "measure_windows": 263,
+              "dropped_admission": 37
+            }
+          },
+          {
+            "tag": "steady_avx2.A.1",
+            "wall_s": 0.0196,
+            "metrics": {
+              "e2e_us_mean": 51.0033346,
+              "e2e_us_p95": 51.516,
+              "steady_window_us": 51.4874924,
+              "sic_us_mean": 38.592289,
+              "resample_us_mean": 12.325,
+              "measure_windows": 263,
+              "dropped_admission": 37
+            }
+          },
+          {
+            "tag": "steady_avx2.A.2",
+            "wall_s": 0.0196,
+            "metrics": {
+              "e2e_us_mean": 51.1304791,
+              "e2e_us_p95": 51.737,
+              "steady_window_us": 51.6093588,
+              "sic_us_mean": 38.6990266,
+              "resample_us_mean": 12.3461825,
+              "measure_windows": 263,
+              "dropped_admission": 37
+            }
+          },
+          {
+            "tag": "steady_avx2.A.3",
+            "wall_s": 0.0194,
+            "metrics": {
+              "e2e_us_mean": 51.0757186,
+              "e2e_us_p95": 51.637,
+              "steady_window_us": 51.5446565,
+              "sic_us_mean": 38.6216844,
+              "resample_us_mean": 12.3715247,
+              "measure_windows": 263,
+              "dropped_admission": 37
+            }
+          },
+          {
+            "tag": "steady_avx2.A.4",
+            "wall_s": 0.0194,
+            "metrics": {
+              "e2e_us_mean": 51.0447795,
+              "e2e_us_p95": 51.776,
+              "steady_window_us": 51.5074885,
+              "sic_us_mean": 38.6205247,
+              "resample_us_mean": 12.3417034,
+              "measure_windows": 263,
+              "dropped_admission": 37
+            }
+          },
+          {
+            "tag": "steady_avx2.A.5",
+            "wall_s": 0.0196,
+            "metrics": {
+              "e2e_us_mean": 51.0686388,
+              "e2e_us_p95": 51.977,
+              "steady_window_us": 51.5281756,
+              "sic_us_mean": 38.6419087,
+              "resample_us_mean": 12.342924,
+              "measure_windows": 263,
+              "dropped_admission": 37
+            }
+          }
+        ],
+        "B": [
+          {
+            "tag": "steady_avx2.B.0",
+            "wall_s": 0.0196,
+            "metrics": {
+              "e2e_us_mean": 50.9108061,
+              "e2e_us_p95": 51.175,
+              "steady_window_us": 51.3761374,
+              "sic_us_mean": 38.5381825,
+              "resample_us_mean": 12.2952243,
+              "measure_windows": 263,
+              "dropped_admission": 37
+            }
+          },
+          {
+            "tag": "steady_avx2.B.1",
+            "wall_s": 0.0195,
+            "metrics": {
+              "e2e_us_mean": 50.8968897,
+              "e2e_us_p95": 51.627,
+              "steady_window_us": 51.3708588,
+              "sic_us_mean": 38.4665932,
+              "resample_us_mean": 12.3547605,
+              "measure_windows": 263,
+              "dropped_admission": 37
+            }
+          },
+          {
+            "tag": "steady_avx2.B.2",
+            "wall_s": 0.0196,
+            "metrics": {
+              "e2e_us_mean": 51.1061521,
+              "e2e_us_p95": 51.777,
+              "steady_window_us": 51.5622863,
+              "sic_us_mean": 38.5998289,
+              "resample_us_mean": 12.422308,
+              "measure_windows": 263,
+              "dropped_admission": 37
+            }
+          },
+          {
+            "tag": "steady_avx2.B.3",
+            "wall_s": 0.0195,
+            "metrics": {
+              "e2e_us_mean": 51.240384,
+              "e2e_us_p95": 52.077,
+              "steady_window_us": 51.7409046,
+              "sic_us_mean": 38.6815627,
+              "resample_us_mean": 12.478384,
+              "measure_windows": 263,
+              "dropped_admission": 37
+            }
+          },
+          {
+            "tag": "steady_avx2.B.4",
+            "wall_s": 0.0196,
+            "metrics": {
+              "e2e_us_mean": 51.0792471,
+              "e2e_us_p95": 51.817,
+              "steady_window_us": 51.5693588,
+              "sic_us_mean": 38.6585361,
+              "resample_us_mean": 12.3461103,
+              "measure_windows": 263,
+              "dropped_admission": 37
+            }
+          },
+          {
+            "tag": "steady_avx2.B.5",
+            "wall_s": 0.0196,
+            "metrics": {
+              "e2e_us_mean": 51.1146692,
+              "e2e_us_p95": 51.597,
+              "steady_window_us": 51.5944084,
+              "sic_us_mean": 38.6031521,
+              "resample_us_mean": 12.4394525,
+              "measure_windows": 263,
+              "dropped_admission": 37
+            }
+          }
+        ]
+      },
+      "summary": {
+        "e2e_us_mean": {
+          "baseline_median": 51.0567,
+          "current_median": 51.0927,
+          "delta_pct": 0.07,
+          "baseline_values": [
+            51.0442738,
+            51.0033346,
+            51.1304791,
+            51.0757186,
+            51.0447795,
+            51.0686388
+          ],
+          "current_values": [
+            50.9108061,
+            50.8968897,
+            51.1061521,
+            51.240384,
+            51.0792471,
+            51.1146692
+          ]
+        },
+        "e2e_us_p95": {
+          "baseline_median": 51.7565,
+          "current_median": 51.702,
+          "delta_pct": -0.105,
+          "baseline_values": [
+            51.837,
+            51.516,
+            51.737,
+            51.637,
+            51.776,
+            51.977
+          ],
+          "current_values": [
+            51.175,
+            51.627,
+            51.777,
+            52.077,
+            51.817,
+            51.597
+          ]
+        },
+        "steady_window_us": {
+          "baseline_median": 51.5276,
+          "current_median": 51.5658,
+          "delta_pct": 0.074,
+          "baseline_values": [
+            51.5270305,
+            51.4874924,
+            51.6093588,
+            51.5446565,
+            51.5074885,
+            51.5281756
+          ],
+          "current_values": [
+            51.3761374,
+            51.3708588,
+            51.5622863,
+            51.7409046,
+            51.5693588,
+            51.5944084
+          ]
+        },
+        "sic_us_mean": {
+          "baseline_median": 38.6211,
+          "current_median": 38.6015,
+          "delta_pct": -0.051,
+          "baseline_values": [
+            38.5917795,
+            38.592289,
+            38.6990266,
+            38.6216844,
+            38.6205247,
+            38.6419087
+          ],
+          "current_values": [
+            38.5381825,
+            38.4665932,
+            38.5998289,
+            38.6815627,
+            38.6585361,
+            38.6031521
+          ]
+        },
+        "resample_us_mean": {
+          "baseline_median": 12.3446,
+          "current_median": 12.3885,
+          "delta_pct": 0.356,
+          "baseline_values": [
+            12.3775551,
+            12.325,
+            12.3461825,
+            12.3715247,
+            12.3417034,
+            12.342924
+          ],
+          "current_values": [
+            12.2952243,
+            12.3547605,
+            12.422308,
+            12.478384,
+            12.3461103,
+            12.4394525
+          ]
+        },
+        "measure_windows": {
+          "baseline_median": 263.0,
+          "current_median": 263.0,
+          "delta_pct": 0.0,
+          "baseline_values": [
+            263,
+            263,
+            263,
+            263,
+            263,
+            263
+          ],
+          "current_values": [
+            263,
+            263,
+            263,
+            263,
+            263,
+            263
+          ]
+        }
+      },
+      "cpus": "0,1"
+    },
+    "replay_avx2": {
+      "order": [
+        "A",
+        "B",
+        "B",
+        "A",
+        "A",
+        "B",
+        "B",
+        "A",
+        "A",
+        "B",
+        "B",
+        "A"
+      ],
+      "runs": {
+        "A": [
+          {
+            "tag": "replay_avx2.A.0",
+            "wall_s": 1.023,
+            "metrics": {
+              "completed": 1006.0,
+              "batch": 6.0,
+              "batch_fcs": 6.0,
+              "batch_pct": 100.0,
+              "total_fcs": 981.0,
+              "total_pct": 97.5,
+              "full_retry": 0.0,
+              "raw_drop_samples": 0.0,
+              "source_errors": 0.0,
+              "gaps": 0.0,
+              "models": 50.0,
+              "queued": 0.0,
+              "queue_peak": 5.0,
+              "output_omitted": 0.0,
+              "compute_mean": 1234.4,
+              "compute_p95": 1481.3,
+              "resample_mean": 598.1,
+              "resample_p95": 755.3,
+              "demod_mean": 636.3,
+              "demod_p95": 726.0,
+              "fcs": 981.0,
+              "raw_samples": 737280000.0,
+              "acq_seeds": 1002.0,
+              "submit_attempts": 1005.0,
+              "admitted": 1005.0,
+              "dropped_queue": 0.0,
+              "demod_completed": 1005.0,
+              "fcs_ok": 981.0
+            }
+          },
+          {
+            "tag": "replay_avx2.A.1",
+            "wall_s": 1.0236,
+            "metrics": {
+              "completed": 1006.0,
+              "batch": 6.0,
+              "batch_fcs": 6.0,
+              "batch_pct": 100.0,
+              "total_fcs": 981.0,
+              "total_pct": 97.5,
+              "full_retry": 0.0,
+              "raw_drop_samples": 0.0,
+              "source_errors": 0.0,
+              "gaps": 0.0,
+              "models": 50.0,
+              "queued": 0.0,
+              "queue_peak": 3.0,
+              "output_omitted": 0.0,
+              "compute_mean": 1391.7,
+              "compute_p95": 2437.0,
+              "resample_mean": 560.3,
+              "resample_p95": 567.1,
+              "demod_mean": 831.4,
+              "demod_p95": 1870.9,
+              "fcs": 981.0,
+              "raw_samples": 737280000.0,
+              "acq_seeds": 1002.0,
+              "submit_attempts": 1005.0,
+              "admitted": 1005.0,
+              "dropped_queue": 0.0,
+              "demod_completed": 1005.0,
+              "fcs_ok": 981.0
+            }
+          },
+          {
+            "tag": "replay_avx2.A.2",
+            "wall_s": 1.023,
+            "metrics": {
+              "completed": 1006.0,
+              "batch": 6.0,
+              "batch_fcs": 6.0,
+              "batch_pct": 100.0,
+              "total_fcs": 981.0,
+              "total_pct": 97.5,
+              "full_retry": 0.0,
+              "raw_drop_samples": 0.0,
+              "source_errors": 0.0,
+              "gaps": 0.0,
+              "models": 50.0,
+              "queued": 0.0,
+              "queue_peak": 2.0,
+              "output_omitted": 0.0,
+              "compute_mean": 1274.2,
+              "compute_p95": 1547.4,
+              "resample_mean": 617.7,
+              "resample_p95": 818.6,
+              "demod_mean": 656.5,
+              "demod_p95": 774.2,
+              "fcs": 981.0,
+              "raw_samples": 737280000.0,
+              "acq_seeds": 1002.0,
+              "submit_attempts": 1005.0,
+              "admitted": 1005.0,
+              "dropped_queue": 0.0,
+              "demod_completed": 1005.0,
+              "fcs_ok": 981.0
+            }
+          },
+          {
+            "tag": "replay_avx2.A.3",
+            "wall_s": 1.0224,
+            "metrics": {
+              "completed": 1006.0,
+              "batch": 6.0,
+              "batch_fcs": 6.0,
+              "batch_pct": 100.0,
+              "total_fcs": 981.0,
+              "total_pct": 97.5,
+              "full_retry": 0.0,
+              "raw_drop_samples": 0.0,
+              "source_errors": 0.0,
+              "gaps": 0.0,
+              "models": 50.0,
+              "queued": 0.0,
+              "queue_peak": 2.0,
+              "output_omitted": 0.0,
+              "compute_mean": 1189.3,
+              "compute_p95": 1309.2,
+              "resample_mean": 541.8,
+              "resample_p95": 577.5,
+              "demod_mean": 647.4,
+              "demod_p95": 747.6,
+              "fcs": 981.0,
+              "raw_samples": 737280000.0,
+              "acq_seeds": 1002.0,
+              "submit_attempts": 1005.0,
+              "admitted": 1005.0,
+              "dropped_queue": 0.0,
+              "demod_completed": 1005.0,
+              "fcs_ok": 981.0
+            }
+          },
+          {
+            "tag": "replay_avx2.A.4",
+            "wall_s": 1.0228,
+            "metrics": {
+              "completed": 1006.0,
+              "batch": 6.0,
+              "batch_fcs": 6.0,
+              "batch_pct": 100.0,
+              "total_fcs": 981.0,
+              "total_pct": 97.5,
+              "full_retry": 0.0,
+              "raw_drop_samples": 0.0,
+              "source_errors": 0.0,
+              "gaps": 0.0,
+              "models": 50.0,
+              "queued": 0.0,
+              "queue_peak": 2.0,
+              "output_omitted": 0.0,
+              "compute_mean": 1180.3,
+              "compute_p95": 1297.0,
+              "resample_mean": 537.1,
+              "resample_p95": 563.1,
+              "demod_mean": 643.2,
+              "demod_p95": 738.6,
+              "fcs": 981.0,
+              "raw_samples": 737280000.0,
+              "acq_seeds": 1002.0,
+              "submit_attempts": 1005.0,
+              "admitted": 1005.0,
+              "dropped_queue": 0.0,
+              "demod_completed": 1005.0,
+              "fcs_ok": 981.0
+            }
+          },
+          {
+            "tag": "replay_avx2.A.5",
+            "wall_s": 1.0226,
+            "metrics": {
+              "completed": 1006.0,
+              "batch": 6.0,
+              "batch_fcs": 6.0,
+              "batch_pct": 100.0,
+              "total_fcs": 981.0,
+              "total_pct": 97.5,
+              "full_retry": 0.0,
+              "raw_drop_samples": 0.0,
+              "source_errors": 0.0,
+              "gaps": 0.0,
+              "models": 50.0,
+              "queued": 0.0,
+              "queue_peak": 3.0,
+              "output_omitted": 0.0,
+              "compute_mean": 1187.6,
+              "compute_p95": 1301.2,
+              "resample_mean": 541.4,
+              "resample_p95": 565.5,
+              "demod_mean": 646.2,
+              "demod_p95": 738.9,
+              "fcs": 981.0,
+              "raw_samples": 737280000.0,
+              "acq_seeds": 1002.0,
+              "submit_attempts": 1005.0,
+              "admitted": 1005.0,
+              "dropped_queue": 0.0,
+              "demod_completed": 1005.0,
+              "fcs_ok": 981.0
+            }
+          }
+        ],
+        "B": [
+          {
+            "tag": "replay_avx2.B.0",
+            "wall_s": 1.0219,
+            "metrics": {
+              "completed": 1006.0,
+              "batch": 6.0,
+              "batch_fcs": 6.0,
+              "batch_pct": 100.0,
+              "total_fcs": 981.0,
+              "total_pct": 97.5,
+              "full_retry": 0.0,
+              "raw_drop_samples": 0.0,
+              "source_errors": 0.0,
+              "gaps": 0.0,
+              "models": 50.0,
+              "queued": 0.0,
+              "queue_peak": 2.0,
+              "output_omitted": 0.0,
+              "compute_mean": 1205.8,
+              "compute_p95": 1403.1,
+              "resample_mean": 563.5,
+              "resample_p95": 678.3,
+              "demod_mean": 642.2,
+              "demod_p95": 738.7,
+              "fcs": 981.0,
+              "raw_samples": 737280000.0,
+              "acq_seeds": 1002.0,
+              "submit_attempts": 1005.0,
+              "admitted": 1005.0,
+              "dropped_queue": 0.0,
+              "demod_completed": 1005.0,
+              "fcs_ok": 981.0
+            }
+          },
+          {
+            "tag": "replay_avx2.B.1",
+            "wall_s": 1.0233,
+            "metrics": {
+              "completed": 1006.0,
+              "batch": 6.0,
+              "batch_fcs": 6.0,
+              "batch_pct": 100.0,
+              "total_fcs": 981.0,
+              "total_pct": 97.5,
+              "full_retry": 0.0,
+              "raw_drop_samples": 0.0,
+              "source_errors": 0.0,
+              "gaps": 0.0,
+              "models": 50.0,
+              "queued": 0.0,
+              "queue_peak": 2.0,
+              "output_omitted": 0.0,
+              "compute_mean": 1212.6,
+              "compute_p95": 1369.6,
+              "resample_mean": 570.1,
+              "resample_p95": 654.1,
+              "demod_mean": 642.5,
+              "demod_p95": 732.7,
+              "fcs": 981.0,
+              "raw_samples": 737280000.0,
+              "acq_seeds": 1002.0,
+              "submit_attempts": 1005.0,
+              "admitted": 1005.0,
+              "dropped_queue": 0.0,
+              "demod_completed": 1005.0,
+              "fcs_ok": 981.0
+            }
+          },
+          {
+            "tag": "replay_avx2.B.2",
+            "wall_s": 1.0226,
+            "metrics": {
+              "completed": 1006.0,
+              "batch": 6.0,
+              "batch_fcs": 6.0,
+              "batch_pct": 100.0,
+              "total_fcs": 981.0,
+              "total_pct": 97.5,
+              "full_retry": 0.0,
+              "raw_drop_samples": 0.0,
+              "source_errors": 0.0,
+              "gaps": 0.0,
+              "models": 50.0,
+              "queued": 0.0,
+              "queue_peak": 3.0,
+              "output_omitted": 0.0,
+              "compute_mean": 1206.8,
+              "compute_p95": 1404.9,
+              "resample_mean": 564.2,
+              "resample_p95": 679.9,
+              "demod_mean": 642.6,
+              "demod_p95": 740.2,
+              "fcs": 981.0,
+              "raw_samples": 737280000.0,
+              "acq_seeds": 1002.0,
+              "submit_attempts": 1005.0,
+              "admitted": 1005.0,
+              "dropped_queue": 0.0,
+              "demod_completed": 1005.0,
+              "fcs_ok": 981.0
+            }
+          },
+          {
+            "tag": "replay_avx2.B.3",
+            "wall_s": 1.0237,
+            "metrics": {
+              "completed": 1006.0,
+              "batch": 6.0,
+              "batch_fcs": 6.0,
+              "batch_pct": 100.0,
+              "total_fcs": 981.0,
+              "total_pct": 97.5,
+              "full_retry": 0.0,
+              "raw_drop_samples": 0.0,
+              "source_errors": 0.0,
+              "gaps": 0.0,
+              "models": 50.0,
+              "queued": 0.0,
+              "queue_peak": 2.0,
+              "output_omitted": 0.0,
+              "compute_mean": 1254.3,
+              "compute_p95": 1705.2,
+              "resample_mean": 545.8,
+              "resample_p95": 575.9,
+              "demod_mean": 708.4,
+              "demod_p95": 1133.2,
+              "fcs": 981.0,
+              "raw_samples": 737280000.0,
+              "acq_seeds": 1002.0,
+              "submit_attempts": 1005.0,
+              "admitted": 1005.0,
+              "dropped_queue": 0.0,
+              "demod_completed": 1005.0,
+              "fcs_ok": 981.0
+            }
+          },
+          {
+            "tag": "replay_avx2.B.4",
+            "wall_s": 1.0228,
+            "metrics": {
+              "completed": 1006.0,
+              "batch": 6.0,
+              "batch_fcs": 6.0,
+              "batch_pct": 100.0,
+              "total_fcs": 981.0,
+              "total_pct": 97.5,
+              "full_retry": 0.0,
+              "raw_drop_samples": 0.0,
+              "source_errors": 0.0,
+              "gaps": 0.0,
+              "models": 50.0,
+              "queued": 0.0,
+              "queue_peak": 2.0,
+              "output_omitted": 0.0,
+              "compute_mean": 1501.1,
+              "compute_p95": 1918.4,
+              "resample_mean": 704.5,
+              "resample_p95": 844.1,
+              "demod_mean": 796.6,
+              "demod_p95": 1074.2,
+              "fcs": 981.0,
+              "raw_samples": 737280000.0,
+              "acq_seeds": 1002.0,
+              "submit_attempts": 1005.0,
+              "admitted": 1005.0,
+              "dropped_queue": 0.0,
+              "demod_completed": 1005.0,
+              "fcs_ok": 981.0
+            }
+          },
+          {
+            "tag": "replay_avx2.B.5",
+            "wall_s": 1.0225,
+            "metrics": {
+              "completed": 1006.0,
+              "batch": 6.0,
+              "batch_fcs": 6.0,
+              "batch_pct": 100.0,
+              "total_fcs": 981.0,
+              "total_pct": 97.5,
+              "full_retry": 0.0,
+              "raw_drop_samples": 0.0,
+              "source_errors": 0.0,
+              "gaps": 0.0,
+              "models": 50.0,
+              "queued": 0.0,
+              "queue_peak": 2.0,
+              "output_omitted": 0.0,
+              "compute_mean": 1276.7,
+              "compute_p95": 1827.0,
+              "resample_mean": 627.4,
+              "resample_p95": 1075.0,
+              "demod_mean": 649.3,
+              "demod_p95": 756.4,
+              "fcs": 981.0,
+              "raw_samples": 737280000.0,
+              "acq_seeds": 1002.0,
+              "submit_attempts": 1005.0,
+              "admitted": 1005.0,
+              "dropped_queue": 0.0,
+              "demod_completed": 1005.0,
+              "fcs_ok": 981.0
+            }
+          }
+        ]
+      },
+      "summary": {
+        "completed": {
+          "baseline_median": 1006.0,
+          "current_median": 1006.0,
+          "delta_pct": 0.0,
+          "baseline_values": [
+            1006.0,
+            1006.0,
+            1006.0,
+            1006.0,
+            1006.0,
+            1006.0
+          ],
+          "current_values": [
+            1006.0,
+            1006.0,
+            1006.0,
+            1006.0,
+            1006.0,
+            1006.0
+          ]
+        },
+        "fcs_ok": {
+          "baseline_median": 981.0,
+          "current_median": 981.0,
+          "delta_pct": 0.0,
+          "baseline_values": [
+            981.0,
+            981.0,
+            981.0,
+            981.0,
+            981.0,
+            981.0
+          ],
+          "current_values": [
+            981.0,
+            981.0,
+            981.0,
+            981.0,
+            981.0,
+            981.0
+          ]
+        },
+        "compute_mean": {
+          "baseline_median": 1211.85,
+          "current_median": 1233.45,
+          "delta_pct": 1.782,
+          "baseline_values": [
+            1234.4,
+            1391.7,
+            1274.2,
+            1189.3,
+            1180.3,
+            1187.6
+          ],
+          "current_values": [
+            1205.8,
+            1212.6,
+            1206.8,
+            1254.3,
+            1501.1,
+            1276.7
+          ]
+        },
+        "compute_p95": {
+          "baseline_median": 1395.25,
+          "current_median": 1555.05,
+          "delta_pct": 11.453,
+          "baseline_values": [
+            1481.3,
+            2437.0,
+            1547.4,
+            1309.2,
+            1297.0,
+            1301.2
+          ],
+          "current_values": [
+            1403.1,
+            1369.6,
+            1404.9,
+            1705.2,
+            1918.4,
+            1827.0
+          ]
+        },
+        "resample_mean": {
+          "baseline_median": 551.05,
+          "current_median": 567.15,
+          "delta_pct": 2.922,
+          "baseline_values": [
+            598.1,
+            560.3,
+            617.7,
+            541.8,
+            537.1,
+            541.4
+          ],
+          "current_values": [
+            563.5,
+            570.1,
+            564.2,
+            545.8,
+            704.5,
+            627.4
+          ]
+        },
+        "demod_mean": {
+          "baseline_median": 646.8,
+          "current_median": 645.95,
+          "delta_pct": -0.131,
+          "baseline_values": [
+            636.3,
+            831.4,
+            656.5,
+            647.4,
+            643.2,
+            646.2
+          ],
+          "current_values": [
+            642.2,
+            642.5,
+            642.6,
+            708.4,
+            796.6,
+            649.3
+          ]
+        },
+        "raw_samples": {
+          "baseline_median": 737280000.0,
+          "current_median": 737280000.0,
+          "delta_pct": 0.0,
+          "baseline_values": [
+            737280000.0,
+            737280000.0,
+            737280000.0,
+            737280000.0,
+            737280000.0,
+            737280000.0
+          ],
+          "current_values": [
+            737280000.0,
+            737280000.0,
+            737280000.0,
+            737280000.0,
+            737280000.0,
+            737280000.0
+          ]
+        },
+        "raw_drop_samples": {
+          "baseline_median": 0.0,
+          "current_median": 0.0,
+          "delta_pct": null,
+          "baseline_values": [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "current_values": [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ]
+        }
+      },
+      "drop_limit_samples": 73728000,
+      "summary_clean": {
+        "completed": {
+          "baseline_median": 1006.0,
+          "current_median": 1006.0,
+          "delta_pct": 0.0,
+          "baseline_values": [
+            1006.0,
+            1006.0,
+            1006.0,
+            1006.0,
+            1006.0,
+            1006.0
+          ],
+          "current_values": [
+            1006.0,
+            1006.0,
+            1006.0,
+            1006.0,
+            1006.0,
+            1006.0
+          ]
+        },
+        "fcs_ok": {
+          "baseline_median": 981.0,
+          "current_median": 981.0,
+          "delta_pct": 0.0,
+          "baseline_values": [
+            981.0,
+            981.0,
+            981.0,
+            981.0,
+            981.0,
+            981.0
+          ],
+          "current_values": [
+            981.0,
+            981.0,
+            981.0,
+            981.0,
+            981.0,
+            981.0
+          ]
+        },
+        "compute_mean": {
+          "baseline_median": 1211.85,
+          "current_median": 1233.45,
+          "delta_pct": 1.782,
+          "baseline_values": [
+            1234.4,
+            1391.7,
+            1274.2,
+            1189.3,
+            1180.3,
+            1187.6
+          ],
+          "current_values": [
+            1205.8,
+            1212.6,
+            1206.8,
+            1254.3,
+            1501.1,
+            1276.7
+          ]
+        },
+        "compute_p95": {
+          "baseline_median": 1395.25,
+          "current_median": 1555.05,
+          "delta_pct": 11.453,
+          "baseline_values": [
+            1481.3,
+            2437.0,
+            1547.4,
+            1309.2,
+            1297.0,
+            1301.2
+          ],
+          "current_values": [
+            1403.1,
+            1369.6,
+            1404.9,
+            1705.2,
+            1918.4,
+            1827.0
+          ]
+        },
+        "resample_mean": {
+          "baseline_median": 551.05,
+          "current_median": 567.15,
+          "delta_pct": 2.922,
+          "baseline_values": [
+            598.1,
+            560.3,
+            617.7,
+            541.8,
+            537.1,
+            541.4
+          ],
+          "current_values": [
+            563.5,
+            570.1,
+            564.2,
+            545.8,
+            704.5,
+            627.4
+          ]
+        },
+        "demod_mean": {
+          "baseline_median": 646.8,
+          "current_median": 645.95,
+          "delta_pct": -0.131,
+          "baseline_values": [
+            636.3,
+            831.4,
+            656.5,
+            647.4,
+            643.2,
+            646.2
+          ],
+          "current_values": [
+            642.2,
+            642.5,
+            642.6,
+            708.4,
+            796.6,
+            649.3
+          ]
+        },
+        "raw_samples": {
+          "baseline_median": 737280000.0,
+          "current_median": 737280000.0,
+          "delta_pct": 0.0,
+          "baseline_values": [
+            737280000.0,
+            737280000.0,
+            737280000.0,
+            737280000.0,
+            737280000.0,
+            737280000.0
+          ],
+          "current_values": [
+            737280000.0,
+            737280000.0,
+            737280000.0,
+            737280000.0,
+            737280000.0,
+            737280000.0
+          ]
+        },
+        "raw_drop_samples": {
+          "baseline_median": 0.0,
+          "current_median": 0.0,
+          "delta_pct": null,
+          "baseline_values": [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "current_values": [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ]
+        }
+      },
+      "cpus": "0,1"
+    }
+  },
+  "cgroup_cpus": "0-7"
+}

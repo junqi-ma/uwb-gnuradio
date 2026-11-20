@@ -1,16 +1,29 @@
-# 原生 UHD/C++ 构建使用说明
+# openUWB 原生 UHD/C++ 构建使用说明
 
-当前分支只提供原生 C++ 库和应用。GNU Radio 实现与旧用法保存在
-`archive/gnuradio-adapter`（`d5dfd30`）。下面的命令请使用新的构建目录，
-避免继承旧目录中的 GR 配置或二进制文件。
+仓库根目录就是 `OpenUWB` 工程（Phase 3 去掉了 `gr-uwb/` 外壳）。GNU Radio
+实现与旧用法保存在 `archive/gnuradio-adapter`（`d5dfd30`）。下面的命令都从
+仓库根目录执行，构建产物在 `build/<preset>`。
 
 ## 构建与测试
 
 ```sh
-cmake -S gr-uwb -B gr-uwb/build-native-only \
-  -DCMAKE_BUILD_TYPE=Release -DENABLE_UHD_BACKEND=ON
-cmake --build gr-uwb/build-native-only -j4
-env -u LD_LIBRARY_PATH ctest --test-dir gr-uwb/build-native-only --output-on-failure -j1
+env -u LD_LIBRARY_PATH cmake --preset native-avx2
+env -u LD_LIBRARY_PATH cmake --build --preset native-avx2 -j
+env -u LD_LIBRARY_PATH ctest --preset native-avx2 --output-on-failure
+```
+
+| 预设 | 用途 |
+| --- | --- |
+| `native-avx2` | Release + AVX2/FMA 基线，UHD 自动探测;日常开发与验收默认档 |
+| `native-avx512` | Release + AVX-512 宽内核 TU（基线仍是 AVX2/FMA） |
+| `scalar-debug` | Debug + 关闭自写 SIMD 内核，用于单步与参考对照 |
+| `no-uhd` | Release 且不构建 UHD 后端；回放、库和全部非硬件测试仍可运行 |
+
+也可以不用预设，直接传参：
+
+```sh
+env -u LD_LIBRARY_PATH cmake -S . -B build/custom \
+  -DCMAKE_BUILD_TYPE=Release -DUWB_SIMD=AVX2 -DENABLE_UHD_BACKEND=OFF
 ```
 
 | 选项 | 默认 | 用途 |
@@ -24,9 +37,9 @@ C++17、CMake、VOLK、Threads 和 Boost.Test 是构建依赖。Python 解释器
 
 ### SIMD 自动选择
 
-同一分支包含 AVX2 和 AVX-512 内核。在目标 Linux 机器上直接运行上面的构建命令，
-默认 `AUTO` 会检查编译器能力与所有可见逻辑 CPU 的标志，并在 `UWB SIMD:` 日志中
-输出 `selected` 和 `required_isa`。
+同一分支包含 AVX2 和 AVX-512 内核。`native-avx2` / `native-avx512` 预设显式
+指定档位；自行配置时 `AUTO` 会检查编译器能力与所有可见逻辑 CPU 的标志，并在
+`UWB SIMD:` 日志中输出 `selected` 和 `required_isa`。
 
 | CPU 和编译器能力 | 选中的档位 |
 | --- | --- |
@@ -38,22 +51,44 @@ C++17、CMake、VOLK、Threads 和 Boost.Test 是构建依赖。Python 解释器
 该要求。交叉编译时，使用 `-DUWB_SIMD=AVX2`、`-DUWB_SIMD=AVX512` 或
 `-DUWB_SIMD=SCALAR` 显式指定目标档位。
 
-## 原生路径
+## 目录与目标
 
-- `uwb_core` 提供调制、解调、重采样、CIR 和 SIC。
-- `uwb_native` 提供 UHD 连续采样和 SC16 回放、单音消除、窗口装配和 worker。
-- `uwb_twr_core` 和 `uwb_twr_phy` 提供独立的离线 TWR 协议及 PHY。
+公共头文件在 `include/openuwb/<domain>/`，库源码在 `lib/<domain>/`，应用在
+`apps/`，测试在 `tests/`，离线工具在 `tools/`。命名空间是 `openuwb`，子域
+`openuwb::support`、`dsp`、`phy::hrp`、`sic`、`radio`、`runtime`。
 
-接收入口是 `uwb_dw3000_live`。原生速率为 737.28 MS/s，窗口内重采样到
-998.4 MS/s。固定周期的 SIC/CIR 窗口可用 `uwb_uhd_sc16_pipeline_runner`。
-两条应用路径的职责见[窗口执行架构](架构_解调与窗口执行.md)。
+库目标严格单向依赖（详见 `lib/CMakeLists.txt`）：
+
+```
+openuwb_support -> openuwb_dsp -> openuwb_phy_hrp -> {openuwb_sic, openuwb_sensing,
+                                                      openuwb_twr_core}
+openuwb_twr_phy -> openuwb_twr_core + openuwb_dsp
+openuwb_radio   -> openuwb_dsp（仅它可链接 UHD::UHD）
+openuwb_runtime -> openuwb_phy_hrp + openuwb_sic + openuwb_sensing + openuwb_radio
+```
+
+应用入口：
+
+| 二进制 | 用途 |
+| --- | --- |
+| `openuwb_rx` | 实时接收与 SC16 回放主入口 |
+| `openuwb_pipeline_runner` | 固定周期的 SIC/CIR 窗口流水线 |
+| `openuwb_capture` | UHD SC16 直接采集与离线分析 |
+| `openuwb_twr_fake_demo` / `openuwb_twr_native_phy_demo` | 离线 TWR 协议 / 原生速率 PHY 演示 |
+
+过渡期旧名 `uwb_dw3000_live`、`uwb_uhd_sc16_pipeline_runner`、
+`uwb_uhd_sc16_capture` 仍以构建树/安装树软链提供
+（`TODO(openuwb-compat-removal)`）。`apps/openuwb_tx/` 只是预留目录，没有目标。
+
+原生速率为 737.28 MS/s，窗口内重采样到 998.4 MS/s。两条应用路径的职责见
+[窗口执行架构](架构_解调与窗口执行.md)。
 
 ## Live 入口与默认值
 
 直接启动 C++ 程序（省略 `--replay` 会连接硬件）：
 
 ```sh
-gr-uwb/build-native-only/apps/uwb_dw3000_live \
+build/native-avx2/apps/openuwb_rx \
   --replay /path/to/capture.sc16 --workers 4 --sync locked --period-ms 5
 ```
 
@@ -102,7 +137,8 @@ gr-uwb/build-native-only/apps/uwb_dw3000_live \
 为 6.468 ppm，而 live 默认取物理上限常量；调用时显式容差决定实际准入。
 
 **Python 包装入口有区别**：`tools/rx/live_dw3000_packets.py` 仍显式传入默认
-`--cir auto`，构建使用独立的 `build-live-wrapper` 原生目录，关闭实验目标。
+`--cir auto`。它复用 `$OPENUWB_BUILD_DIR` 或 `build/native-avx2`，构建目标为
+`openuwb_rx`（不再创建私有 `build-live-wrapper` 目录）。
 兼容入口之外的 C++ 参数通过 `--` 传入，例如：
 
 ```sh
@@ -126,20 +162,34 @@ python3 tools/rx/live_dw3000_packets.py --replay /path/to/capture.sc16 \
 ## 安装与 C++ 消费者
 
 ```sh
-cmake --install gr-uwb/build-native-only --prefix /tmp/uwb-native-install
-cmake -S gr-uwb -B gr-uwb/build-native-only \
-  -DUWB_NATIVE_INSTALL_PREFIX=/tmp/uwb-native-install
-env -u LD_LIBRARY_PATH ctest --test-dir gr-uwb/build-native-only \
-  -R uwb_qa_native_install_consumer --output-on-failure
+cmake --install build/native-avx2 --prefix /tmp/openuwb-install
+env -u LD_LIBRARY_PATH tests/integration/install_consumer/run_native_install_consumer.sh \
+  --prefix /tmp/openuwb-install
 ```
 
-外部项目使用 `find_package(uwb CONFIG REQUIRED)` 和 `uwb::uwb_native`，
-配置时可设 `CMAKE_PREFIX_PATH` 指向安装前缀。头文件延用
-`<gnuradio/uwb/...>`，C++ 符号延用 `gr::uwb`。整包解调入口
-`uwb_demod_pipeline.h` 链接 `uwb::uwb_core`。
+外部项目优先使用主包：
 
-安装包含四套 live 重采样系数及前导模板。使用 `cmake --install --prefix`
-临时重定位时，可通过 `--res-dir /tmp/uwb-native-install/share/gr-uwb` 指定资源。
+```cmake
+find_package(OpenUWB CONFIG REQUIRED)
+target_link_libraries(app PRIVATE openuwb::runtime)   # 或 openuwb::twr_core
+```
+
+公共头文件是 `<openuwb/...>`，命名空间是 `openuwb`。整包解调入口
+`<openuwb/phy/hrp/rx/demod_pipeline.h>` 链接 `openuwb::phy_hrp`
+（经 `openuwb::runtime` 传递）。
+
+旧包名仍可用（`TODO(openuwb-compat-removal)`）：`find_package(uwb CONFIG REQUIRED)`
++ `uwb::uwb_native` / `uwb::uwb_core` / `uwb::uwb_twr_core`；头文件可继续包含
+`<gnuradio/uwb/...>`，并通过 `include/gnuradio/uwb/compat.h` 使用 `gr::uwb`。
+两种写法指向同一组导入目标，不会出现第二套实现。
+
+安装包含四套 live 重采样系数及前导模板，资源目录是 `share/openuwb`。使用
+`cmake --install --prefix` 临时重定位时，可通过
+`--res-dir /tmp/openuwb-install/share/openuwb` 指定资源。
+
+日志使用 `<openuwb/support/log.h>`（`OPENUWB_LOG_ERR/WARN/INFO/DEBUG`），
+默认写 `stderr`，可用 `OPENUWB_LOG_LEVEL`（优先）或 `UWB_LOG_LEVEL` 调整；
+`openuwb_rx` 的 `Reporter` 独占 `stdout`，事件行格式不变。
 
 原有 GR 流程和测试数据可在归档分支复现。历史性能报告中的 GR 结果保留原日期和范围。
 需要旧 GR 生成器的 SIC 实验可从归档分支生成夹具，再由当前分支的原生比较工具读取。
