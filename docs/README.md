@@ -5,7 +5,7 @@
 
 ## 当前主线：纯原生 UHD/C++
 
-更新：2026-11-18。当前分支为 `feature/sic-research`。GNU Radio 源码与运行入口
+更新：2026-11-20。当前分支为 `refactor/openuwb-arch`。GNU Radio 源码与运行入口
 见 `archive/gnuradio-adapter`（`d5dfd30`）。以下历史报告中的 GR 命令使用该分支。
 
 - [前端 SIMD 与低 SNR 捕获](performance/前端SIMD与-12dB自相关参数升级开发报告_2026-11-17.md)
@@ -40,33 +40,11 @@ TWR 已包含离线协议核心与 native PHY 阶段工作；硬件测距不在�
 - [M2-A 最终实现评审报告](twr/M2-A_最终实现评审报告.md)
 - [参考资料与API映射.md](twr/参考资料与API映射.md)
 
-## 历史 Phase-1 与硬件实验
+## 硬件环境与算法原理
 
-- [`当前代码路径现状与后续开发基线.md`](当前代码路径现状与后续开发基线.md)
-- [`phase1/开发总结_QM35825周期旁路雷达截取.md`](phase1/开发总结_QM35825周期旁路雷达截取.md)
-- [`phase1/GROK_X410_QM35825周期旁路开发方案.md`](phase1/GROK_X410_QM35825周期旁路开发方案.md)
-- [`phase1/GROK_X410_QM35盲捕获与自动周期锁定开发方案.md`](phase1/GROK_X410_QM35盲捕获与自动周期锁定开发方案.md)
-- [`phase1/测试报告_QM35盲捕获与自动周期锁定_mixed737p28.md`](phase1/测试报告_QM35盲捕获与自动周期锁定_mixed737p28.md)
-- [`phase1/测试报告_QM35盲捕获与自动周期锁定_clean737p28.md`](phase1/测试报告_QM35盲捕获与自动周期锁定_clean737p28.md)
-- [`phase1/下一步_锁定后SC16截取与DW1000头尾预留.md`](phase1/下一步_锁定后SC16截取与DW1000头尾预留.md)
-- [`phase1/下一步开发计划_QM35825周期旁路.md`](phase1/下一步开发计划_QM35825周期旁路.md)
-- [`phase1/SC16检测器开发与性能.md`](phase1/SC16检测器开发与性能.md)
-- [`phase1/X410_RFNoC入口与写盘测试.md`](phase1/X410_RFNoC入口与写盘测试.md)
-- [`phase1/使用说明_X410_CG400自发自收雷达.md`](phase1/使用说明_X410_CG400自发自收雷达.md)
-- [`phase1/使用手册_X410_CG400频率扫描_echo_cir_sweep.md`](phase1/使用手册_X410_CG400频率扫描_echo_cir_sweep.md)
-- [`phase1/开发方案_UWB_Radar流式echo与CIR改造.md`](phase1/开发方案_UWB_Radar流式echo与CIR改造.md)（M1/M2/M3 完成，已上板验证）
-- [`phase1/开发指南_UWB_Radar_PDU模式速率优化.md`](phase1/开发指南_UWB_Radar_PDU模式速率优化.md)（PDU 模式优化 M0–M4 指南）
-- [`phase1/测试报告_UWB_Radar_PDU速率优化.md`](phase1/测试报告_UWB_Radar_PDU速率优化.md)（M1–M3 上板 A/B，200 Hz 0 late）
 - [`本机UHD_DPDK_AVX512问题与绕过.md`](本机UHD_DPDK_AVX512问题与绕过.md)
-- [`phase1/当前信号检测逻辑.md`](phase1/当前信号检测逻辑.md)
-- [`phase1/对照报告_QM35_MATLAB与GNURadio离线解调.md`](phase1/对照报告_QM35_MATLAB与GNURadio离线解调.md)
-- [`phase1/开发需求_UWB自发自收Radar.md`](phase1/开发需求_UWB自发自收Radar.md)（`feature/uwb-monostatic-radar`，待审批）
-- [`phase1/开发计划_UWB自发自收Radar.md`](phase1/开发计划_UWB自发自收Radar.md)
-- [`phase1/开发报告_UWB自发自收Radar_Step1-2.md`](phase1/开发报告_UWB自发自收Radar_Step1-2.md)（Step 1–2，Codex 整改复验）
-- [`phase1/Review_UWB自发自收Radar_Step1-2.md`](phase1/Review_UWB自发自收Radar_Step1-2.md)
-- [`phase1/开发报告_UWB自发自收Radar_Step3-4.md`](phase1/开发报告_UWB自发自收Radar_Step3-4.md)（Step 3–4，Codex 整改复验）
-- [`phase1/Review_UWB自发自收Radar_Step3-4.md`](phase1/Review_UWB自发自收Radar_Step3-4.md)
-- [`phase1/开发报告_UWB自发自收Radar_Step5-6.md`](phase1/开发报告_UWB自发自收Radar_Step5-6.md)（Step 5–6，PDU metadata + loopback）
+- [`DPDK_X410_CG600启用.md`](DPDK_X410_CG600启用.md)
+- [`decoder_CFO_SFD码栅格与成形群时延.md`](decoder_CFO_SFD码栅格与成形群时延.md)
 
 ## 性能分析与实验记录
 
@@ -77,9 +55,3 @@ TWR 已包含离线协议核心与 native PHY 阶段工作；硬件测距不在�
 - [`performance/测试报告_发包率扫描.md`](performance/测试报告_发包率扫描.md)
 - [`performance/GROK_性能分析测试改进方案.md`](performance/GROK_性能分析测试改进方案.md)
 - [`performance/性能分析_buffer扫描结果.csv`](performance/性能分析_buffer扫描结果.csv)
-
-## 历史快照与交接材料
-
-- [`archive/开发状态_2026-08-09历史快照.md`](archive/开发状态_2026-08-09历史快照.md)
-- [`archive/Claude开发规划经验.md`](archive/Claude开发规划经验.md)
-- [`archive/GROK_接手说明.md`](archive/GROK_接手说明.md)

@@ -6,8 +6,12 @@ UWB_demodulation/
 .worktrees/
 # S2 local freeze packages. The inventory markdown stays in docs/sic.
 /build-artifacts/
+# Phase 0: unified CMake preset output lives at <root>/build/<preset>.
+/build/
+# Legacy nested build trees (all gr-uwb/build* variants).
+/gr-uwb/build/
+/gr-uwb/build*/
 gr-uwb/build/
-gr-uwb/build-sic/
 **/build/
 **/build-*/
 **/CMakeFiles/
