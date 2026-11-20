@@ -27,6 +27,11 @@
  *
  * Prefer (c) when __AVX2__ && __FMA__; fallback (a).  Tail of 38 taps is
  * scalar (2 remaining after 9×4 SIMD lanes); no out-of-bounds loads.
+ *
+ * (c') dot_avx2_fixed38_x4 — four adjacent decimated outputs (spc_i == 2)
+ * share one h_conj traversal; each 4-tap group is loaded once and drives four
+ * independent output chains.  Identical arithmetic order to (c), so the
+ * batched result is bit-identical to four single-output calls.
  */
 
 #pragma once
@@ -219,6 +224,45 @@ inline __m256 cir_fir_avx2_group4(const float* xp, const float* hp, int off)
     const __m256 t = _mm256_mul_ps(xim, hsw);
     return _mm256_fmaddsub_ps(xre, ht, t);
 }
+
+// Same product with the tap load and its re/im swap hoisted, so the four
+// adjacent outputs of dot_avx2_fixed38_x4() share one h_conj load per group.
+inline __m256 cir_fir_avx2_prod4(const float* xp, int off, __m256 ht,
+                                 __m256 hsw)
+{
+    const __m256 x = _mm256_loadu_ps(xp + off);
+    const __m256 xre = _mm256_moveldup_ps(x);
+    const __m256 xim = _mm256_movehdup_ps(x);
+    return _mm256_fmaddsub_ps(xre, ht, _mm256_mul_ps(xim, hsw));
+}
+
+// Accumulate one 4-tap group into an existing output accumulator.
+inline __m256 cir_fir_avx2_accum4(__m256 acc, const float* xp, int off,
+                                  __m256 ht, __m256 hsw)
+{
+    return _mm256_add_ps(acc, cir_fir_avx2_prod4(xp, off, ht, hsw));
+}
+
+// Horizontal reduce the accumulator and add the final 2-tap scalar tail.
+inline std::complex<float> cir_fir_avx2_finish38(__m256 acc, const float* xpt,
+                                                 const float* hpt)
+{
+    // Horizontal reduce 4 complex partials → one complex.
+    const __m128 lo = _mm256_castps256_ps128(acc);
+    const __m128 hi = _mm256_extractf128_ps(acc, 1);
+    const __m128 s = _mm_add_ps(lo, hi); // [re0+re2, im0+im2, re1+re3, im1+im3]
+    const __m128 s2 = _mm_add_ps(s, _mm_movehl_ps(s, s));
+    float re = _mm_cvtss_f32(s2);
+    float im = _mm_cvtss_f32(_mm_shuffle_ps(s2, s2, 1));
+
+    // Scalar tail: taps 36 and 37 (no OOB beyond tap_count).
+    // Manual complex mul for the two tail taps (avoids std::complex overhead).
+    re += xpt[0] * hpt[0] - xpt[1] * hpt[1];
+    im += xpt[0] * hpt[1] + xpt[1] * hpt[0];
+    re += xpt[2] * hpt[2] - xpt[3] * hpt[3];
+    im += xpt[2] * hpt[3] + xpt[3] * hpt[2];
+    return std::complex<float>(re, im);
+}
 #endif
 
 inline std::complex<float>
@@ -242,29 +286,80 @@ dot_avx2_fixed38(const std::complex<float>* rx_win,
         acc0 = _mm256_add_ps(acc0, cir_fir_avx2_group4(xp, hp, 48));
         acc1 = _mm256_add_ps(acc1, cir_fir_avx2_group4(xp, hp, 56));
         acc0 = _mm256_add_ps(acc0, cir_fir_avx2_group4(xp, hp, 64));
-        const __m256 acc = _mm256_add_ps(acc0, acc1);
-
-        // Horizontal reduce 4 complex partials → one complex.
-        const __m128 lo = _mm256_castps256_ps128(acc);
-        const __m128 hi = _mm256_extractf128_ps(acc, 1);
-        const __m128 s = _mm_add_ps(lo, hi); // [re0+re2, im0+im2, re1+re3, im1+im3]
-        const __m128 s2 = _mm_add_ps(s, _mm_movehl_ps(s, s));
-        float re = _mm_cvtss_f32(s2);
-        float im = _mm_cvtss_f32(_mm_shuffle_ps(s2, s2, 1));
-
-        // Scalar tail: taps 36 and 37 (no OOB beyond tap_count).
-        const float* xpt = xp + 72; // 36 complex * 2 floats
-        const float* hpt = hp + 72;
-        // Manual complex mul for the two tail taps (avoids std::complex overhead).
-        re += xpt[0] * hpt[0] - xpt[1] * hpt[1];
-        im += xpt[0] * hpt[1] + xpt[1] * hpt[0];
-        re += xpt[2] * hpt[2] - xpt[3] * hpt[3];
-        im += xpt[2] * hpt[3] + xpt[3] * hpt[2];
-        return std::complex<float>(re, im);
+        return cir_fir_avx2_finish38(_mm256_add_ps(acc0, acc1), xp + 72,
+                                     hp + 72);
     }
 #endif
     // Portable fallback (or non-38 tap_count): multi-acc scalar.
     return dot_multi_acc8(rx_win, h_conj, tap_count);
+}
+
+// Four adjacent decimated outputs (spc_i == 2) in one pass.  Output o of a
+// batch reads rx_win + 2*o, so the four windows start at +0/+2/+4/+6 complex
+// samples and overlap; the caller guarantees the LAST window (offset +6, 38
+// taps) is fully in bounds.  Every 4-tap group loads h_conj once and drives
+// four independent outputs, so the tap traffic and the re/im tap permutation
+// are shared.  Each output keeps the same two-chain (even/odd group) order and
+// the same horizontal reduction as dot_avx2_fixed38(), so a batch is
+// bit-identical to four single-output calls.
+inline void dot_avx2_fixed38_x4(const std::complex<float>* rx_win,
+                                const std::complex<float>* h_conj,
+                                std::complex<float>* out4)
+{
+#if UWB_CIR_FIR_HAVE_AVX2
+    const float* xp = reinterpret_cast<const float*>(rx_win);
+    const float* hp = reinterpret_cast<const float*>(h_conj);
+
+    __m256 a0, a1, a2, a3; // even groups 0,2,4,6,8
+    __m256 b0, b1, b2, b3; // odd groups 1,3,5,7
+    {
+        // Groups 0 and 1 initialise the two chains of every output; the other
+        // seven groups accumulate.
+        const __m256 ht0 = _mm256_loadu_ps(hp);
+        const __m256 hs0 = _mm256_permute_ps(ht0, 0xB1);
+        a0 = cir_fir_avx2_prod4(xp, 0, ht0, hs0);
+        a1 = cir_fir_avx2_prod4(xp, 4, ht0, hs0);
+        a2 = cir_fir_avx2_prod4(xp, 8, ht0, hs0);
+        a3 = cir_fir_avx2_prod4(xp, 12, ht0, hs0);
+        const __m256 ht1 = _mm256_loadu_ps(hp + 8);
+        const __m256 hs1 = _mm256_permute_ps(ht1, 0xB1);
+        b0 = cir_fir_avx2_prod4(xp, 8, ht1, hs1);
+        b1 = cir_fir_avx2_prod4(xp, 12, ht1, hs1);
+        b2 = cir_fir_avx2_prod4(xp, 16, ht1, hs1);
+        b3 = cir_fir_avx2_prod4(xp, 20, ht1, hs1);
+    }
+    // Two chains per output halve the accumulator dependency chain.  Keep the
+    // group loops rolled: fully unrolling them makes GCC software-pipeline the
+    // live accumulators/products across groups and spill every ymm.
+#pragma GCC unroll 1
+    for (int off = 16; off <= 64; off += 16) {
+        const __m256 ht = _mm256_loadu_ps(hp + off);
+        const __m256 hsw = _mm256_permute_ps(ht, 0xB1);
+        a0 = cir_fir_avx2_accum4(a0, xp, off + 0, ht, hsw);
+        a1 = cir_fir_avx2_accum4(a1, xp, off + 4, ht, hsw);
+        a2 = cir_fir_avx2_accum4(a2, xp, off + 8, ht, hsw);
+        a3 = cir_fir_avx2_accum4(a3, xp, off + 12, ht, hsw);
+    }
+#pragma GCC unroll 1
+    for (int off = 24; off <= 56; off += 16) {
+        const __m256 ht = _mm256_loadu_ps(hp + off);
+        const __m256 hsw = _mm256_permute_ps(ht, 0xB1);
+        b0 = cir_fir_avx2_accum4(b0, xp, off + 0, ht, hsw);
+        b1 = cir_fir_avx2_accum4(b1, xp, off + 4, ht, hsw);
+        b2 = cir_fir_avx2_accum4(b2, xp, off + 8, ht, hsw);
+        b3 = cir_fir_avx2_accum4(b3, xp, off + 12, ht, hsw);
+    }
+
+    const float* hpt = hp + 72; // tail taps 36,37 of h_conj
+    out4[0] = cir_fir_avx2_finish38(_mm256_add_ps(a0, b0), xp + 72, hpt);
+    out4[1] = cir_fir_avx2_finish38(_mm256_add_ps(a1, b1), xp + 76, hpt);
+    out4[2] = cir_fir_avx2_finish38(_mm256_add_ps(a2, b2), xp + 80, hpt);
+    out4[3] = cir_fir_avx2_finish38(_mm256_add_ps(a3, b3), xp + 84, hpt);
+#else
+    // Portable equivalence: four independent calls (each is multi-acc here).
+    for (size_t o = 0; o < 4; ++o)
+        out4[o] = dot_avx2_fixed38(rx_win + 2 * o, h_conj, kDefaultTapCount);
+#endif
 }
 
 // Dispatch one chip FIR evaluation.
