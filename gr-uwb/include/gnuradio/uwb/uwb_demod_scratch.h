@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 #include <gnuradio/uwb/uwb_demod_result.h>
+#include <gnuradio/uwb/uwb_demod_fec.h>
 #include <gnuradio/uwb/uwb_phy_profile.h>
 #include <gnuradio/uwb/uwb_rx_cfo_opt.h>
 #include <gnuradio/uwb/uwb_rx_sync_opt.h>
@@ -172,6 +173,15 @@ struct DemodScratch {
         std::vector<int8_t> pn;
         rxfusion::Metrics metrics;
         rxfusion::Scratch kernel;
+        // Per-packet decision/LLR workspace reused by the fused payload stage
+        // and its FEC decoders (no per-frame malloc once warm).
+        std::vector<int8_t> g0;
+        std::vector<int8_t> g1;
+        std::vector<int8_t> soft_g0;
+        std::vector<int8_t> soft_g1;
+        std::vector<float> llr0;
+        std::vector<float> llr1;
+        detail::PayloadDecodeWorkspace decode;
 
         void reset_metrics()
         {
@@ -242,6 +252,18 @@ struct DemodScratch {
             rxfusion::kBlockSymbols * (rxfusion::kMaxTapCount +
                                        rxfusion::kSamplesPerChip *
                                            (rxfusion::kChipsPerBurst - 1)));
+        fused.g0.reserve(2048);
+        fused.g1.reserve(2048);
+        fused.soft_g0.reserve(2048);
+        fused.soft_g1.reserve(2048);
+        fused.llr0.reserve(2048);
+        fused.llr1.reserve(2048);
+        fused.decode.rx_bits.reserve(2 * (21 + 2048));
+        fused.decode.decoded.reserve(21 + 2048);
+        fused.decode.rs_cw.reserve(2048);
+        fused.decode.psdu_bits.reserve(8 * 256);
+        fused.decode.llr0_joint.reserve(21 + 2048);
+        fused.decode.llr1_joint.reserve(21 + 2048);
         fused_phr.pn.reserve(rxfusion::kPhrSymbols *
                              rxfusion::kPhrChipsPerBurst);
         fused_phr.g0.reserve(rxfusion::kPhrSymbols);

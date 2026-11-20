@@ -667,6 +667,19 @@ inline bool check_psdu_fcs(const std::vector<uint8_t>& bytes,
     return received == calculated;
 }
 
+// Reusable buffers for the payload hard/soft decoders.  The fused payload
+// stage owns one of these in DemodScratch, so the per-packet work vectors keep
+// their capacity instead of being reallocated for every frame.  Passing
+// nullptr keeps the original self-allocating behaviour (legacy callers and QA).
+struct PayloadDecodeWorkspace {
+    std::vector<int8_t> rx_bits;
+    std::vector<int8_t> decoded;
+    std::vector<int8_t> rs_cw;
+    std::vector<int8_t> psdu_bits;
+    std::vector<float> llr0_joint;
+    std::vector<float> llr1_joint;
+};
+
 // Shared RS + PSDU assembly + FCS tail for the ordinary hard and soft
 // decoder paths.  `out` is reset first;
 // `out.ok` is set only when the RS decode succeeded, and `out.fcs_pass` then
@@ -675,10 +688,13 @@ inline bool check_psdu_fcs(const std::vector<uint8_t>& bytes,
 inline bool finish_rs_crc_payload(const std::vector<int8_t>& rs_cw,
                                   size_t psdu_bits,
                                   PayloadResult& out,
-                                  PayloadSubTimers* sub = nullptr)
+                                  PayloadSubTimers* sub = nullptr,
+                                  PayloadDecodeWorkspace* ws = nullptr)
 {
     out = PayloadResult{};
-    std::vector<int8_t> psdu_bits_out;
+    std::vector<int8_t> local_psdu_bits;
+    std::vector<int8_t>& psdu_bits_out =
+        ws ? ws->psdu_bits : local_psdu_bits;
     const auto t_rs = std::chrono::steady_clock::now();
     const bool rs_ok = rs_decode_stream(rs_cw, psdu_bits, psdu_bits_out);
     if (sub)
@@ -709,7 +725,8 @@ inline bool decode_payload_hard(const std::vector<int8_t>& g0p,
                                 const std::vector<int8_t>& g1,
                                 size_t psdu_bits,
                                 PayloadResult& out,
-                                PayloadSubTimers* sub = nullptr)
+                                PayloadSubTimers* sub = nullptr,
+                                PayloadDecodeWorkspace* ws = nullptr)
 {
     PayloadSubTimer sub_guard(sub);
     out = PayloadResult{};
@@ -718,7 +735,11 @@ inline bool decode_payload_hard(const std::vector<int8_t>& g0p,
         return false;
 
     const size_t total = 21 + g0.size();
-    std::vector<int8_t> rx_bits(2 * total);
+    std::vector<int8_t> local_rx_bits, local_decoded, local_rs_cw;
+    std::vector<int8_t>& rx_bits = ws ? ws->rx_bits : local_rx_bits;
+    std::vector<int8_t>& decoded = ws ? ws->decoded : local_decoded;
+    std::vector<int8_t>& rs_cw = ws ? ws->rs_cw : local_rs_cw;
+    rx_bits.resize(2 * total);
     for (size_t s = 0; s < 21; ++s) {
         rx_bits[2 * s] = g0p[s];
         rx_bits[2 * s + 1] = g1p[s];
@@ -727,7 +748,6 @@ inline bool decode_payload_hard(const std::vector<int8_t>& g0p,
         rx_bits[2 * (s + 21)] = g0[s];
         rx_bits[2 * (s + 21) + 1] = g1[s];
     }
-    std::vector<int8_t> decoded;
     const auto t_vit = std::chrono::steady_clock::now();
     vitdec_cl3(rx_bits.data(), total, decoded);
     if (sub)
@@ -735,11 +755,10 @@ inline bool decode_payload_hard(const std::vector<int8_t>& g0p,
     if (decoded.size() < total)
         return false;
 
-    std::vector<int8_t> rs_cw(decoded.begin() + 19,
-                              decoded.begin() + (total - 2));
+    rs_cw.assign(decoded.begin() + 19, decoded.begin() + (total - 2));
     if (rs_cw.size() != g0.size())
         return false;
-    return finish_rs_crc_payload(rs_cw, psdu_bits, out, sub);
+    return finish_rs_crc_payload(rs_cw, psdu_bits, out, sub, ws);
 }
 
 struct Cl3TrellisTrace {
@@ -1192,7 +1211,8 @@ inline bool decode_payload_soft(const std::vector<float>& llr0p,
                                 const std::vector<float>& llr1,
                                 size_t psdu_bits,
                                 PayloadResult& out,
-                                PayloadSubTimers* sub = nullptr)
+                                PayloadSubTimers* sub = nullptr,
+                                PayloadDecodeWorkspace* ws = nullptr)
 {
     PayloadSubTimer sub_guard(sub);
     out = PayloadResult{};
@@ -1201,7 +1221,11 @@ inline bool decode_payload_soft(const std::vector<float>& llr0p,
         return false;
 
     const size_t total = 21 + llr0.size();
-    std::vector<float> llr0j(total), llr1j(total);
+    std::vector<float> local_llr0j, local_llr1j;
+    std::vector<float>& llr0j = ws ? ws->llr0_joint : local_llr0j;
+    std::vector<float>& llr1j = ws ? ws->llr1_joint : local_llr1j;
+    llr0j.resize(total);
+    llr1j.resize(total);
     for (size_t s = 0; s < 21; ++s) {
         llr0j[s] = llr0p[s];
         llr1j[s] = llr1p[s];
@@ -1210,7 +1234,6 @@ inline bool decode_payload_soft(const std::vector<float>& llr0p,
         llr0j[s + 21] = llr0[s];
         llr1j[s + 21] = llr1[s];
     }
-    std::vector<int8_t> decoded;
     Cl3TrellisTrace tr;
     const auto t_vit = std::chrono::steady_clock::now();
     // One tracing Viterbi serves both the first attempt and the rescue.  The
@@ -1223,11 +1246,12 @@ inline bool decode_payload_soft(const std::vector<float>& llr0p,
     if (tr.bits.size() < total)
         return false;
 
-    std::vector<int8_t> rs_cw(tr.bits.begin() + 19,
-                              tr.bits.begin() + (total - 2));
+    std::vector<int8_t> local_rs_cw;
+    std::vector<int8_t>& rs_cw = ws ? ws->rs_cw : local_rs_cw;
+    rs_cw.assign(tr.bits.begin() + 19, tr.bits.begin() + (total - 2));
     if (rs_cw.size() != llr0.size())
         return false;
-    if (finish_rs_crc_payload(rs_cw, psdu_bits, out, sub) && out.fcs_pass)
+    if (finish_rs_crc_payload(rs_cw, psdu_bits, out, sub, ws) && out.fcs_pass)
         return true;
 
     PayloadResult rescued;

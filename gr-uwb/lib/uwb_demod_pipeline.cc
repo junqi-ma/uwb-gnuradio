@@ -1119,30 +1119,13 @@ FusedPayloadOutcome try_fused_payload_decode(
     if (!fused_supported)
         return FusedPayloadOutcome::NotRun;
 
-    // Compensate payload interval with refit CFO (Task A1)
-    const size_t covered_hi =
-        derotated_span.covers_with_cfo(
-            derotated_span.range, res.cfo.cfo_hz, 0)
-            ? derotated_span.range.hi
-            : 0;
-    const SampleRange pay_range =
-        compute_fused_payload_rotation_range(
-            n, profile, res.timing, res.cir.cir_filter_taps.size(),
-            res.ns_sfd, res.phr, covered_hi);
-    if (!pay_range.empty()) {
-        // This payload-region CFO derotation runs inside the
-        // `stage_payload_us` lap but outside the payload decoder, so
-        // attribute it to the payload `other` bucket explicitly;
-        // otherwise the child sum would fall short of the parent by
-        // the rotation cost (~36 µs on the golden window).
-        const auto t_payrot = std::chrono::steady_clock::now();
-        (void)rotate_uncovered_tail_range(
-            rx, n, profile, pay_range, derotated_span, scratch, res);
-        const uint64_t payrot_us =
-            detail::payload_elapsed_us(t_payrot);
-        payload_sub.other_us += payrot_us;
-        payload_sub.other_derotate_us += payrot_us;
-    }
+    // Payload-region derotation is fused exactly into the CMF template and
+    // per-symbol phase below, so this path deliberately does not rotate the
+    // payload interval into `scratch.derotated`.  `pay_derot` therefore stays
+    // at 0 and the cost is visible where it is actually spent (`pay_soft`).
+    // Fail-safe: the full-stream fallback and the non-fused on-demand path
+    // still rotate their own ranges before reading `scratch.derotated`.
+    (void)derotated_span;
 
     ++res.stage_fused_attempts;
     uint64_t fused_template_us = 0;
@@ -1168,13 +1151,15 @@ FusedPayloadOutcome try_fused_payload_decode(
         (phr_fused_used && scratch.fused_phr.decisions_valid)
             ? &scratch.fused_phr.llr1
             : nullptr;
+    const double cfo_w_rad =
+        2.0 * M_PI * res.cfo.cfo_hz / profile.sample_rate;
     const bool fused_ok = stage_payload_fused_cmf(
-        scratch.derotated.data(), n, profile, res.timing, res.cir,
+        rx, n, profile, res.timing, res.cir,
         scratch.soft_chips, res.ns_sfd, res.phr, res.payload,
         scratch, fused_template_us, fused_correlate_us,
         fused_decode_us, fused_decode_ns, fused_symbols,
         cached_g0, cached_g1, &payload_sub, cached_llr0,
-        cached_llr1);
+        cached_llr1, cfo_w_rad);
     res.stage_fused_template_us += fused_template_us;
     res.stage_fused_correlate_us += fused_correlate_us;
     res.stage_fused_decode_us += fused_decode_us;

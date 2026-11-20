@@ -242,7 +242,8 @@ inline bool stage_payload_fused_cmf(const std::complex<float>* rx,
                                     const std::vector<int8_t>* phr_g1 = nullptr,
                                     PayloadSubTimers* sub = nullptr,
                                     const std::vector<float>* phr_llr0 = nullptr,
-                                    const std::vector<float>* phr_llr1 = nullptr)
+                                    const std::vector<float>* phr_llr1 = nullptr,
+                                    double cfo_w_rad = 0.0)
 {
     // Diagnostic child timing of `stage_payload_us`; see stage_payload_fcs().
     detail::PayloadSubTimer sub_guard(sub);
@@ -353,11 +354,12 @@ inline bool stage_payload_fused_cmf(const std::complex<float>* rx,
                                                                   t_plan0)
                 .count());
 
-        if (!rxfusion::correlate_payload(
-                scratch.derotated.data(), n, cir.cir_filter_taps.data(),
-                tap_count, chip_start, rxfusion::kSamplesPerChip, payload_start,
+        if (!rxfusion::correlate_payload_fused_cfo(
+                rx, n, cir.cir_filter_taps.data(), tap_count, chip_start,
+                rxfusion::kSamplesPerChip, payload_start,
                 scratch.fused.pn.data(), symbols, pol, scratch.softchip.rot,
-                scratch.fused.metrics, scratch.fused.kernel, &timings))
+                cfo_w_rad, scratch.fused.metrics, scratch.fused.kernel,
+                &timings, /*write_complex=*/false))
             return false;
         template_us = plan_us + timings.template_update_us;
         correlate_us = timings.correlate_us;
@@ -375,7 +377,9 @@ inline bool stage_payload_fused_cmf(const std::complex<float>* rx,
                 .count());
         decode_us = decode_ns / 1000;
     };
-    std::vector<int8_t> local_g0p, local_g1p, g0, g1;
+    std::vector<int8_t> local_g0p, local_g1p;
+    std::vector<int8_t>& g0 = scratch.fused.g0;
+    std::vector<int8_t>& g1 = scratch.fused.g1;
     const std::vector<int8_t>* g0p = phr_g0;
     const std::vector<int8_t>* g1p = phr_g1;
     {
@@ -401,8 +405,8 @@ inline bool stage_payload_fused_cmf(const std::complex<float>* rx,
     }
     // Attempt 1 — the unchanged hard-decision path.  On success this is the
     // whole cost of a high-SNR packet: nothing below runs.
-    const bool decoded = detail::decode_payload_hard(*g0p, *g1p, g0, g1,
-                                                     psdu_bits, out, sub);
+    const bool decoded = detail::decode_payload_hard(
+        *g0p, *g1p, g0, g1, psdu_bits, out, sub, &scratch.fused.decode);
     if (decoded && out.fcs_pass) {
         stamp_decode();
         return true;
@@ -414,8 +418,10 @@ inline bool stage_payload_fused_cmf(const std::complex<float>* rx,
     // the fused PHR cache when it is valid, otherwise from one bprf_demod_soft()
     // pass over the legacy prefix.  This is what keeps a marginal packet out of
     // the ~15 ms full-stream stage_softchip_fallbacks retry.
-    std::vector<int8_t> soft_g0, soft_g1;
-    std::vector<float> llr0, llr1;
+    std::vector<int8_t>& soft_g0 = scratch.fused.soft_g0;
+    std::vector<int8_t>& soft_g1 = scratch.fused.soft_g1;
+    std::vector<float>& llr0 = scratch.fused.llr0;
+    std::vector<float>& llr1 = scratch.fused.llr1;
     std::vector<int8_t> local_soft_g0p, local_soft_g1p;
     std::vector<float> local_llr0p, local_llr1p;
     const std::vector<float>* llr0p = phr_llr0;
@@ -438,7 +444,8 @@ inline bool stage_payload_fused_cmf(const std::complex<float>* rx,
     }
     if (llr0p && llr1p) {
         const bool soft_decoded = detail::decode_payload_soft(
-            *llr0p, *llr1p, llr0, llr1, psdu_bits, out, sub);
+            *llr0p, *llr1p, llr0, llr1, psdu_bits, out, sub,
+            &scratch.fused.decode);
         if (soft_decoded && out.fcs_pass) {
             stamp_decode();
             return true;
