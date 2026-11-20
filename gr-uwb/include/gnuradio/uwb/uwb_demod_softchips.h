@@ -96,6 +96,40 @@ inline bool estimate_cir(const std::complex<float>* rx,
     scratch.corr.assign(wlen + 8, std::complex<float>(0.0f, 0.0f));
     scratch.cir_avg_tail_valid = false;
 
+    // ---- Tail average for `sync_phase_gain` reuse. ----
+    // Mirrors its exact integer grid (stride 2*chips_per_symbol) and span so
+    // the phase statistic is the same one the soft-chip stage used to
+    // recompute from the frame.  Filled for cfo_hz == 0 too: when the caller
+    // already passes a derotated frame the windows are simply summed directly,
+    // and the soft-chip stage can always consume the result.
+    const size_t tail_reps = profile.preamble_repetitions;
+    const size_t tail_n = std::min<size_t>(32, tail_reps);
+    const size_t tail_span = 2 * (kQm35ChipsPerSymbol - 1) + tap_count;
+    const size_t tail_k0 = tail_reps - tail_n;
+    const int64_t tail_stride =
+        static_cast<int64_t>(2 * kQm35ChipsPerSymbol);
+    // The tail can ride on the main SYNC loop only when every one of its
+    // repetitions is inside the averaged range, lands exactly on the integer
+    // grid, and keeps the full wlen window in bounds.  Otherwise the
+    // standalone tail loop below re-reads the frame (unchanged behaviour).
+    bool fused_tail = tail_n > 0 && tail_span <= wlen &&
+        tail_k0 >= first_rep && tail_k0 + tail_n <= first_rep + rep_count;
+    if (fused_tail) {
+        for (size_t k = tail_k0; k < tail_reps; ++k) {
+            const int64_t rs = start + static_cast<int64_t>(
+                std::llround(static_cast<double>(k) * period));
+            const int64_t lo = rs - static_cast<int64_t>(pre);
+            if (rs != start + static_cast<int64_t>(k) * tail_stride ||
+                lo < 0 || lo + static_cast<int64_t>(wlen) >
+                              static_cast<int64_t>(n)) {
+                fused_tail = false;
+                break;
+            }
+        }
+    }
+    if (fused_tail)
+        scratch.cir_avg_tail.assign(tail_span, std::complex<float>(0.0f, 0.0f));
+
     const bool fused_rotation = cfo_hz != 0.0;
     const double w = fused_rotation
         ? 2.0 * M_PI * cfo_hz / profile.sample_rate
@@ -115,11 +149,23 @@ inline bool estimate_cir(const std::complex<float>* rx,
             rxopt::vector_accumulate_scaled_complex(
                 scratch.corr.data(), rx + static_cast<size_t>(lo), alpha,
                 wlen);
+            // Same window, same per-SYNC scalar, same ascending SYNC order as
+            // the standalone tail loop: the tail average is bit-identical.
+            if (fused_tail && k >= tail_k0) {
+                rxopt::vector_accumulate_scaled_complex(
+                    scratch.cir_avg_tail.data(), rx + static_cast<size_t>(lo),
+                    alpha, tail_span);
+            }
         } else {
             rxopt::vector_accumulate_complex(
                 scratch.corr.data(),
                 rx + static_cast<size_t>(lo),
                 wlen);
+            if (fused_tail && k >= tail_k0) {
+                rxopt::vector_accumulate_complex(
+                    scratch.cir_avg_tail.data(), rx + static_cast<size_t>(lo),
+                    tail_span);
+            }
         }
         ++valid;
     }
@@ -138,54 +184,50 @@ inline bool estimate_cir(const std::complex<float>* rx,
                                   scratch.cir_phase_rot.data(), wlen);
     }
 
-    // Tail average for `sync_phase_gain` reuse.  Mirror its exact integer grid
-    // (stride 2*chips_per_symbol) and span so the phase statistic is the same
-    // one the soft-chip stage used to recompute from the frame.  This is filled
-    // for cfo_hz == 0 too: when the caller already passes a derotated frame the
-    // windows are simply summed directly, and the soft-chip stage can always
-    // consume the result.
-    {
-        const size_t reps = profile.preamble_repetitions;
-        const size_t tail_n = std::min<size_t>(32, reps);
-        const size_t tail_span =
-            2 * (kQm35ChipsPerSymbol - 1) + tap_count;
-        if (tail_n > 0 && tail_span <= wlen) {
-            scratch.cir_avg_tail.assign(tail_span, std::complex<float>(0.0f, 0.0f));
-            bool tail_ok = true;
-            for (size_t r = 0; r < tail_n; ++r) {
-                const size_t k = reps - tail_n + r;
-                const int64_t lo = start - static_cast<int64_t>(pre) +
-                    static_cast<int64_t>(k) *
-                        static_cast<int64_t>(2 * kQm35ChipsPerSymbol);
-                if (lo < 0 || lo + static_cast<int64_t>(tail_span) >
-                                  static_cast<int64_t>(n)) {
-                    tail_ok = false;
-                    break;
-                }
-                if (fused_rotation) {
-                    const double phase = -w * static_cast<double>(lo);
-                    const std::complex<float> alpha(
-                        static_cast<float>(std::cos(phase)),
-                        static_cast<float>(std::sin(phase)));
-                    rxopt::vector_accumulate_scaled_complex(
-                        scratch.cir_avg_tail.data(),
-                        rx + static_cast<size_t>(lo), alpha, tail_span);
-                } else {
-                    rxopt::vector_accumulate_complex(
-                        scratch.cir_avg_tail.data(),
-                        rx + static_cast<size_t>(lo), tail_span);
-                }
+    if (fused_tail) {
+        // The first tail_span entries of the main ramp are bit-identical to a
+        // fresh tail_span ramp (same 1024-block re-anchoring), so reuse it.
+        if (fused_rotation)
+            rxopt::vector_mul_complex(scratch.cir_avg_tail.data(),
+                                      scratch.cir_phase_rot.data(), tail_span);
+        scratch.cir_avg_tail_valid = true;
+    } else if (tail_n > 0 && tail_span <= wlen) {
+        // Fallback: standalone tail loop (non-integer grid, tail outside the
+        // averaged range, or a tail window clipped by the buffer edge).
+        scratch.cir_avg_tail.assign(tail_span, std::complex<float>(0.0f, 0.0f));
+        bool tail_ok = true;
+        for (size_t r = 0; r < tail_n; ++r) {
+            const size_t k = tail_reps - tail_n + r;
+            const int64_t lo = start - static_cast<int64_t>(pre) +
+                static_cast<int64_t>(k) * tail_stride;
+            if (lo < 0 || lo + static_cast<int64_t>(tail_span) >
+                              static_cast<int64_t>(n)) {
+                tail_ok = false;
+                break;
             }
-            if (tail_ok) {
-                if (fused_rotation) {
-                    rxopt::build_rotation_ramp(w, tail_span,
-                                               scratch.cir_phase_rot.data());
-                    rxopt::vector_mul_complex(scratch.cir_avg_tail.data(),
-                                              scratch.cir_phase_rot.data(),
-                                              tail_span);
-                }
-                scratch.cir_avg_tail_valid = true;
+            if (fused_rotation) {
+                const double phase = -w * static_cast<double>(lo);
+                const std::complex<float> alpha(
+                    static_cast<float>(std::cos(phase)),
+                    static_cast<float>(std::sin(phase)));
+                rxopt::vector_accumulate_scaled_complex(
+                    scratch.cir_avg_tail.data(),
+                    rx + static_cast<size_t>(lo), alpha, tail_span);
+            } else {
+                rxopt::vector_accumulate_complex(
+                    scratch.cir_avg_tail.data(),
+                    rx + static_cast<size_t>(lo), tail_span);
             }
+        }
+        if (tail_ok) {
+            if (fused_rotation) {
+                rxopt::build_rotation_ramp(w, tail_span,
+                                           scratch.cir_phase_rot.data());
+                rxopt::vector_mul_complex(scratch.cir_avg_tail.data(),
+                                          scratch.cir_phase_rot.data(),
+                                          tail_span);
+            }
+            scratch.cir_avg_tail_valid = true;
         }
     }
 
@@ -499,7 +541,23 @@ inline bool stage_softchips_from_cir(const std::complex<float>* rx,
             }
         } else if (fir_k == cir_fir::Kernel::Avx2Fixed &&
             tap_count == cir_fir::kDefaultTapCount) {
-            for (size_t i = checked; i < num_chips; ++i) {
+            size_t i = checked;
+            // Four adjacent outputs share one h_conj traversal on the integer
+            // grid (spc_i == 2).  The batch is only taken while the LAST
+            // window (+6) stays inside the buffer; the remaining <4 chips use
+            // the single-output kernel.
+            if (spc_i == 2) {
+                for (; i + 4 <= num_chips; i += 4) {
+                    const int64_t p =
+                        chip_start + static_cast<int64_t>(i) * spc_i;
+                    const size_t win = static_cast<size_t>(p - fwd);
+                    if (win + cir_fir::kDefaultTapCount + 6 > n)
+                        break;
+                    cir_fir::dot_avx2_fixed38_x4(rx0 + win, h_conj,
+                                                 fir_out.data() + i);
+                }
+            }
+            for (; i < num_chips; ++i) {
                 const int64_t p = chip_start + static_cast<int64_t>(i) * spc_i;
                 const size_t win = static_cast<size_t>(p - fwd);
                 fir_out[i] =
