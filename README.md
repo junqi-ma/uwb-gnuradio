@@ -1,6 +1,6 @@
-# UWB 接收与信号处理
+# openUWB — UWB 接收与信号处理
 
-当前分支以原生 UHD/C++ 为开发基线。可以直接从 UHD 接收 SC16，也可以回放同格式文件，再执行单音消除、候选捕获、窗口重采样、DW3000 解调和周期锁定。原生库还提供 HRP 调制、SIC、CIR 和离线 TWR。GNU Radio blocks、PMT/PDU 适配、Python 绑定及 GRC 流程保存在本地分支 `archive/gnuradio-adapter`（`d5dfd30`）。
+仓库已更名为 `openUWB`（原 `uwb-gnuradio`）。当前分支以原生 UHD/C++ 为开发基线。可以直接从 UHD 接收 SC16，也可以回放同格式文件，再执行单音消除、候选捕获、窗口重采样、DW3000 解调和周期锁定。原生库还提供 HRP 调制、SIC、CIR 和离线 TWR。GNU Radio blocks、PMT/PDU 适配、Python 绑定及 GRC 流程保存在本地分支 `archive/gnuradio-adapter`（`d5dfd30`）。
 
 在仓库根目录构建。依赖 C++17、CMake、VOLK、Boost.Test。连接 USRP 时需 UHD 开发包。Python 3 用于辅助工具和部分测试。
 
