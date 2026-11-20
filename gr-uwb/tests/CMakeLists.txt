@@ -95,6 +95,9 @@ set(UWB_UNIT_QA_SOURCES
     ${UWB_UNIT_DIR}/twr/qa_uwb_twr_phy_impairment.cc
     ${UWB_UNIT_DIR}/twr/qa_uwb_twr_tof_input.cc
     ${UWB_UNIT_DIR}/runtime/qa_uwb_uhd_sc16_pipeline.cc
+    # Phase 1 (1C): the header-only diagnostic logger. Appended last so the
+    # historical test numbering above is untouched.
+    ${UWB_UNIT_DIR}/support/qa_uwb_log.cc
 )
 
 foreach(qa_source IN LISTS UWB_UNIT_QA_SOURCES)

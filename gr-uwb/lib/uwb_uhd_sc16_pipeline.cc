@@ -13,6 +13,7 @@
 #include <gnuradio/uwb/uwb_rational_resampler_core.h>
 #include <gnuradio/uwb/uwb_resample_window.h>
 #include <gnuradio/uwb/uwb_defaults.h>
+#include <gnuradio/uwb/uwb_log.h>
 #include <volk/volk.h>
 
 #include <algorithm>
@@ -25,7 +26,6 @@
 #include <fcntl.h>
 #include <filesystem>
 #include <fstream>
-#include <iostream>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -585,11 +585,13 @@ bool UhdDeviceSc16Source::open()
         if (!cfg_.uhd_antenna.empty()) {
             impl_->usrp->set_rx_antenna(cfg_.uhd_antenna, channel);
         }
-        std::cerr << "UHD RX configured: channel=" << channel
-                  << " antenna=" << impl_->usrp->get_rx_antenna(channel)
-                  << " rate=" << actual_rate_
-                  << " frequency=" << impl_->usrp->get_rx_freq(channel)
-                  << " gain=" << impl_->usrp->get_rx_gain(channel) << std::endl;
+        UWB_LOG_INFO("uhd_pipeline",
+                     "UHD RX configured: channel="
+                         << channel
+                         << " antenna=" << impl_->usrp->get_rx_antenna(channel)
+                         << " rate=" << actual_rate_
+                         << " frequency=" << impl_->usrp->get_rx_freq(channel)
+                         << " gain=" << impl_->usrp->get_rx_gain(channel));
 
         uhd::stream_args_t stream_args("sc16", "sc16");
         if (!cfg_.uhd_channel.empty()) {
@@ -620,9 +622,10 @@ bool UhdDeviceSc16Source::start_stream()
         impl_->rx_stream->issue_stream_cmd(cmd);
         return true;
     } catch (const std::exception& e) {
-        std::cerr << "UhdDeviceSc16Source: issue_stream_cmd(START_CONTINUOUS) "
-                     "failed: "
-                  << e.what() << std::endl;
+        UWB_LOG_ERR("uhd_pipeline",
+                    "UhdDeviceSc16Source: issue_stream_cmd(START_CONTINUOUS) "
+                    "failed: "
+                        << e.what());
         return false;
     }
 }
@@ -757,11 +760,11 @@ bool UhdSc16Pipeline::initialize(std::unique_ptr<ISc16StreamSource> custom_sourc
     // core isolation the caller asked for.
     if (!cfg_.cpu_cores_dsp.empty() &&
         static_cast<int>(cfg_.cpu_cores_dsp.size()) != n_workers) {
-        std::cerr << "UhdSc16Pipeline: cpu_cores_dsp has "
-                  << cfg_.cpu_cores_dsp.size() << " entries but dsp_workers="
-                  << n_workers
-                  << "; exactly one affinity entry per DSP worker is required"
-                  << std::endl;
+        UWB_LOG_ERR("uhd_pipeline",
+                    "UhdSc16Pipeline: cpu_cores_dsp has "
+                        << cfg_.cpu_cores_dsp.size() << " entries but dsp_workers="
+                        << n_workers
+                        << "; exactly one affinity entry per DSP worker is required");
         return false;
     }
 
@@ -773,12 +776,12 @@ bool UhdSc16Pipeline::initialize(std::unique_ptr<ISc16StreamSource> custom_sourc
         const ResamplerExperiment exp =
             parse_resampler_experiment(cfg_.resampler_experiment);
         if (exp == ResamplerExperiment::Invalid) {
-            std::cerr << "UhdSc16Pipeline: unknown or removed resampler_experiment '"
-                      << cfg_.resampler_experiment
-                      << "' (accepted: none|fixed_phase; convert_cache/both were "
-                         "removed in the 2026-11-15 native cleanup); "
-                         "falling back to 'none'"
-                      << std::endl;
+            UWB_LOG_WARN("uhd_pipeline",
+                         "UhdSc16Pipeline: unknown or removed resampler_experiment '"
+                             << cfg_.resampler_experiment
+                             << "' (accepted: none|fixed_phase; convert_cache/both were "
+                                "removed in the 2026-11-15 native cleanup); "
+                                "falling back to 'none'");
         }
         cfg_.resampler_experiment = resampler_experiment_name(exp);
     }
@@ -860,9 +863,10 @@ bool UhdSc16Pipeline::initialize(std::unique_ptr<ISc16StreamSource> custom_sourc
         std::error_code ec;
         std::filesystem::create_directories(cfg_.iq_dump_dir, ec);
         if (ec) {
-            std::cerr << "UhdSc16Pipeline: cannot create iq_dump_dir '"
-                      << cfg_.iq_dump_dir << "': " << ec.message()
-                      << " (IQ dumps will fail)\n";
+            UWB_LOG_WARN("uhd_pipeline",
+                         "UhdSc16Pipeline: cannot create iq_dump_dir '"
+                             << cfg_.iq_dump_dir << "': " << ec.message()
+                             << " (IQ dumps will fail)");
         }
     }
 
@@ -1290,19 +1294,22 @@ bool UhdSc16Pipeline::write_iq_dump(uint64_t window_id,
 
     std::ofstream f(path, std::ios::binary | std::ios::trunc);
     if (!f) {
-        std::cerr << "UhdSc16Pipeline: cannot open IQ dump '" << path << "'\n";
+        UWB_LOG_ERR("uhd_pipeline",
+                    "UhdSc16Pipeline: cannot open IQ dump '" << path << "'");
         return false;
     }
     f.write(reinterpret_cast<const char*>(data),
             static_cast<std::streamsize>(n * sizeof(std::complex<float>)));
     if (!f) {
-        std::cerr << "UhdSc16Pipeline: failed writing IQ dump '" << path << "' ("
-                  << n << " samples)\n";
+        UWB_LOG_ERR("uhd_pipeline",
+                    "UhdSc16Pipeline: failed writing IQ dump '" << path << "' ("
+                        << n << " samples)");
         return false;
     }
     f.close();
     if (!f) {
-        std::cerr << "UhdSc16Pipeline: failed closing IQ dump '" << path << "'\n";
+        UWB_LOG_ERR("uhd_pipeline",
+                    "UhdSc16Pipeline: failed closing IQ dump '" << path << "'");
         return false;
     }
     return true;
@@ -1319,8 +1326,9 @@ void UhdSc16Pipeline::rx_producer_loop()
         return;
     }
     if (!source_->start_stream()) {
-        std::cerr << "UhdSc16Pipeline: source start_stream() failed; no windows "
-                     "will be produced\n";
+        UWB_LOG_ERR("uhd_pipeline",
+                    "UhdSc16Pipeline: source start_stream() failed; no windows "
+                    "will be produced");
         // R2: a start failure is a fatal run failure, not an empty-but-healthy
         // run.  Ready states stay terminal (workers are untouched); the source
         // failure is what failed()/init_error() now report.
@@ -1494,11 +1502,12 @@ void UhdSc16Pipeline::rx_producer_loop()
                 // data.  Reaching this point with the release helper above means
                 // a state that must not happen (no room even after compaction);
                 // fail loudly instead of pretending the input ended.
-                std::cerr << "UhdSc16Pipeline: RX storage cannot fit a read for "
-                             "window "
-                          << k << " (storage_cap=" << storage_cap
-                          << " valid_begin=" << valid_begin
-                          << " valid_n=" << valid_n << "); aborting the run\n";
+                UWB_LOG_ERR("uhd_pipeline",
+                            "UhdSc16Pipeline: RX storage cannot fit a read for "
+                            "window "
+                                << k << " (storage_cap=" << storage_cap
+                                << " valid_begin=" << valid_begin
+                                << " valid_n=" << valid_n << "); aborting the run");
                 set_source_error("RX storage produced a zero-length read request");
                 source_fatal = true;
                 break;
@@ -1569,10 +1578,11 @@ void UhdSc16Pipeline::rx_producer_loop()
                 // R1: bounded tolerance for non-EOF zero-progress reads.
                 ++zero_progress_reads;
                 if (zero_progress_reads >= kMaxZeroProgressReads) {
-                    std::cerr << "UhdSc16Pipeline: source made no progress after "
-                              << zero_progress_reads
-                              << " consecutive reads for window " << k
-                              << "; aborting the run\n";
+                    UWB_LOG_ERR("uhd_pipeline",
+                                "UhdSc16Pipeline: source made no progress after "
+                                    << zero_progress_reads
+                                    << " consecutive reads for window " << k
+                                    << "; aborting the run");
                     set_source_error(
                         "source returned no samples and no EOF for " +
                         std::to_string(zero_progress_reads) + " consecutive reads");
@@ -1617,11 +1627,12 @@ void UhdSc16Pipeline::rx_producer_loop()
         // storage.
         if (win_start < valid_start_abs ||
             static_cast<size_t>(win_start - valid_start_abs) + capacity > valid_n) {
-            std::cerr << "UhdSc16Pipeline: internal RX buffer invariant violated for "
-                         "window "
-                      << k << " (win_start=" << win_start
-                      << " valid_start_abs=" << valid_start_abs
-                      << " valid_n=" << valid_n << "); window cancelled\n";
+            UWB_LOG_ERR("uhd_pipeline",
+                        "UhdSc16Pipeline: internal RX buffer invariant violated for "
+                        "window "
+                            << k << " (win_start=" << win_start
+                            << " valid_start_abs=" << valid_start_abs
+                            << " valid_n=" << valid_n << "); window cancelled");
             ScopedLockWait lk(ledger_mutex_, ledger_wait_ns);
             ledger_.offered_windows++;
             ledger_.cancelled_windows++;
@@ -1831,22 +1842,23 @@ void UhdSc16Pipeline::dsp_consumer_loop(int worker_id)
             } else {
                 // Never report a silent success: the caller must be able to see
                 // that the requested isolation is not in effect.
-                std::cerr << "UhdSc16Pipeline: dsp worker " << worker_id
-                          << " affinity to core " << affinity_core
-                          << " failed: " << std::strerror(rc) << std::endl;
+                UWB_LOG_WARN("uhd_pipeline",
+                             "UhdSc16Pipeline: dsp worker " << worker_id
+                                 << " affinity to core " << affinity_core
+                                 << " failed: " << std::strerror(rc));
             }
         } else {
-            std::cerr << "UhdSc16Pipeline: dsp worker " << worker_id
-                      << " affinity core " << affinity_core
-                      << " is out of range (CPU_SETSIZE=" << CPU_SETSIZE << ")"
-                      << std::endl;
+            UWB_LOG_WARN("uhd_pipeline",
+                         "UhdSc16Pipeline: dsp worker " << worker_id
+                             << " affinity core " << affinity_core
+                             << " is out of range (CPU_SETSIZE=" << CPU_SETSIZE << ")");
         }
 #else
-        std::cerr << "UhdSc16Pipeline: dsp worker " << worker_id
-                  << " affinity to core " << affinity_core
-                  << " requested but thread affinity is not supported on this "
-                     "platform"
-                  << std::endl;
+        UWB_LOG_WARN("uhd_pipeline",
+                     "UhdSc16Pipeline: dsp worker " << worker_id
+                         << " affinity to core " << affinity_core
+                         << " requested but thread affinity is not supported on this "
+                            "platform");
 #endif
     }
     {
@@ -1914,10 +1926,13 @@ void UhdSc16Pipeline::dsp_consumer_loop(int worker_id)
                     // 65/48 filter: it doubles the resample cost and destroys the
                     // passband, so every downstream detector fails.  Make the
                     // silent degradation at least visible.
-                    std::cerr << "UhdSc16Pipeline: warning: resampler_65_48 profile '"
-                              << profile << "' taps not found (cwd-dependent); falling back to a "
-                              << "flat " << (65 * 64) << "-tap placeholder filter, DSP output "
-                              << "will be wrong\n";
+                    UWB_LOG_WARN("uhd_pipeline",
+                                 "UhdSc16Pipeline: warning: resampler_65_48 profile '"
+                                     << profile
+                                     << "' taps not found (cwd-dependent); falling back to a "
+                                     << "flat " << (65 * 64)
+                                     << "-tap placeholder filter, DSP output "
+                                     << "will be wrong");
                     taps.resize(65 * 64, 1.0f / 48.0f);
                 }
                 resamp_65_48 = std::make_unique<core::RationalResampler65_48Core>(taps);

@@ -10,6 +10,7 @@
 ########################################################################
 install(FILES
     api.h
+    uwb_log.h
     uwb_gr_complex.h
     uwb_radar_meta_core.h
     uwb_sc16_stream_source.h
