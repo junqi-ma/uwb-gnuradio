@@ -1,5 +1,5 @@
 # radio: stream sources and device backends.
-set(sources uwb_fixed_tone_cancel_source.cc)
+set(sources uwb_fixed_tone_cancel_source.cc uhd_device_source.cc)
 if(UWB_HAVE_UHD)
     list(APPEND sources uwb_uhd_burst_backend.cc)
 endif()

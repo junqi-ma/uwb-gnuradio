@@ -5,7 +5,8 @@ set(sources uwb_fixed_tone_cancel_core.cc)
 if(UWB_SIMD_HAVE_AVX512)
     list(APPEND sources
         uwb_rational_resampler_avx512.cc
-        uwb_resampler_transposed_avx512.cc)
+        uwb_resampler_transposed_avx512.cc
+        uwb_demod_sic_avx512.cc)
 endif()
 add_library(openuwb_dsp STATIC ${sources})
 target_link_libraries(openuwb_dsp PUBLIC openuwb_support)

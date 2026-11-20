@@ -57,7 +57,7 @@ set(UWB_UNIT_QA_SOURCES
     ${UWB_UNIT_DIR}/phy/qa_uwb_cfo_derotate.cc
     ${UWB_UNIT_DIR}/support/qa_uwb_defaults.cc
     ${UWB_UNIT_DIR}/phy/qa_uwb_demod_core.cc
-    ${UWB_UNIT_DIR}/sic/qa_uwb_demod_sic_avx512.cc
+    ${UWB_UNIT_DIR}/dsp/qa_uwb_demod_sic_avx512.cc
     ${UWB_UNIT_DIR}/sic/qa_uwb_discrete_cir_estimator.cc
     ${UWB_UNIT_DIR}/sic/qa_uwb_discrete_cir_reconstruct.cc
     ${UWB_UNIT_DIR}/dsp/qa_uwb_fixed_tone_cancel_core.cc
@@ -98,6 +98,10 @@ set(UWB_UNIT_QA_SOURCES
     # Phase 1 (1C): the header-only diagnostic logger. Appended last so the
     # historical test numbering above is untouched.
     ${UWB_UNIT_DIR}/support/qa_uwb_log.cc
+    # Phase 2: the reserved HRP revision vocabulary and the runtime config
+    # placeholders.
+    ${UWB_UNIT_DIR}/phy/qa_hrp_standard_rev.cc
+    ${UWB_UNIT_DIR}/runtime/qa_openuwb_runtime_config.cc
 )
 
 foreach(qa_source IN LISTS UWB_UNIT_QA_SOURCES)
