@@ -3,14 +3,14 @@
 仓库根目录只保留当前主线入口。这里存放已经完成的阶段总结、性能实验和历史
 交接材料；归档不表示内容无效，而是避免历史状态与当前主线混杂。
 
-## 当前主线：openUWB（纯原生 UHD/C++）
+## 当前主线：OpenUWB（纯原生 UHD/C++）
 
 更新：2026-11-20。当前分支为 `refactor/openuwb-arch`，Phase 0–4 重构已完成：
 仓库根即 `OpenUWB` 工程，公共头文件在 `include/openuwb/<domain>/`，命名空间为
 `openuwb`，目标前缀 `openuwb_*`。GNU Radio 源码与运行入口见
 `archive/gnuradio-adapter`（`d5dfd30`）。以下历史报告中的 GR 命令使用该分支。
 
-- [openUWB 全仓库架构重构验收报告](performance/openUWB架构重构验收报告_2026-11-20.md)
+- [OpenUWB 全仓库架构重构验收报告](performance/openUWB架构重构验收报告_2026-11-20.md)
   · [ABBA 原始数据](performance/data_openuwb_refactor_20261120/abba.json)
 
 - [前端 SIMD 与低 SNR 捕获](performance/前端SIMD与-12dB自相关参数升级开发报告_2026-11-17.md)
@@ -23,7 +23,7 @@
 - [现行构建（预设）、架构、安装和接收参数](原生UHD与C++构建使用说明.md)
 - [解调与调度分层重构报告](performance/解调与调度分层重构开发报告_2026-11-17.md)
 - [解调与窗口执行代码边界](架构_解调与窗口执行.md)
-- [openUWB 全仓库架构重构执行方案（OpenCode）](OpenCode执行方案_openUWB全仓库架构重构_2026-11-20.md)
+- [OpenUWB 全仓库架构重构执行方案（OpenCode）](OpenCode执行方案_openUWB全仓库架构重构_2026-11-20.md)
 - [统一日志与调试接口开发建议](开发建议_统一日志与调试接口_2026-11-20.md)
 - [当前开发状态](../开发状态.md)
 - [接收工具与 Python/C++ 入口区别](../tools/rx/README.md)

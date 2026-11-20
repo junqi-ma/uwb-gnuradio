@@ -1,4 +1,4 @@
-# openUWB
+# OpenUWB
 
 原生 C++17 UWB 基带与运行时：HRP 调制/解调、重采样、CIR、SIC、Sensing 和离线
 TWR，入口是 `openuwb_rx`（实时接收或 SC16 回放）。GNU Radio blocks、PMT/PDU

@@ -1,4 +1,4 @@
-# openUWB 全仓库架构重构执行方案（OpenCode Executable Plan）
+# OpenUWB 全仓库架构重构执行方案（OpenCode Executable Plan）
 
 > 日期：2026-11-20  
 > 基线分支 / 提交：`feature/sic-research` @ `5ce858a`  
@@ -9,7 +9,7 @@
 
 ## 0. 项目定位与已锁定的 6 项架构决策
 
-本次重构将仓库从历史遗留的 `gr-uwb`（单一 RX 接收工具）升级为 **`openUWB`** —— 一个完整的原生 C++17 UWB 基带实现与上层应用平台。后续的 **TX 基带、RX 基带、TWR、Radar/Sensing、Simple RX、Simple TX、SIC** 均作为基于统一基带库的 Runtime Pipeline 与 Application。
+本次重构将仓库从历史遗留的 `gr-uwb`（单一 RX 接收工具）升级为 **OpenUWB** —— 一个完整的原生 C++17 UWB 基带实现与上层应用平台。后续的 **TX 基带、RX 基带、TWR、Radar/Sensing、Simple RX、Simple TX、SIC** 均作为基于统一基带库的 Runtime Pipeline 与 Application。
 
 以下 6 项决策已锁定，执行过程中**不得擅自更改**：
 

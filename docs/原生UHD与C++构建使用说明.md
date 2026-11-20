@@ -1,4 +1,4 @@
-# openUWB 原生 UHD/C++ 构建使用说明
+# OpenUWB 原生 UHD/C++ 构建使用说明
 
 仓库根目录就是 `OpenUWB` 工程（Phase 3 去掉了 `gr-uwb/` 外壳）。GNU Radio
 实现与旧用法保存在 `archive/gnuradio-adapter`（`d5dfd30`）。下面的命令都从
