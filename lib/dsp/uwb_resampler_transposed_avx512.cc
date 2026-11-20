@@ -24,8 +24,7 @@
 
 #include <immintrin.h>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace core {
 namespace simd {
 namespace transposed {
@@ -270,7 +269,6 @@ void transposed_process_window(const float* taps, size_t H, size_t Interp,
 } // namespace transposed
 } // namespace simd
 } // namespace core
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb
 
 #endif // UWB_SIMD_HAVE_AVX512

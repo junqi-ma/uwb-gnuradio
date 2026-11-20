@@ -123,11 +123,11 @@ int main(int argc, char** argv)
     Result result_f;
     Result result_s;
     if (sc16_first) {
-        result_s = run_gate<gr::uwb::UwbDetectorStateMachineSc16>(sc16, target, chunk);
-        result_f = run_gate<gr::uwb::UwbDetectorStateMachine>(fc32, target, chunk);
+        result_s = run_gate<openuwb::UwbDetectorStateMachineSc16>(sc16, target, chunk);
+        result_f = run_gate<openuwb::UwbDetectorStateMachine>(fc32, target, chunk);
     } else {
-        result_f = run_gate<gr::uwb::UwbDetectorStateMachine>(fc32, target, chunk);
-        result_s = run_gate<gr::uwb::UwbDetectorStateMachineSc16>(sc16, target, chunk);
+        result_f = run_gate<openuwb::UwbDetectorStateMachine>(fc32, target, chunk);
+        result_s = run_gate<openuwb::UwbDetectorStateMachineSc16>(sc16, target, chunk);
     }
 
     std::cout << "target_samples=" << target << " chunk_items=" << chunk

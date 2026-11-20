@@ -5,7 +5,7 @@
 #include <openuwb/phy/hrp/rx/demod_result.h>
 #include <openuwb/phy/hrp/common/profile.h>
 
-namespace gr::uwb::demod::core {
+namespace openuwb::demod::core {
 
 
 // Low-SNR policy gates: normalized correlation metrics (not dB).
@@ -92,4 +92,4 @@ inline bool integer_chip_grid(double samples_per_chip)
 }
 
 
-} // namespace gr::uwb::demod::core
+} // namespace openuwb::demod::core

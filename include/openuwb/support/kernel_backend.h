@@ -28,8 +28,7 @@
 
 #include <string>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace core {
 namespace simd {
 
@@ -104,5 +103,4 @@ void reset_kernel_backends() noexcept;
 
 } // namespace simd
 } // namespace core
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

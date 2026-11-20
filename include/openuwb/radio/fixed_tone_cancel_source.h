@@ -45,8 +45,7 @@
 #include <thread>
 #include <vector>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace pipeline {
 
 // Configuration that was actually applied (the echoed sample rate is the one
@@ -153,5 +152,4 @@ private:
 };
 
 } // namespace pipeline
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

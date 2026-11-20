@@ -14,10 +14,10 @@
 
 #include <openuwb/phy/hrp/common/standard_rev.h>
 
-using gr::uwb::phy::hrp::HrpStandardInfo;
-using gr::uwb::phy::hrp::HrpStandardRev;
-using gr::uwb::phy::hrp::is_known;
-using gr::uwb::phy::hrp::standard_info;
+using openuwb::phy::hrp::HrpStandardInfo;
+using openuwb::phy::hrp::HrpStandardRev;
+using openuwb::phy::hrp::is_known;
+using openuwb::phy::hrp::standard_info;
 
 BOOST_AUTO_TEST_CASE(test_hrp_revisions_are_distinct)
 {

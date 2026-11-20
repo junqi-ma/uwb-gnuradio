@@ -6,8 +6,7 @@
  */
 #include "console_reporter.h"
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace live {
 
 void print_live_help()
@@ -79,5 +78,4 @@ void print_live_help()
 }
 
 } // namespace live
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

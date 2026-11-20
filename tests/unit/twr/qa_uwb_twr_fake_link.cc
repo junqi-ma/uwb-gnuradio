@@ -34,10 +34,10 @@ namespace test_tools {
 namespace tt_detail {
 
 template <>
-struct print_log_value<gr::uwb::twr::FakeLinkError> {
-    void operator()(std::ostream& os, gr::uwb::twr::FakeLinkError const& e) const
+struct print_log_value<openuwb::twr::FakeLinkError> {
+    void operator()(std::ostream& os, openuwb::twr::FakeLinkError const& e) const
     {
-        os << gr::uwb::twr::fake_link_error_to_string(e);
+        os << openuwb::twr::fake_link_error_to_string(e);
     }
 };
 
@@ -49,7 +49,7 @@ BOOST_AUTO_TEST_SUITE(twr_fake_link)
 
 namespace {
 
-using namespace gr::uwb::twr;
+using namespace openuwb::twr;
 
 constexpr double kRate1G = 1.0e9;
 constexpr double kRateX410 = 998.4e6;

@@ -40,8 +40,7 @@
 
 #include <openuwb/radio/echo_multitx.h>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace echo {
 
 // Per-burst I/O status.  Exactly one aggregated status per schedule index
@@ -237,7 +236,6 @@ inline const char* burst_status_to_string(BurstStatus s)
 }
 
 } // namespace echo
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb
 
 #endif /* INCLUDED_GNURADIO_UWB_UWB_ECHO_BURST_BACKEND_H */

@@ -35,20 +35,20 @@
 #include <thread>
 #include <vector>
 
-using gr::uwb::core::DemodResultMeta;
-using gr::uwb::core::DumpWindowMeta;
-using gr::uwb::core::JsonField;
-using gr::uwb::core::RationalResampler65_32Core;
-using gr::uwb::core::RationalResampler65_48Core;
-using gr::uwb::core::ToneEstimate;
-using gr::uwb::core::ToneSubtractResult;
-using gr::uwb::core::WindowCropGeom;
-using gr::uwb::defaults::kCg400NativeScheduledCapture;
-using gr::uwb::defaults::kCg400NativeScheduledPostGuard;
-using gr::uwb::defaults::kCg400NativeScheduledPreGuard;
-using gr::uwb::defaults::kNativeScheduledCapture;
-using gr::uwb::defaults::kNativeScheduledPostGuard;
-using gr::uwb::defaults::kNativeScheduledPreGuard;
+using openuwb::core::DemodResultMeta;
+using openuwb::core::DumpWindowMeta;
+using openuwb::core::JsonField;
+using openuwb::core::RationalResampler65_32Core;
+using openuwb::core::RationalResampler65_48Core;
+using openuwb::core::ToneEstimate;
+using openuwb::core::ToneSubtractResult;
+using openuwb::core::WindowCropGeom;
+using openuwb::defaults::kCg400NativeScheduledCapture;
+using openuwb::defaults::kCg400NativeScheduledPostGuard;
+using openuwb::defaults::kCg400NativeScheduledPreGuard;
+using openuwb::defaults::kNativeScheduledCapture;
+using openuwb::defaults::kNativeScheduledPostGuard;
+using openuwb::defaults::kNativeScheduledPreGuard;
 
 namespace {
 
@@ -292,9 +292,9 @@ float quantize_cf32_to_sc16(const std::complex<float>* in,
     out.resize(n * 2);
     uint64_t clips = 0;
     for (size_t i = 0; i < n; ++i) {
-        out[2 * i] = gr::uwb::core::clip_i16(
+        out[2 * i] = openuwb::core::clip_i16(
             static_cast<double>(in[i].real()) * scale, &clips);
-        out[2 * i + 1] = gr::uwb::core::clip_i16(
+        out[2 * i + 1] = openuwb::core::clip_i16(
             static_cast<double>(in[i].imag()) * scale, &clips);
     }
     return scale;
@@ -401,7 +401,7 @@ void process_window(const WindowJob& job,
 
     if (!opt.skip_notch) {
         scratch.notched.resize(job.raw.size());
-        out.sub = gr::uwb::core::subtract_tone_sc16(
+        out.sub = openuwb::core::subtract_tone_sc16(
             scratch.notched.data(), job.raw.data(), n_native,
             opt.native_rate_hz, tone_hz);
         src = scratch.notched.data();
@@ -416,7 +416,7 @@ void process_window(const WindowJob& job,
             return;
         }
         const bool acq = (w.capture_mode == "acquisition");
-        const auto plan = gr::uwb::core::plan_window_crop(
+        const auto plan = openuwb::core::plan_window_crop(
             native_ws, static_cast<int64_t>(n_native), native_pred, demod_geom,
             acq);
         if (plan.empty) {
@@ -448,7 +448,7 @@ void process_window(const WindowJob& job,
     }
 
     scratch.cf.resize(n_native);
-    gr::uwb::core::sc16_to_cf32(src, n_native, scratch.cf.data());
+    openuwb::core::sc16_to_cf32(src, n_native, scratch.cf.data());
     resample_oneshot(core, taps, scratch.cf.data(), n_native, out.rs);
 
     out.n_native = n_native;
@@ -550,9 +550,9 @@ int main(int argc, char** argv)
     std::vector<DumpWindowMeta> windows;
     std::vector<DemodResultMeta> demod;
     try {
-        windows = gr::uwb::core::load_capture_jsonl(jsonl_path);
+        windows = openuwb::core::load_capture_jsonl(jsonl_path);
         if (file_ok(demod_path))
-            demod = gr::uwb::core::load_demod_jsonl(demod_path);
+            demod = openuwb::core::load_demod_jsonl(demod_path);
     } catch (const std::exception& e) {
         std::cerr << e.what() << "\n";
         return 1;
@@ -643,7 +643,7 @@ int main(int argc, char** argv)
             return 2;
         }
         std::vector<int16_t> raw;
-        if (!gr::uwb::core::read_sc16_window(
+        if (!openuwb::core::read_sc16_window(
                 iq, probe->file_offset_samples,
                 static_cast<size_t>(probe->sample_count), raw)) {
             std::cerr << "short IQ reading probe packet_id=" << probe->packet_id
@@ -663,13 +663,13 @@ int main(int argc, char** argv)
                          opt.native_rate_hz / static_cast<double>(x.size()) *
                              8.0);
             tone.coarse_hz = f0;
-            tone.baseband_hz = gr::uwb::core::refine_tone_freq(
+            tone.baseband_hz = openuwb::core::refine_tone_freq(
                 x.data(), x.size(), opt.native_rate_hz, f0, span);
         } else {
             const double hint = kDefaultToneRfHz - opt.center_hz;
             const double lo = hint - opt.tone_search_hz;
             const double hi = hint + opt.tone_search_hz;
-            tone = gr::uwb::core::estimate_tone(
+            tone = openuwb::core::estimate_tone(
                 x.data(), x.size(), opt.native_rate_hz, lo, hi);
         }
         std::cout << "probe packet_id=" << probe->packet_id
@@ -705,7 +705,7 @@ int main(int argc, char** argv)
         auto it = demod_by_id.find(w.packet_id);
         if (it != demod_by_id.end())
             jobs[i].d = it->second;
-        if (!gr::uwb::core::read_sc16_window(
+        if (!openuwb::core::read_sc16_window(
                 iq, w.file_offset_samples, static_cast<size_t>(w.sample_count),
                 jobs[i].raw)) {
             std::cerr << "short IQ packet_id=" << w.packet_id << "\n";
@@ -757,7 +757,7 @@ int main(int argc, char** argv)
                                              (prod.sub.bin_after + 1e-18));
             ++notch_n;
             if (notch_out.is_open())
-                gr::uwb::core::write_sc16_window(
+                openuwb::core::write_sc16_window(
                     notch_out, prod.notch_native.data(),
                     prod.notch_native.size() / 2);
         }
@@ -800,46 +800,46 @@ int main(int argc, char** argv)
         float iq_scale = 1.0f;
         if (opt.out_format == "sc16") {
             iq_scale = quantize_cf32_to_sc16(rs.data(), rs.size(), sc16_out);
-            gr::uwb::core::write_sc16_window(out, sc16_out.data(), rs.size());
+            openuwb::core::write_sc16_window(out, sc16_out.data(), rs.size());
         } else {
-            gr::uwb::core::write_cf32_window(out, rs.data(), rs.size());
+            openuwb::core::write_cf32_window(out, rs.data(), rs.size());
         }
 
         std::vector<JsonField> fields = {
-            { "packet_id", gr::uwb::core::json_i64(w.packet_id) },
-            { "schedule_index", gr::uwb::core::json_i64(w.schedule_index) },
-            { "sample_rate", gr::uwb::core::json_i64(998400000) },
-            { "sample_format", gr::uwb::core::json_str(opt.out_format) },
+            { "packet_id", openuwb::core::json_i64(w.packet_id) },
+            { "schedule_index", openuwb::core::json_i64(w.schedule_index) },
+            { "sample_rate", openuwb::core::json_i64(998400000) },
+            { "sample_format", openuwb::core::json_str(opt.out_format) },
             { "file_offset_samples",
-              gr::uwb::core::json_u64(out_off) },
+              openuwb::core::json_u64(out_off) },
             { "sample_count",
-              gr::uwb::core::json_i64(static_cast<int64_t>(rs.size())) },
-            { "window_start_sample", gr::uwb::core::json_i64(ws_out) },
-            { "predicted_start_sample", gr::uwb::core::json_i64(pred_out) },
-            { "pre_guard_samples", gr::uwb::core::json_i64(pre_out) },
-            { "capture_samples", gr::uwb::core::json_i64(cap_out) },
-            { "post_guard_samples", gr::uwb::core::json_i64(post_out) },
+              openuwb::core::json_i64(static_cast<int64_t>(rs.size())) },
+            { "window_start_sample", openuwb::core::json_i64(ws_out) },
+            { "predicted_start_sample", openuwb::core::json_i64(pred_out) },
+            { "pre_guard_samples", openuwb::core::json_i64(pre_out) },
+            { "capture_samples", openuwb::core::json_i64(cap_out) },
+            { "post_guard_samples", openuwb::core::json_i64(post_out) },
             { "input_native_sample_count",
-              gr::uwb::core::json_i64(static_cast<int64_t>(prod.n_native)) },
+              openuwb::core::json_i64(static_cast<int64_t>(prod.n_native)) },
         };
         if (w.capture_mode.size())
             fields.push_back(
-                { "capture_mode", gr::uwb::core::json_str(w.capture_mode) });
+                { "capture_mode", openuwb::core::json_str(w.capture_mode) });
         if (d && d->has_detected_start)
             fields.push_back({ "detected_start_sample",
-                               gr::uwb::core::json_i64(d->detected_start_sample) });
+                               openuwb::core::json_i64(d->detected_start_sample) });
         if (!opt.skip_notch) {
             fields.push_back({ "tone_baseband_hz",
-                               gr::uwb::core::json_f64(tone.baseband_hz) });
+                               openuwb::core::json_f64(tone.baseband_hz) });
             fields.push_back({ "tone_coef_re",
-                               gr::uwb::core::json_f64(prod.sub.coef.real()) });
+                               openuwb::core::json_f64(prod.sub.coef.real()) });
             fields.push_back({ "tone_coef_im",
-                               gr::uwb::core::json_f64(prod.sub.coef.imag()) });
+                               openuwb::core::json_f64(prod.sub.coef.imag()) });
         }
         if (opt.out_format == "sc16")
             fields.push_back(
-                { "iq_scale", gr::uwb::core::json_f64(iq_scale) });
-        gr::uwb::core::write_json_object(out_meta, fields);
+                { "iq_scale", openuwb::core::json_f64(iq_scale) });
+        openuwb::core::write_json_object(out_meta, fields);
         out_off += rs.size();
         // Drop resampled IQ now that it is on disk.
         prod.rs.clear();

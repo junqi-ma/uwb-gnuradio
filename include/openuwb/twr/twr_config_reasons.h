@@ -12,8 +12,7 @@
 #define INCLUDED_OPENUWB_TWR_CONFIG_REASONS_H
 
 #include <openuwb/twr/twr_config_util.h>
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace twr {
 
 // ===========================================================================
@@ -276,7 +275,6 @@ struct ValidationReport {
 };
 
 } // namespace twr
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb
 
 #endif /* INCLUDED_OPENUWB_TWR_CONFIG_REASONS_H */

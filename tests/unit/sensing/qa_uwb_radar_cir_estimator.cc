@@ -31,15 +31,15 @@
 
 namespace {
 
-using gr::uwb::demod::GetPreambleCode;
-using gr::uwb::demod::kQm35CodeLength;
-using gr::uwb::demod::kQm35SamplesPerSymbol;
-using gr::uwb::radar::CirStatus;
-using gr::uwb::radar::estimate_radar_cir;
-using gr::uwb::radar::estimate_radar_cir_repetition;
-using gr::uwb::radar::prepare_radar_cir_code;
-using gr::uwb::radar::RadarCirEstimate;
-using gr::uwb::radar::RadarCirScratch;
+using openuwb::demod::GetPreambleCode;
+using openuwb::demod::kQm35CodeLength;
+using openuwb::demod::kQm35SamplesPerSymbol;
+using openuwb::radar::CirStatus;
+using openuwb::radar::estimate_radar_cir;
+using openuwb::radar::estimate_radar_cir_repetition;
+using openuwb::radar::prepare_radar_cir_code;
+using openuwb::radar::RadarCirEstimate;
+using openuwb::radar::RadarCirScratch;
 
 #ifndef UWB_TESTDATA_DIR
 #define UWB_TESTDATA_DIR "../../../testdata"

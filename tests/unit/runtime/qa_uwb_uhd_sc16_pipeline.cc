@@ -29,7 +29,7 @@
 #include <thread>
 #include <vector>
 
-using namespace gr::uwb::pipeline;
+using namespace openuwb::pipeline;
 
 BOOST_AUTO_TEST_SUITE(qa_uwb_uhd_sc16_pipeline)
 
@@ -499,7 +499,7 @@ std::vector<float> load_taps_data(const std::string& rel)
 // ---------------------------------------------------------------------------
 BOOST_AUTO_TEST_CASE(test_resampler_process_sc16_precision)
 {
-    using gr::uwb::core::RationalResampler65_48Core;
+    using openuwb::core::RationalResampler65_48Core;
 
     const std::vector<std::string> tap_files = {
         "resampler_65_48/taps_realtime_minorder.txt",
@@ -642,7 +642,7 @@ BOOST_AUTO_TEST_CASE(test_resampler_process_sc16_precision)
 // ---------------------------------------------------------------------------
 BOOST_AUTO_TEST_CASE(test_resampler_process_sc16_chunking_and_streaming)
 {
-    using gr::uwb::core::RationalResampler65_48Core;
+    using openuwb::core::RationalResampler65_48Core;
 
     const std::vector<std::string> tap_files = {
         "resampler_65_48/taps_realtime_minorder.txt",

@@ -35,8 +35,7 @@
 #include <mutex>
 #include <vector>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace core {
 
 // ---------------------------------------------------------------------------
@@ -1260,7 +1259,7 @@ inline bool verify_template_in_window(const std::complex<float>* window_iq,
     if (!window_iq || !template_iq || L == 0 || n < L)
         return false;
 
-    const float t_energy = gr::uwb::core::sample_power_sum(template_iq, L);
+    const float t_energy = openuwb::core::sample_power_sum(template_iq, L);
     if (t_energy < 1e-20f)
         return false;
 
@@ -1282,7 +1281,7 @@ inline bool verify_template_in_window(const std::complex<float>* window_iq,
             corr += sample * std::conj(template_iq[k]);
             power += std::norm(sample);
         }
-        return gr::uwb::core::normalized_correlation_power(corr, power, t_energy);
+        return openuwb::core::normalized_correlation_power(corr, power, t_energy);
     };
     // Coarse (or full-rate when stride==1).
     for (size_t j = search_start; j < end; j += stride) {
@@ -1319,5 +1318,4 @@ inline bool verify_template_in_window(const std::complex<float>* window_iq,
  */
 
 } // namespace core
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

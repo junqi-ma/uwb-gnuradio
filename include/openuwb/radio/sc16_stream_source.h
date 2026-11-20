@@ -22,8 +22,7 @@
 #include <cstdint>
 #include <string>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace pipeline {
 
 struct StreamReadMeta {
@@ -69,5 +68,4 @@ public:
 };
 
 } // namespace pipeline
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

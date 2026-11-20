@@ -51,8 +51,7 @@
 #include <utility>
 #include <vector>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace sic {
 namespace {
 
@@ -1830,5 +1829,4 @@ bool estimate_discrete_cir(const std::complex<float>* y,
 }
 
 } // namespace sic
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

@@ -12,8 +12,7 @@
 #define INCLUDED_OPENUWB_TWR_CONFIG_VALIDATOR_H
 
 #include <openuwb/twr/twr_config_fields.h>
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace twr {
 
 // ===========================================================================
@@ -1546,7 +1545,6 @@ inline ValidationReport validate(const TwrConfig& cfg) { return validate(cfg,
     capabilities()); }
 
 } // namespace twr
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb
 
 #endif /* INCLUDED_OPENUWB_TWR_CONFIG_VALIDATOR_H */

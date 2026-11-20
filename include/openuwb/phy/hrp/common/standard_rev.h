@@ -21,8 +21,7 @@
 #include <cstdint>
 #include <string_view>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace phy {
 namespace hrp {
 
@@ -74,7 +73,6 @@ constexpr bool is_known(HrpStandardRev rev) noexcept
 
 } // namespace hrp
 } // namespace phy
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb
 
 #endif /* INCLUDED_OPENUWB_PHY_HRP_COMMON_STANDARD_REV_H */

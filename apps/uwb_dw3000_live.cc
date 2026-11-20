@@ -15,14 +15,14 @@
 
 int main(int argc, char** argv)
 try {
-    gr::uwb::live::LiveRxCli cli =
-        gr::uwb::live::parse_live_rx_cli(argc, argv);
+    openuwb::live::LiveRxCli cli =
+        openuwb::live::parse_live_rx_cli(argc, argv);
     if (cli.help) {
-        gr::uwb::live::print_live_help();
+        openuwb::live::print_live_help();
         return 0;
     }
-    gr::uwb::live::validate_live_rx_config(cli.config);
-    return gr::uwb::live::run_live_rx(cli.config);
+    openuwb::live::validate_live_rx_config(cli.config);
+    return openuwb::live::run_live_rx(cli.config);
 } catch (const std::exception& e) {
     // Top-level diagnostics go to the shared logger (stderr).  The console
     // script only matches substrings and the exit status, and the prefix is

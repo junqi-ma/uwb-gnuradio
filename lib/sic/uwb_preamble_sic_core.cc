@@ -33,8 +33,7 @@
 #include <cstring>
 #include <limits>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace sic {
 
 namespace {
@@ -2653,5 +2652,4 @@ bool sic_one(const cplx* y,
 }
 
 } // namespace sic
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

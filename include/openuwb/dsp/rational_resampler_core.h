@@ -74,7 +74,7 @@
 #include <volk/volk.h>
 
 #include <openuwb/support/simd.h>
-#include <gnuradio/uwb/uwb_simd_config.h>
+#include <openuwb/support/simd_config.h>
 
 // The compile-time backend is chosen once by CMake (UWB_SIMD=...).  Guarding
 // the inline AVX2 kernels on the generated level instead of __AVX2__ keeps
@@ -100,8 +100,7 @@
 
 #include <openuwb/dsp/resampler_transposed.h>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace core {
 
 /**
@@ -3341,5 +3340,4 @@ using RationalResampler48_65Core = RationalResamplerLmCore<48, 65>;
 using RationalResampler32_65Core = RationalResamplerLmCore<32, 65>;
 
 } // namespace core
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

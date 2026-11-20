@@ -15,12 +15,12 @@
 
 #include <string>
 
-using gr::uwb::runtime::config_kind_name;
-using gr::uwb::runtime::ConfigKind;
-using gr::uwb::runtime::RadarConfig;
-using gr::uwb::runtime::RxConfig;
-using gr::uwb::runtime::TwrConfig;
-using gr::uwb::runtime::TxConfig;
+using openuwb::runtime::config_kind_name;
+using openuwb::runtime::ConfigKind;
+using openuwb::runtime::RadarConfig;
+using openuwb::runtime::RxConfig;
+using openuwb::runtime::TwrConfig;
+using openuwb::runtime::TxConfig;
 
 BOOST_AUTO_TEST_CASE(test_config_kind_names)
 {

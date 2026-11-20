@@ -35,8 +35,8 @@
 #include <thread>
 #include <vector>
 
-using namespace gr::uwb::pipeline;
-namespace core = gr::uwb::core;
+using namespace openuwb::pipeline;
+namespace core = openuwb::core;
 
 namespace {
 

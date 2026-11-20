@@ -54,11 +54,12 @@ if(UWB_BUILD_EXPERIMENTS)
     # Offline paired recovery experiment: desired complete packet + other-code
     # SYNC/SFD-only interference. Does not change the production pipeline.
     add_executable(experiment_preamble_recovery
-        ../../tools/sic/experiment_preamble_recovery.cc)
+        ${CMAKE_SOURCE_DIR}/tools/sic/experiment_preamble_recovery.cc)
     target_link_libraries(experiment_preamble_recovery uwb_native)
     uwb_simd_apply(experiment_preamble_recovery)
 
-    add_executable(benchmark_chain_workers ../../tools/sic/benchmark_chain_workers.cc)
+    add_executable(benchmark_chain_workers
+        ${CMAKE_SOURCE_DIR}/tools/sic/benchmark_chain_workers.cc)
     target_link_libraries(benchmark_chain_workers uwb_native)
     uwb_simd_apply(benchmark_chain_workers)
 
@@ -66,11 +67,11 @@ if(UWB_BUILD_EXPERIMENTS)
     # not a moved source, so they stay next to the experiment targets.
     if(Python3_Interpreter_FOUND)
         add_test(NAME uwb_qa_fullpacket_compare_py
-            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/sic/qa_fullpacket_compare.py)
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/sic/qa_fullpacket_compare.py)
         set_tests_properties(uwb_qa_fullpacket_compare_py PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
 
         add_test(NAME uwb_qa_discrete_cir_compare_py
-            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/sic/verify_discrete_cir_compare.py --self-test)
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/sic/verify_discrete_cir_compare.py --self-test)
         set_tests_properties(uwb_qa_discrete_cir_compare_py PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
     endif()
 else()

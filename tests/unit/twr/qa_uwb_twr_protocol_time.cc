@@ -40,59 +40,59 @@ namespace test_tools {
 namespace tt_detail {
 
 template <>
-struct print_log_value<gr::uwb::twr::TofStatus> {
-    void operator()(std::ostream& os, gr::uwb::twr::TofStatus const& s) const
+struct print_log_value<openuwb::twr::TofStatus> {
+    void operator()(std::ostream& os, openuwb::twr::TofStatus const& s) const
     {
-        os << gr::uwb::twr::tof_status_to_string(s);
+        os << openuwb::twr::tof_status_to_string(s);
     }
 };
 
 template <>
-struct print_log_value<gr::uwb::twr::PeerClaimError> {
-    void operator()(std::ostream& os, gr::uwb::twr::PeerClaimError const& e) const
+struct print_log_value<openuwb::twr::PeerClaimError> {
+    void operator()(std::ostream& os, openuwb::twr::PeerClaimError const& e) const
     {
-        os << gr::uwb::twr::peer_claim_error_to_string(e);
+        os << openuwb::twr::peer_claim_error_to_string(e);
     }
 };
 
 template <>
-struct print_log_value<gr::uwb::twr::ProtocolCompletionStatus> {
-    void operator()(std::ostream& os, gr::uwb::twr::ProtocolCompletionStatus const& s) const
+struct print_log_value<openuwb::twr::ProtocolCompletionStatus> {
+    void operator()(std::ostream& os, openuwb::twr::ProtocolCompletionStatus const& s) const
     {
-        os << gr::uwb::twr::protocol_completion_status_to_string(s);
+        os << openuwb::twr::protocol_completion_status_to_string(s);
     }
 };
 
 template <>
-struct print_log_value<gr::uwb::twr::ProtocolIntervalOrigin> {
+struct print_log_value<openuwb::twr::ProtocolIntervalOrigin> {
     void operator()(std::ostream& os,
-                    gr::uwb::twr::ProtocolIntervalOrigin const& o) const
+                    openuwb::twr::ProtocolIntervalOrigin const& o) const
     {
-        os << gr::uwb::twr::protocol_interval_origin_to_string(o);
+        os << openuwb::twr::protocol_interval_origin_to_string(o);
     }
 };
 
 template <>
-struct print_log_value<gr::uwb::twr::ExchangeStatus> {
-    void operator()(std::ostream& os, gr::uwb::twr::ExchangeStatus const& s) const
+struct print_log_value<openuwb::twr::ExchangeStatus> {
+    void operator()(std::ostream& os, openuwb::twr::ExchangeStatus const& s) const
     {
-        os << gr::uwb::twr::exchange_status_to_string(s);
+        os << openuwb::twr::exchange_status_to_string(s);
     }
 };
 
 template <>
-struct print_log_value<gr::uwb::twr::Protocol> {
-    void operator()(std::ostream& os, gr::uwb::twr::Protocol const& p) const
+struct print_log_value<openuwb::twr::Protocol> {
+    void operator()(std::ostream& os, openuwb::twr::Protocol const& p) const
     {
-        os << gr::uwb::twr::protocol_to_string(p);
+        os << openuwb::twr::protocol_to_string(p);
     }
 };
 
 template <>
-struct print_log_value<gr::uwb::twr::ComputedAt> {
-    void operator()(std::ostream& os, gr::uwb::twr::ComputedAt const& c) const
+struct print_log_value<openuwb::twr::ComputedAt> {
+    void operator()(std::ostream& os, openuwb::twr::ComputedAt const& c) const
     {
-        os << gr::uwb::twr::computed_at_to_string(c);
+        os << openuwb::twr::computed_at_to_string(c);
     }
 };
 
@@ -104,7 +104,7 @@ BOOST_AUTO_TEST_SUITE(twr_protocol_time)
 
 namespace {
 
-using namespace gr::uwb::twr;
+using namespace openuwb::twr;
 
 // The protocol estimate exposes its failure reason only through a failed-only
 // accessor (F's finding N-10); this helper reads it for the assertions.

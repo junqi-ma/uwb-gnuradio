@@ -3,7 +3,7 @@
 #include <openuwb/phy/hrp/rx/demod_sync.h>
 #include <openuwb/phy/hrp/rx/rx_cfo_opt.h>
 
-namespace gr::uwb::demod::core {
+namespace openuwb::demod::core {
 // ---------------------------------------------------------------------------
 // Stage 2 — CFO estimation + compensation (R1).
 // Uses the stable SYNC peaks after the startup transient to fit phase vs time
@@ -189,4 +189,4 @@ inline bool stage_cfo(const std::complex<float>* rx,
     return true;
 }
 
-} // namespace gr::uwb::demod::core
+} // namespace openuwb::demod::core

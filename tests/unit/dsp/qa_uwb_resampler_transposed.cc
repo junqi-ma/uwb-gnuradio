@@ -40,7 +40,7 @@
 #include <gnuradio/uwb/uwb_resample_window.h>
 #include <gnuradio/uwb/uwb_resampler_transposed.h>
 #include <gnuradio/uwb/uwb_simd.h>
-#include <gnuradio/uwb/uwb_simd_config.h>
+#include <openuwb/support/simd_config.h>
 
 #include <algorithm>
 #include <cmath>
@@ -52,11 +52,11 @@
 #include <string>
 #include <vector>
 
-using gr::uwb::core::RationalResampler65_32Core;
-using gr::uwb::core::RationalResampler65_48Core;
-using gr::uwb::core::simd::transposed::TransposedResampler;
-using gr::uwb::core::simd::transposed::TransposedResampler65_32;
-using gr::uwb::core::simd::transposed::TransposedResampler65_48;
+using openuwb::core::RationalResampler65_32Core;
+using openuwb::core::RationalResampler65_48Core;
+using openuwb::core::simd::transposed::TransposedResampler;
+using openuwb::core::simd::transposed::TransposedResampler65_32;
+using openuwb::core::simd::transposed::TransposedResampler65_48;
 using gr_complex = std::complex<float>;
 using sc16 = std::complex<int16_t>;
 
@@ -69,7 +69,7 @@ constexpr float kUnitScale = 1.0f / 32768.0f;
 const char* primary_kernel()
 {
 #if UWB_SIMD_HAVE_AVX512
-    if (gr::uwb::core::simd::runtime_supported())
+    if (openuwb::core::simd::runtime_supported())
         return "avx512";
 #endif
 #if UWB_SIMD_LEVEL >= 1
@@ -273,7 +273,7 @@ void check_tap_set(const std::vector<float>& taps, const std::string& tag)
                                              Pattern::Random);
 
 #if UWB_SIMD_HAVE_AVX512
-    if (gr::uwb::core::simd::runtime_supported()) {
+    if (openuwb::core::simd::runtime_supported()) {
         for (size_t n : { size_t(0), size_t(47), size_t(1024), size_t(56000) })
             check_kernel_case<Kernel, Interp, Decim>(taps, tag, "avx512", n,
                                                      Pattern::Random);
@@ -339,7 +339,7 @@ void check_core_integration(const std::vector<float>& taps,
 
     // resample_sc16_window() drives the same one-shot path.
     std::vector<gr_complex> y_win;
-    BOOST_CHECK_EQUAL(gr::uwb::core::resample_sc16_window(
+    BOOST_CHECK_EQUAL(openuwb::core::resample_sc16_window(
                           core, in.data(), n, kUnitScale, y_win),
                       lout);
     BOOST_CHECK_EQUAL(std::memcmp(y_win.data(), y_direct.data(),
@@ -357,11 +357,11 @@ void check_core_integration(const std::vector<float>& taps,
 /** The standalone kernel constructor also enforces the runtime ISA gate. */
 bool backend_ready(const char* what)
 {
-    if (!gr::uwb::core::simd::runtime_supported()) {
+    if (!openuwb::core::simd::runtime_supported()) {
         BOOST_TEST_MESSAGE("SKIP " << what
                                    << ": this CPU/OS cannot execute the "
                                       "compiled backend (required ISA="
-                                   << gr::uwb::core::simd::required_isa()
+                                   << openuwb::core::simd::required_isa()
                                    << ")");
         return false;
     }

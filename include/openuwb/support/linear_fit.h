@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
-namespace gr::uwb::core {
+namespace openuwb::core {
 
 // Ordinary least squares for y = intercept + slope * x. Callers select
 // which points to fit, center them if needed and check the determinant in
@@ -34,4 +34,4 @@ private:
     double count_ = 0.0;
 };
 
-} // namespace gr::uwb::core
+} // namespace openuwb::core

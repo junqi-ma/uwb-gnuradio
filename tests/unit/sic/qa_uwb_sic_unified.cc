@@ -21,8 +21,8 @@
 
 namespace {
 
-using namespace gr::uwb;
-using namespace gr::uwb::sic;
+using namespace openuwb;
+using namespace openuwb::sic;
 using cf = std::complex<float>;
 
 constexpr double kFs = 998.4e6;

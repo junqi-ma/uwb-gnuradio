@@ -15,8 +15,7 @@
 #include <cmath>
 #include <utility>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace twr {
 
 FakeTwrLink::FakeTwrLink() = default;
@@ -239,5 +238,4 @@ size_t FakeTwrLink::pending(uint8_t endpoint) const
 }
 
 } // namespace twr
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

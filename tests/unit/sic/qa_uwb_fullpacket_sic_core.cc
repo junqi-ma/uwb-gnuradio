@@ -6,7 +6,7 @@
 #include <limits>
 
 namespace {
-using namespace gr::uwb;
+using namespace openuwb;
 using cf=std::complex<float>;
 struct Fixture {
     mod::HrpModConfig p;

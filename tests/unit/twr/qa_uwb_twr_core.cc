@@ -31,14 +31,13 @@
 #include <type_traits>
 #include <vector>
 
-using namespace gr::uwb::twr;
-using namespace gr::uwb::twr::m1b_test;
+using namespace openuwb::twr;
+using namespace openuwb::twr::m1b_test;
 
 // Boost.Test prints failed comparisons with `operator<<`.  These are defined in
 // the types' own namespace so ADL finds them, without touching the production
 // headers.
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace twr {
 inline std::ostream& operator<<(std::ostream& os, TofStatus s)
 {
@@ -96,8 +95,7 @@ inline std::ostream& operator<<(std::ostream& os, KernelStatus s)
 }
 } // namespace detail
 } // namespace twr
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb
 
 namespace {
 

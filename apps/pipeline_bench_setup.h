@@ -19,8 +19,7 @@
 #include <cmath>
 #include <cstdint>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace pipeline {
 namespace bench {
 
@@ -62,5 +61,4 @@ inline void derive_sic_geometry(PipelineConfig& cfg, long long sic_roi_margin)
 
 } // namespace bench
 } // namespace pipeline
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

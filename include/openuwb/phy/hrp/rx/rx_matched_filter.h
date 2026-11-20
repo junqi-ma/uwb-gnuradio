@@ -3,7 +3,7 @@
 
 #include <openuwb/phy/hrp/rx/rx_sync_opt.h>
 
-namespace gr::uwb::demod::rxopt {
+namespace openuwb::demod::rxopt {
 
 struct SparseCirEntry {
     size_t pos = 0;      // sample index in [0, 1016), always even: 2 * j
@@ -208,8 +208,8 @@ inline void sparse_ternary_dot_16lag(const std::complex<float>* rx,
                                      std::complex<float> out[16])
 {
 #if UWB_SIMD_HAVE_AVX512
-    if (use_avx512(gr::uwb::core::simd::KernelGroup::Sync)) {
-        gr::uwb::core::simd::avx512::sparse_ternary_dot_16lag(
+    if (use_avx512(openuwb::core::simd::KernelGroup::Sync)) {
+        openuwb::core::simd::avx512::sparse_ternary_dot_16lag(
             rx, tmpl.pos_off, tmpl.pos_count, tmpl.neg_off, tmpl.neg_count,
             out);
         return;
@@ -230,8 +230,8 @@ inline void sparse_ternary_dot_32lag(const std::complex<float>* rx,
                                      std::complex<float> out[32])
 {
 #if UWB_SIMD_HAVE_AVX512
-    if (use_avx512(gr::uwb::core::simd::KernelGroup::Sync)) {
-        gr::uwb::core::simd::avx512::sparse_ternary_dot_32lag(
+    if (use_avx512(openuwb::core::simd::KernelGroup::Sync)) {
+        openuwb::core::simd::avx512::sparse_ternary_dot_32lag(
             rx, tmpl.pos_off, tmpl.pos_count, tmpl.neg_off, tmpl.neg_count,
             out);
         return;
@@ -287,8 +287,8 @@ inline void pack_even_complex(const std::complex<float>* src,
                               std::complex<float>* dst)
 {
 #if UWB_SIMD_HAVE_AVX512
-    if (use_avx512(gr::uwb::core::simd::KernelGroup::Sync)) {
-        gr::uwb::core::simd::avx512::pack_even_complex(src, even_count, dst);
+    if (use_avx512(openuwb::core::simd::KernelGroup::Sync)) {
+        openuwb::core::simd::avx512::pack_even_complex(src, even_count, dst);
         return;
     }
 #endif
@@ -493,7 +493,7 @@ public:
             return real_template_dot_single(rx, real_, length_);
         if (volk_complex_)
             return conjugate_dot(rx, dense_, length_);
-        return gr::uwb::core::conjugate_dot_scalar(rx, dense_, length_);
+        return openuwb::core::conjugate_dot_scalar(rx, dense_, length_);
     }
 
     // Visit consecutive lags in increasing order. The caller guarantees
@@ -509,11 +509,11 @@ public:
         if (sparse_) {
             size_t lag = 0;
 #if UWB_SIMD_HAVE_AVX512
-            if (use_avx512(gr::uwb::core::simd::KernelGroup::Sync))
+            if (use_avx512(openuwb::core::simd::KernelGroup::Sync))
                 lag = visit_batches<32>(
                     rx, lag_count, lag, visit,
                     [&](const auto* in, auto* out) {
-                        gr::uwb::core::simd::avx512::sparse_ternary_dot_32lag(
+                        openuwb::core::simd::avx512::sparse_ternary_dot_32lag(
                             in, sparse_->pos_off, sparse_->pos_count,
                             sparse_->neg_off, sparse_->neg_count, out);
                     });
@@ -606,7 +606,7 @@ inline MatchedFilterPeak scan_normalized_sync(const SyncMatchedFilter& filter,
     MatchedFilterPeak peak;
     filter.for_each_lag(rx, lag_count, [&](size_t lag, std::complex<float> corr, bool) {
         const float metric =
-            gr::uwb::core::normalized_correlation_power(corr, power, template_energy);
+            openuwb::core::normalized_correlation_power(corr, power, template_energy);
         if (metrics)
             metrics[lag] = metric;
         if (metric > peak.metric)
@@ -709,4 +709,4 @@ inline void correlate_cir_sparse(const std::complex<float>* corr,
     correlate_cir_sparse(corr, tmpl, tap_count, values.data());
 }
 
-} // namespace gr::uwb::demod::rxopt
+} // namespace openuwb::demod::rxopt

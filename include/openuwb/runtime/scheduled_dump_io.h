@@ -22,8 +22,7 @@
 #include <utility>
 #include <vector>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace core {
 
 struct DumpWindowMeta {
@@ -325,5 +324,4 @@ inline std::string json_bool(bool v)
 }
 
 } // namespace core
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

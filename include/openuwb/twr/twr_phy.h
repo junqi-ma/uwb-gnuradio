@@ -82,8 +82,7 @@
 #include <string>
 #include <vector>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace twr {
 
 // ===========================================================================
@@ -669,7 +668,6 @@ bool m2a_native_roundtrip(const Frame& frame, const FrameProfile& profile,
                           const M2aConfig& cfg, M2aResult& out, std::string& why);
 
 } // namespace twr
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb
 
 #endif /* INCLUDED_GNURADIO_UWB_UWB_TWR_PHY_H */

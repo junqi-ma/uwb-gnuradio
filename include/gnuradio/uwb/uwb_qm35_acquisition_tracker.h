@@ -6,5 +6,8 @@
  * <openuwb/runtime/qm35_acquisition_tracker.h>; see Phase 2 of the openUWB architecture refactor.
  */
 #pragma once
+
+// Keep the legacy gr::uwb spelling resolvable (Phase 3 namespace switch).
+#include <gnuradio/uwb/compat.h>
 // TODO(openuwb-compat-removal): remove legacy forwarding header
 #include <openuwb/runtime/qm35_acquisition_tracker.h>

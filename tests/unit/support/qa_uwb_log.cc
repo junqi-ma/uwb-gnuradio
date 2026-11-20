@@ -4,7 +4,7 @@
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  *
- * Unit tests for the header-only logger (gr::uwb::log).
+ * Unit tests for the header-only logger (openuwb::log).
  *
  * Every assertion drives the logger through a capturing sink, so the test run
  * never writes diagnostics to stderr (the one exception is exercised with fd 2
@@ -33,7 +33,7 @@
 
 namespace {
 
-namespace ulog = ::gr::uwb::log;
+namespace ulog = ::openuwb::log;
 using ulog::Level;
 
 /// Thread-safe collection of captured lines.

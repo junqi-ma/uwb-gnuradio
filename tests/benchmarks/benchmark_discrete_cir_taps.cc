@@ -7,7 +7,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <vector>
-using namespace gr::uwb;
+using namespace openuwb;
 using cf=std::complex<float>;
 using cd=std::complex<double>;
 using Clock=std::chrono::steady_clock;

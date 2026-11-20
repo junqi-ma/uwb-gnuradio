@@ -38,9 +38,8 @@ import tempfile
 import unittest
 from fractions import Fraction as F
 
-_HERE = os.path.dirname(os.path.abspath(__file__))          # gr-uwb/tests/integration
-_GR_UWB = os.path.dirname(os.path.dirname(_HERE))           # gr-uwb
-_REPO = os.path.dirname(_GR_UWB)                             # repository root
+_HERE = os.path.dirname(os.path.abspath(__file__))          # tests/integration
+_REPO = os.path.dirname(os.path.dirname(_HERE))              # repository root
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
@@ -68,11 +67,11 @@ def _locate_or_build():
     out = os.path.join(build_dir, "twr_fake_demo")
     cmd = [
         gxx, "-std=c++17", "-Wall", "-Wextra",
-        "-I", os.path.join(_GR_UWB, "include"),
+        "-I", os.path.join(_REPO, "include"),
         "-o", out,
-        os.path.join(_GR_UWB, "apps", "twr_fake_demo.cc"),
-        os.path.join(_GR_UWB, "lib", "uwb_twr_core.cc"),
-        os.path.join(_GR_UWB, "lib", "uwb_twr_fake_link.cc"),
+        os.path.join(_REPO, "apps", "twr_fake_demo.cc"),
+        os.path.join(_REPO, "lib", "twr", "uwb_twr_core.cc"),
+        os.path.join(_REPO, "lib", "twr", "uwb_twr_fake_link.cc"),
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
@@ -300,7 +299,7 @@ class TestDemo(DemoCase):
     def test_full_legal_twr_config_runs_end_to_end(self):
         """A COMPLETE requested TwrConfig is validated and then EXECUTED."""
         if D.T is None:
-            self.skipTest("uwb.twr_config unavailable: %s" % D.TWR_CONFIG_IMPORT_ERROR)
+            self.skipTest("openuwb.twr_config unavailable: %s" % D.TWR_CONFIG_IMPORT_ERROR)
         twr_config = D.build_twr_config(protocol="ss")
         request = D.build_request("ss_unity", twr_config=twr_config)
         output = self._config_run("full_config", request)
@@ -374,7 +373,7 @@ class TestDemo(DemoCase):
 
     def test_config_protocol_change_changes_trace(self):
         if D.T is None:
-            self.skipTest("uwb.twr_config unavailable")
+            self.skipTest("openuwb.twr_config unavailable")
         ss = self._config_run(
             "proto_ss",
             D.build_request("ss_unity", twr_config=D.build_twr_config(protocol="ss")))
@@ -392,7 +391,7 @@ class TestDemo(DemoCase):
 
     def test_config_address_change_changes_frames_and_trace(self):
         if D.T is None:
-            self.skipTest("uwb.twr_config unavailable")
+            self.skipTest("openuwb.twr_config unavailable")
         local, peer = 300, 700
         twr_config = D.build_twr_config(local_address=local, peer_address=peer)
         request = D.build_request("ss_unity", twr_config=twr_config)
@@ -416,7 +415,7 @@ class TestDemo(DemoCase):
 
     def test_config_initial_sequence_changes_frame_seq(self):
         if D.T is None:
-            self.skipTest("uwb.twr_config unavailable")
+            self.skipTest("openuwb.twr_config unavailable")
         for seq in (0, 2):
             twr_config = D.build_twr_config(sequence=seq, sequence_modulus=4)
             request = D.build_request("ss_unity", twr_config=twr_config)
@@ -430,7 +429,7 @@ class TestDemo(DemoCase):
 
     def test_config_capacity_and_timeout_changes_are_observable(self):
         if D.T is None:
-            self.skipTest("uwb.twr_config unavailable")
+            self.skipTest("openuwb.twr_config unavailable")
         # Capacity: only in the config; the executed snapshot must move.
         cap1 = self._config_run(
             "cap1", D.build_request(
@@ -464,7 +463,7 @@ class TestDemo(DemoCase):
     def test_malformed_full_config_is_rejected(self):
         """A structurally bad config is refused by the existing validator."""
         if D.T is None:
-            self.skipTest("uwb.twr_config unavailable")
+            self.skipTest("openuwb.twr_config unavailable")
         bad = D.build_twr_config()
         bad["session"]["session_id"] = 70000  # does not fit the 16-bit wire field
         rc, output = self.run_request(
@@ -483,7 +482,7 @@ class TestDemo(DemoCase):
 
     def test_envelope_config_conflict_is_rejected(self):
         if D.T is None:
-            self.skipTest("uwb.twr_config unavailable")
+            self.skipTest("openuwb.twr_config unavailable")
         ds = D.build_twr_config(protocol="ds")
         request = D.build_request("ss_unity", twr_config=ds)
         rc, output = self.run_request(request, "conflict")
@@ -494,7 +493,7 @@ class TestDemo(DemoCase):
     def test_output_mutation_is_detectable(self):
         """A verifier recomputing the published canonical text catches a mutation."""
         if D.T is None:
-            self.skipTest("uwb.twr_config unavailable")
+            self.skipTest("openuwb.twr_config unavailable")
         output = self._config_run(
             "mutation",
             D.build_request("ss_unity", twr_config=D.build_twr_config()))
@@ -520,7 +519,7 @@ class TestDemo(DemoCase):
             self.assertNotIn(forbidden, lowered,
                              "%s links %s:\n%s" % (_BINARY, forbidden, proc.stdout))
         # And the SOURCE must not pull a GNU Radio block/UHD header.
-        with open(os.path.join(_GR_UWB, "apps", "twr_fake_demo.cc"), "r",
+        with open(os.path.join(_REPO, "apps", "twr_fake_demo.cc"), "r",
                   encoding="utf-8") as handle:
             source = handle.read()
         for forbidden in ("gnuradio/block", "gnuradio/uhd", "uhd/usrp",

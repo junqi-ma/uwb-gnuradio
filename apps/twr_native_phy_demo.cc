@@ -99,8 +99,8 @@
 #define UWB_TESTDATA_DIR ""
 #endif
 
-namespace twr = gr::uwb::twr;
-namespace evidence = gr::uwb::twr::evidence;
+namespace twr = openuwb::twr;
+namespace evidence = openuwb::twr::evidence;
 using gr_complex = std::complex<float>;
 
 namespace {
@@ -568,9 +568,9 @@ twr::Frame make_frame(twr::FrameType t, uint64_t seed)
     return f;
 }
 
-const char* demod_status_name(gr::uwb::demod::DemodStatus s)
+const char* demod_status_name(openuwb::demod::DemodStatus s)
 {
-    using gr::uwb::demod::DemodStatus;
+    using openuwb::demod::DemodStatus;
     switch (s) {
     case DemodStatus::Success:
         return "success";
@@ -743,12 +743,12 @@ bool impairment_is_identity(const twr::M2aImpairment& imp)
 const char* demod_kernel_name()
 {
     // No `default`: -Wswitch keeps this exhaustive over cir_fir::Kernel.
-    switch (gr::uwb::demod::cir_fir::kDefaultKernel) {
-    case gr::uwb::demod::cir_fir::Kernel::MultiAcc8:
+    switch (openuwb::demod::cir_fir::kDefaultKernel) {
+    case openuwb::demod::cir_fir::Kernel::MultiAcc8:
         return "multi_acc8";
-    case gr::uwb::demod::cir_fir::Kernel::Volk:
+    case openuwb::demod::cir_fir::Kernel::Volk:
         return "volk";
-    case gr::uwb::demod::cir_fir::Kernel::Avx2Fixed:
+    case openuwb::demod::cir_fir::Kernel::Avx2Fixed:
         return "avx2_fixed38";
     }
     return "invalid";
@@ -757,11 +757,11 @@ const char* demod_kernel_name()
 std::string tx_kernel_name(const twr::M2aConfig& cfg)
 {
     if (cfg.native_rate == twr::M2aNativeRate::Uc200_737280000) {
-        gr::uwb::core::RationalResampler48_65Core c(cfg.tx_taps.data(),
+        openuwb::core::RationalResampler48_65Core c(cfg.tx_taps.data(),
                                                     cfg.tx_taps.size());
         return c.kernel_name();
     }
-    gr::uwb::core::RationalResampler32_65Core c(cfg.tx_taps.data(),
+    openuwb::core::RationalResampler32_65Core c(cfg.tx_taps.data(),
                                                 cfg.tx_taps.size());
     return c.kernel_name();
 }
@@ -769,11 +769,11 @@ std::string tx_kernel_name(const twr::M2aConfig& cfg)
 std::string rx_kernel_name(const twr::M2aConfig& cfg)
 {
     if (cfg.native_rate == twr::M2aNativeRate::Uc200_737280000) {
-        gr::uwb::core::RationalResampler65_48Core c(cfg.rx_taps.data(),
+        openuwb::core::RationalResampler65_48Core c(cfg.rx_taps.data(),
                                                     cfg.rx_taps.size());
         return c.kernel_name();
     }
-    gr::uwb::core::RationalResampler65_32Core c(cfg.rx_taps.data(),
+    openuwb::core::RationalResampler65_32Core c(cfg.rx_taps.data(),
                                                 cfg.rx_taps.size());
     return c.kernel_name();
 }
@@ -854,7 +854,7 @@ struct RunOutcome {
 bool is_measured(const twr::M2aResult& r)
 {
     return r.ok && r.bytes_exact &&
-           r.demod_status == gr::uwb::demod::DemodStatus::Success && r.fcs_pass;
+           r.demod_status == openuwb::demod::DemodStatus::Success && r.fcs_pass;
 }
 
 // Build the native artifact (post TX resample, optional SC16) via the same
@@ -901,7 +901,7 @@ bool run_stage_chain(const std::vector<uint8_t>& mac,
 
     res.mac_bytes = mac;
     res.psdu_bytes = mac;
-    gr::uwb::mod::append_ieee_fcs(res.psdu_bytes);
+    openuwb::mod::append_ieee_fcs(res.psdu_bytes);
     res.fcs = static_cast<uint16_t>(
         static_cast<uint16_t>(res.psdu_bytes[mac.size()]) |
         static_cast<uint16_t>(static_cast<uint16_t>(res.psdu_bytes[mac.size() + 1])
@@ -961,7 +961,7 @@ bool run_stage_chain(const std::vector<uint8_t>& mac,
     res.work_rx_samples = work_rx.size();
     res.stages.push_back(t);
 
-    gr::uwb::demod::DemodResult dr;
+    openuwb::demod::DemodResult dr;
     if (!twr::m2a_demod_work(work_rx.data(), work_rx.size(), cfg, dr, t, why)) {
         res.status = twr::M2aStatus::DemodFailed;
         res.detail = why;
@@ -993,10 +993,10 @@ bool run_stage_chain(const std::vector<uint8_t>& mac,
         return false;
     };
 
-    if (dr.status == gr::uwb::demod::DemodStatus::FcsFailed)
+    if (dr.status == openuwb::demod::DemodStatus::FcsFailed)
         return fail(twr::M2aStatus::FcsFailed,
                     "demod decoded a frame whose FCS failed");
-    if (dr.status != gr::uwb::demod::DemodStatus::Success)
+    if (dr.status != openuwb::demod::DemodStatus::Success)
         return fail(twr::M2aStatus::DemodFailed,
                     std::string("demod status is not Success: ") +
                         std::to_string(static_cast<int>(dr.status)));

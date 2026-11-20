@@ -5,7 +5,7 @@
 #include <openuwb/phy/hrp/rx/demod_grid.h>
 #include <openuwb/phy/hrp/rx/rx_softchip_opt.h>
 
-namespace gr::uwb::demod::core {
+namespace openuwb::demod::core {
 // ---------------------------------------------------------------------------
 // Stage 4 — CIR estimation + soft-chip generation (R2).
 // Mirrors MATLAB estimateCir + estimateCirAndSoftChips:
@@ -247,7 +247,7 @@ inline bool estimate_cir(const std::complex<float>* rx,
                                     tap_count, heap_values);
     }
     const float nrm = std::sqrt(
-        gr::uwb::core::sample_power_sum(values, tap_count));
+        openuwb::core::sample_power_sum(values, tap_count));
     if (!(nrm > 0.0f))
         return false;
     for (size_t i = 0; i < tap_count; ++i)
@@ -738,4 +738,4 @@ inline bool stage_cir_softchips(const std::complex<float>* rx,
 }
 
 
-} // namespace gr::uwb::demod::core
+} // namespace openuwb::demod::core

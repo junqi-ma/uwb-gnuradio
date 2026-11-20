@@ -273,7 +273,7 @@ if(Python3_Interpreter_FOUND)
             "d=$(mktemp -d ${CMAKE_CURRENT_BINARY_DIR}/m1b_verify.XXXXXX) && \
 ${Python3_EXECUTABLE} ${UWB_INTEGRATION_DIR}/twr_fake_demo.py --scenario ds_unity \
     --request-out $d/req.json --output $d/out.json && \
-${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/twr/verify_m1_b_protocol.py \
+${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/twr/verify_m1_b_protocol.py \
     --request $d/req.json --output $d/out.json; rc=$?; rm -rf $d; exit $rc")
     set_property(TEST uwb_qa_twr_m1b_verify_py APPEND PROPERTY
         ENVIRONMENT
@@ -290,7 +290,7 @@ ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/twr/verify_m1_b_pr
             "d=$(mktemp -d ${CMAKE_CURRENT_BINARY_DIR}/m2a_verify.XXXXXX) && \
 $<TARGET_FILE:twr_native_phy_demo> --frame poll --native-rate 737280000 --iq cf32 \
     --output $d/out.json && \
-${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/twr/verify_m2_a_native_phy.py \
+${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/twr/verify_m2_a_native_phy.py \
     --output $d/out.json --self-test; rc=$?; rm -rf $d; exit $rc")
     set_property(TEST uwb_qa_twr_m2a_native_phy_verify_py APPEND PROPERTY
         ENVIRONMENT

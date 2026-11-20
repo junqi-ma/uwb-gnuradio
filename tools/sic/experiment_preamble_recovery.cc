@@ -12,7 +12,7 @@
 #include <stdexcept>
 #include <vector>
 
-using namespace gr::uwb;
+using namespace openuwb;
 using cf = std::complex<float>;
 constexpr size_t sps = 1016, q = 512;
 constexpr double fs = 998.4e6, pi = 3.14159265358979323846;

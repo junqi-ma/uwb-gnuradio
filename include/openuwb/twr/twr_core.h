@@ -79,8 +79,7 @@
 #include <string>
 #include <vector>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace twr {
 
 // ===========================================================================
@@ -676,7 +675,6 @@ private:
 };
 
 } // namespace twr
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb
 
 #endif /* INCLUDED_GNURADIO_UWB_UWB_TWR_CORE_H */

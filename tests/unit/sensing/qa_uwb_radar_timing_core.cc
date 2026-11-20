@@ -34,16 +34,16 @@
 
 namespace {
 
-using gr::uwb::demod::kQm35SamplesPerSymbol;
-using gr::uwb::demod::Qm35825Profile;
-using gr::uwb::radar::nominal_preamble_start;
-using gr::uwb::radar::RadarTimingResult;
-using gr::uwb::radar::refine_sync_origin;
-using gr::uwb::radar::TimingStatus;
-using gr::uwb::demod::SyncStrategy;
-using gr::uwb::demod::TimingResult;
-using gr::uwb::demod::core::DemodScratch;
-using gr::uwb::demod::core::stage_timing;
+using openuwb::demod::kQm35SamplesPerSymbol;
+using openuwb::demod::Qm35825Profile;
+using openuwb::radar::nominal_preamble_start;
+using openuwb::radar::RadarTimingResult;
+using openuwb::radar::refine_sync_origin;
+using openuwb::radar::TimingStatus;
+using openuwb::demod::SyncStrategy;
+using openuwb::demod::TimingResult;
+using openuwb::demod::core::DemodScratch;
+using openuwb::demod::core::stage_timing;
 
 #ifndef UWB_TESTDATA_DIR
 #define UWB_TESTDATA_DIR "../../../testdata"
@@ -102,7 +102,7 @@ std::vector<gr_complex> load_sync_template()
     BOOST_REQUIRE_MESSAGE(load_cf32(path, tmpl),
                           "cannot load reference_preamble.bin from " + path);
     BOOST_REQUIRE_EQUAL(tmpl.size(), kQm35SamplesPerSymbol);
-    gr::uwb::core::uwb_l2_normalize(tmpl);
+    openuwb::core::uwb_l2_normalize(tmpl);
     return tmpl;
 }
 
@@ -329,7 +329,7 @@ std::vector<gr_complex> load_normalized_sync()
     BOOST_REQUIRE(load_cf32(testdata_path("reference_preamble.bin"), raw));
     BOOST_REQUIRE_EQUAL(raw.size(), kQm35SamplesPerSymbol);
     auto tmpl = raw;
-    gr::uwb::core::uwb_l2_normalize(tmpl);
+    openuwb::core::uwb_l2_normalize(tmpl);
     return tmpl;
 }
 
@@ -453,8 +453,8 @@ BOOST_AUTO_TEST_CASE(test_low_snr_fold_resolves_sparse_anchor_cfo_alias)
                                    timing, scratch));
         BOOST_CHECK(timing.sync_peaks_folded);
         BOOST_CHECK_LE(std::llabs(timing.preamble_start_sample - frame.start), 2);
-        gr::uwb::demod::CfoResult cfo;
-        BOOST_REQUIRE(gr::uwb::demod::core::fit_cfo(
+        openuwb::demod::CfoResult cfo;
+        BOOST_REQUIRE(openuwb::demod::core::fit_cfo(
             frame.rx.data(), frame.rx.size(), profile, timing, cfo, scratch));
         BOOST_CHECK_SMALL(cfo.cfo_hz - cfo_hz, 150.0);
     }
@@ -544,10 +544,10 @@ BOOST_AUTO_TEST_CASE(test_radar_timing_nominal_arithmetic)
     const size_t huge = static_cast<size_t>(std::numeric_limits<int64_t>::max());
     BOOST_CHECK_EQUAL(nominal_preamble_start(sfd, huge, huge), int64_t(-1));
     int64_t prod = 0;
-    BOOST_CHECK(!gr::uwb::radar::radar_i64_mul(
+    BOOST_CHECK(!openuwb::radar::radar_i64_mul(
         std::numeric_limits<int64_t>::max(), 2, prod));
     int64_t sum = 0;
-    BOOST_CHECK(!gr::uwb::radar::radar_i64_add(
+    BOOST_CHECK(!openuwb::radar::radar_i64_add(
         std::numeric_limits<int64_t>::max(), 1, sum));
 }
 
@@ -576,7 +576,7 @@ BOOST_AUTO_TEST_CASE(test_radar_timing_synthetic_noiseless)
         return t;
     }();
     auto tmpl = raw;
-    gr::uwb::core::uwb_l2_normalize(tmpl);
+    openuwb::core::uwb_l2_normalize(tmpl);
     BOOST_REQUIRE_EQUAL(tmpl.size(), kQm35SamplesPerSymbol);
 
     auto frame = make_sync_frame(raw, kSynthSyncReps);
@@ -621,7 +621,7 @@ BOOST_AUTO_TEST_CASE(test_radar_timing_exhaustive_synthetic_offsets)
     std::vector<gr_complex> raw;
     BOOST_REQUIRE(load_cf32(testdata_path("reference_preamble.bin"), raw));
     auto tmpl = raw;
-    gr::uwb::core::uwb_l2_normalize(tmpl);
+    openuwb::core::uwb_l2_normalize(tmpl);
 
     auto frame = make_sync_frame(raw, kSynthSyncReps);
     BOOST_REQUIRE_GE(frame.origin, kWideMargin);
@@ -684,7 +684,7 @@ BOOST_AUTO_TEST_CASE(test_radar_timing_canonical_matlab_golden)
                                  tx.begin() +
                                      static_cast<std::ptrdiff_t>(
                                          kQm35SamplesPerSymbol));
-    gr::uwb::core::uwb_l2_normalize(tmpl);
+    openuwb::core::uwb_l2_normalize(tmpl);
 
     RadarTimingResult out8;
     BOOST_REQUIRE(refine_sync_origin(
@@ -751,7 +751,7 @@ BOOST_AUTO_TEST_CASE(test_radar_timing_integer_delay)
                                  tx.begin() +
                                      static_cast<std::ptrdiff_t>(
                                          kQm35SamplesPerSymbol));
-    gr::uwb::core::uwb_l2_normalize(tmpl);
+    openuwb::core::uwb_l2_normalize(tmpl);
 
     RadarTimingResult out;
     BOOST_REQUIRE(refine_sync_origin(
@@ -769,7 +769,7 @@ BOOST_AUTO_TEST_CASE(test_radar_timing_destroyed_and_noise)
     std::vector<gr_complex> raw;
     BOOST_REQUIRE(load_cf32(testdata_path("reference_preamble.bin"), raw));
     auto tmpl = raw;
-    gr::uwb::core::uwb_l2_normalize(tmpl);
+    openuwb::core::uwb_l2_normalize(tmpl);
 
     {
         auto frame = make_sync_frame(raw, kSynthSyncReps);
@@ -945,7 +945,7 @@ BOOST_AUTO_TEST_CASE(test_radar_timing_nominal_outside_margin)
     std::vector<gr_complex> raw;
     BOOST_REQUIRE(load_cf32(testdata_path("reference_preamble.bin"), raw));
     auto tmpl = raw;
-    gr::uwb::core::uwb_l2_normalize(tmpl);
+    openuwb::core::uwb_l2_normalize(tmpl);
 
     // Single SYNC so an extra-symbol prediction cannot land on a later copy.
     auto frame = make_sync_frame(raw, /*n_sync=*/1);
@@ -996,9 +996,9 @@ BOOST_AUTO_TEST_CASE(test_fold_acquire_window_is_clamped_to_half_a_period)
     DemodScratch scratch;
     scratch.reserve(frame.rx.size());
     scratch.work = tmpl;
-    gr::uwb::core::uwb_l2_normalize(scratch.work);
-    const float Et = gr::uwb::core::uwb_template_energy(scratch.work);
-    gr::uwb::demod::rxopt::build_real_sync_template(scratch.work, scratch.real_sync_template);
+    openuwb::core::uwb_l2_normalize(scratch.work);
+    const float Et = openuwb::core::uwb_template_energy(scratch.work);
+    openuwb::demod::rxopt::build_real_sync_template(scratch.work, scratch.real_sync_template);
     BOOST_REQUIRE(scratch.real_sync_template.is_real);
 
     const int64_t period = static_cast<int64_t>(sym);
@@ -1006,10 +1006,10 @@ BOOST_AUTO_TEST_CASE(test_fold_acquire_window_is_clamped_to_half_a_period)
     // that a wrong absolute grid phase would be visible.
     const int64_t centre = frame.start + 3 * period;
     const int64_t radius = 8192;
-    const auto res = gr::uwb::demod::core::detail::fold_acquire(
+    const auto res = openuwb::demod::core::detail::fold_acquire(
         frame.rx.data(), frame.rx.size(), centre, centre - radius,
         centre + radius, scratch.work.data(), scratch.work.size(), Et,
-        scratch.real_sync_template, gr::uwb::demod::core::detail::kFoldMaxSymbols,
+        scratch.real_sync_template, openuwb::demod::core::detail::kFoldMaxSymbols,
         kLowSnrSyncReps, 0.0f);
     BOOST_REQUIRE(res.ok);
     // Clamped window: at most P + 1 lags, not 2*radius + 1.
@@ -1034,7 +1034,7 @@ BOOST_AUTO_TEST_CASE(test_fold_acquire_window_is_clamped_to_half_a_period)
             folded[i] += frame.rx[static_cast<size_t>(res.start) +
                                   k * static_cast<size_t>(period) + i];
     const std::complex<float> acc =
-        gr::uwb::demod::rxopt::real_template_dot_single(
+        openuwb::demod::rxopt::real_template_dot_single(
             folded.data(), scratch.real_sync_template.taps_dup.data(),
             folded.size());
     float pw = 0.0f;
@@ -1047,10 +1047,10 @@ BOOST_AUTO_TEST_CASE(test_fold_acquire_window_is_clamped_to_half_a_period)
     // nearest legal lag (the fold is P-periodic, so this is the documented
     // ambiguity, not an error).
     const int64_t far_centre = frame.start + 40 * period;
-    const auto far = gr::uwb::demod::core::detail::fold_acquire(
+    const auto far = openuwb::demod::core::detail::fold_acquire(
         frame.rx.data(), frame.rx.size(), far_centre, far_centre - radius,
         far_centre + radius, scratch.work.data(), scratch.work.size(), Et,
-        scratch.real_sync_template, gr::uwb::demod::core::detail::kFoldMaxSymbols,
+        scratch.real_sync_template, openuwb::demod::core::detail::kFoldMaxSymbols,
         kLowSnrSyncReps, 0.0f);
     BOOST_REQUIRE(far.ok);
     BOOST_CHECK_LE(far.window_lags, static_cast<size_t>(period + 1));

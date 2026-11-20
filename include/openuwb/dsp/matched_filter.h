@@ -5,7 +5,7 @@
 #include <complex>
 #include <cstddef>
 
-namespace gr::uwb::core {
+namespace openuwb::core {
 
 // A lag points to the first sample aligned with taps[0]. Keep the scalar
 // reference and VOLK reductions separate because their accumulation differs.
@@ -57,4 +57,4 @@ inline float normalized_correlation_power(std::complex<float> corr,
     return std::norm(corr) / (power * template_energy + kUwbEpsilon);
 }
 
-} // namespace gr::uwb::core
+} // namespace openuwb::core

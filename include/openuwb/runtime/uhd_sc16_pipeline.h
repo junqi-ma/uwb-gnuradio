@@ -29,16 +29,13 @@
 #include <thread>
 #include <vector>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace core {
-using gr::uwb::radar::RadarCirConfig;
-}
+using openuwb::radar::RadarCirConfig;
 }
 }
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace pipeline {
 
 // Defined in uwb_fixed_tone_cancel_source.h.  The pipeline owns the stage
@@ -353,8 +350,8 @@ struct PipelineConfig {
     std::string uhd_time_source;
 
     // DSP configs
-    gr::uwb::sic::SicUnifiedConfig sic_cfg;
-    gr::uwb::core::RadarCirConfig radar_cfg;
+    openuwb::sic::SicUnifiedConfig sic_cfg;
+    openuwb::core::RadarCirConfig radar_cfg;
     // Optional override for the public SYNC template used by SIC (one shaped
     // SYNC symbol, 1016 CF32 samples at 998.4 MS/s).  Empty keeps the
     // historical `testdata/reference_preamble.bin` (sensing code 9).  A SIC
@@ -723,5 +720,4 @@ private:
 };
 
 } // namespace pipeline
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

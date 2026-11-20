@@ -20,7 +20,7 @@
 #include <vector>
 #include <array>
 
-using namespace gr::uwb;
+using namespace openuwb;
 using cf=std::complex<float>;
 using sc16=std::complex<int16_t>;
 using Clock=std::chrono::steady_clock;

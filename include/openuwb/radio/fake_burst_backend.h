@@ -52,8 +52,7 @@
 #include <utility>
 #include <vector>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace echo {
 
 class FakeBurstBackend : public IRadioBurstBackend
@@ -812,7 +811,6 @@ private:
 };
 
 } // namespace echo
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb
 
 #endif /* INCLUDED_GNURADIO_UWB_UWB_FAKE_BURST_BACKEND_H */

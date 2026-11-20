@@ -6,7 +6,7 @@
 #include <cstring>
 #include <limits>
 
-namespace gr { namespace uwb { namespace sic {
+namespace openuwb { namespace sic {
 namespace {
 using cf = std::complex<float>;
 using cd = std::complex<double>;
@@ -273,4 +273,4 @@ FullPacketResult fullpacket_cancel(
     if(ihat) std::copy(s.model.begin()+lo,s.model.begin()+hi,ihat+lo);
     r.subtract_us=us(ts);r.committed=true;r.reason="committed";return r;
 }
-}}}
+}}

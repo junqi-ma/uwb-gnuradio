@@ -22,8 +22,7 @@
 
 #include <immintrin.h>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace core {
 namespace simd {
 namespace avx512 {
@@ -332,5 +331,4 @@ UWB_DS_AVX512_TARGET void fold_sfd_window(const gr_complex* rx_base,
 } // namespace avx512
 } // namespace simd
 } // namespace core
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

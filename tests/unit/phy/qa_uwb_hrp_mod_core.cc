@@ -24,14 +24,14 @@
 
 namespace {
 
-using gr::uwb::demod::Qm35825Profile;
-using gr::uwb::demod::core::demodulate_one;
-using gr::uwb::mod::HrpModConfig;
-using gr::uwb::mod::HrpModScratch;
-using gr::uwb::mod::modulate_one;
-using gr::uwb::mod::packet_samples_998p4;
-using gr::uwb::mod::PulseShape;
-using gr::uwb::mod::PulseSpec;
+using openuwb::demod::Qm35825Profile;
+using openuwb::demod::core::demodulate_one;
+using openuwb::mod::HrpModConfig;
+using openuwb::mod::HrpModScratch;
+using openuwb::mod::modulate_one;
+using openuwb::mod::packet_samples_998p4;
+using openuwb::mod::PulseShape;
+using openuwb::mod::PulseSpec;
 
 #ifdef UWB_TESTDATA_DIR
 const char* kTestdata = UWB_TESTDATA_DIR;
@@ -134,7 +134,7 @@ BOOST_AUTO_TEST_CASE(test_hrp_mod_packet_length_p1)
 
 BOOST_AUTO_TEST_CASE(test_hrp_mod_gaussian_live_template_demod)
 {
-    auto bytes = gr::uwb::mod::make_random_psdu(8, 4242u, true);
+    auto bytes = openuwb::mod::make_random_psdu(8, 4242u, true);
     HrpModConfig cfg;
     cfg.sfd_mode = "4z2";
     cfg.pulse.shape = PulseShape::Gaussian;
@@ -162,11 +162,11 @@ BOOST_AUTO_TEST_CASE(test_hrp_mod_gaussian_live_template_demod)
     std::copy(tx.begin(), tx.end(), iq.begin() + static_cast<std::ptrdiff_t>(t0));
     auto prof = Qm35825Profile::Default();
     prof.sfd_mode = "4z2";
-    gr::uwb::demod::core::DemodScratch dscratch;
+    openuwb::demod::core::DemodScratch dscratch;
     dscratch.reserve(iq.size());
     const auto res = demodulate_one(iq.data(), iq.size(), prof, 1,
                                     static_cast<int64_t>(t0), 0, tmpl, dscratch);
-    BOOST_REQUIRE_MESSAGE(res.status == gr::uwb::demod::DemodStatus::Success,
+    BOOST_REQUIRE_MESSAGE(res.status == openuwb::demod::DemodStatus::Success,
                           "gaussian live-template demod status=" +
                               std::to_string(static_cast<int>(res.status)));
     BOOST_CHECK(res.payload.fcs_pass);
@@ -184,7 +184,7 @@ void run_external_live_template_demod(const std::string& rel_path,
     BOOST_REQUIRE(load_f32(std::string(kTestdata) + rel_path, taps));
     BOOST_REQUIRE_EQUAL(taps.size(), n_taps);
 
-    auto bytes = gr::uwb::mod::make_random_psdu(8, seed, true);
+    auto bytes = openuwb::mod::make_random_psdu(8, seed, true);
     HrpModConfig cfg;
     cfg.sfd_mode = "4z2";
     cfg.pulse.shape = PulseShape::External;
@@ -216,11 +216,11 @@ void run_external_live_template_demod(const std::string& rel_path,
     std::copy(tx.begin(), tx.end(), iq.begin() + static_cast<std::ptrdiff_t>(t0));
     auto prof = Qm35825Profile::Default();
     prof.sfd_mode = "4z2";
-    gr::uwb::demod::core::DemodScratch dscratch;
+    openuwb::demod::core::DemodScratch dscratch;
     dscratch.reserve(iq.size());
     const auto res = demodulate_one(iq.data(), iq.size(), prof, 1,
                                     static_cast<int64_t>(t0), 0, tmpl, dscratch);
-    BOOST_REQUIRE_MESSAGE(res.status == gr::uwb::demod::DemodStatus::Success,
+    BOOST_REQUIRE_MESSAGE(res.status == openuwb::demod::DemodStatus::Success,
                           "external live-template demod status=" +
                               std::to_string(static_cast<int>(res.status)));
     BOOST_CHECK(res.payload.fcs_pass);
@@ -252,7 +252,7 @@ BOOST_AUTO_TEST_CASE(test_hrp_mod_external_default_live_template_demod)
 BOOST_AUTO_TEST_CASE(test_hrp_mod_pulse_shape_spectrum)
 {
     auto db_at = [](const PulseSpec& spec, double f_hz) {
-        const std::vector<float> taps = gr::uwb::mod::make_pulse_taps(spec);
+        const std::vector<float> taps = openuwb::mod::make_pulse_taps(spec);
         BOOST_REQUIRE(!taps.empty());
         const double dt = 1.0 / 998.4e6;
         double re = 0.0, im = 0.0, dc = 0.0;
@@ -288,7 +288,7 @@ BOOST_AUTO_TEST_CASE(test_hrp_mod_pulse_shape_spectrum)
 
 BOOST_AUTO_TEST_CASE(test_hrp_mod_pulse_shape_packet_lengths)
 {
-    auto bytes = gr::uwb::mod::make_random_psdu(8, 5150u, true);
+    auto bytes = openuwb::mod::make_random_psdu(8, 5150u, true);
     HrpModConfig cfg;
     cfg.sfd_mode = "4z2";
     const size_t base = packet_samples_998p4(64, 8, bytes.size());
@@ -326,11 +326,11 @@ BOOST_AUTO_TEST_CASE(test_hrp_mod_pulse_spec_rejects_invalid)
     PulseSpec bad;
     bad.shape = PulseShape::Gaussian;
     bad.gaussian_sigma_ns = 0.f;
-    BOOST_CHECK(gr::uwb::mod::make_pulse_taps(bad).empty());
+    BOOST_CHECK(openuwb::mod::make_pulse_taps(bad).empty());
     bad.gaussian_sigma_ns = 2.5f;
     bad.shape = PulseShape::Blackman;
     bad.blackman_bw_mhz = 600.f;
-    BOOST_CHECK(gr::uwb::mod::make_pulse_taps(bad).empty());
+    BOOST_CHECK(openuwb::mod::make_pulse_taps(bad).empty());
 
     HrpModConfig cfg;
     cfg.sfd_mode = "4z2";
@@ -351,9 +351,9 @@ BOOST_AUTO_TEST_CASE(test_hrp_mod_rs_matches_golden)
 
     HrpModScratch scratch;
     scratch.reserve(127, 249280);
-    gr::uwb::mod::detail::bytes_to_lsb_bits(bytes.data(), bytes.size(),
+    openuwb::mod::detail::bytes_to_lsb_bits(bytes.data(), bytes.size(),
                                             scratch.psdu_bits);
-    BOOST_REQUIRE(gr::uwb::mod::detail::rs_encode_stream(
+    BOOST_REQUIRE(openuwb::mod::detail::rs_encode_stream(
         scratch.psdu_bits.data(), scratch.psdu_bits.size(), scratch.rs_cw));
     std::vector<int8_t> golden;
     BOOST_REQUIRE(load_i8(golden_dir() + "/stage_rs_coded.bin", golden));
@@ -362,7 +362,7 @@ BOOST_AUTO_TEST_CASE(test_hrp_mod_rs_matches_golden)
                                   golden.begin(), golden.end());
 
     std::vector<int8_t> decoded;
-    BOOST_REQUIRE(gr::uwb::demod::core::detail::rs_decode_stream(
+    BOOST_REQUIRE(openuwb::demod::core::detail::rs_decode_stream(
         scratch.rs_cw, scratch.psdu_bits.size(), decoded));
     BOOST_CHECK_EQUAL_COLLECTIONS(decoded.begin(), decoded.end(),
                                   scratch.psdu_bits.begin(),
@@ -408,12 +408,12 @@ BOOST_AUTO_TEST_CASE(test_hrp_mod_demodulate_one_fcs)
 
     auto prof = Qm35825Profile::Default();
     prof.sfd_mode = "ieee";
-    gr::uwb::demod::core::DemodScratch dscratch;
+    openuwb::demod::core::DemodScratch dscratch;
     dscratch.reserve(iq.size());
     const auto res = demodulate_one(iq.data(), iq.size(), prof, 1,
                                     static_cast<int64_t>(t0), 0,
                                     load_template(), dscratch);
-    BOOST_REQUIRE(res.status == gr::uwb::demod::DemodStatus::Success);
+    BOOST_REQUIRE(res.status == openuwb::demod::DemodStatus::Success);
     BOOST_REQUIRE(res.payload.ok);
     BOOST_CHECK(res.payload.fcs_pass);
     BOOST_REQUIRE_EQUAL(res.payload.bytes.size(), bytes.size());
@@ -452,20 +452,20 @@ BOOST_AUTO_TEST_CASE(test_hrp_mod_psdu0_length_and_phr)
     BOOST_REQUIRE_EQUAL(n, want);
     // 0-byte packets end on PHR; do not require payload FCS.  SFD must lock.
     auto tmpl = load_template();
-    const auto seq = gr::uwb::demod::GetSfdSequence("ieee");
-    gr::uwb::radar::RadarSfdScratch ss;
-    BOOST_REQUIRE(gr::uwb::radar::prepare_sfd_template(
+    const auto seq = openuwb::demod::GetSfdSequence("ieee");
+    openuwb::radar::RadarSfdScratch ss;
+    BOOST_REQUIRE(openuwb::radar::prepare_sfd_template(
         seq.data(), seq.size(), tmpl.data(), tmpl.size(), ss));
-    gr::uwb::radar::RadarSfdResult sr;
-    BOOST_REQUIRE(gr::uwb::radar::search_sfd(
+    openuwb::radar::RadarSfdResult sr;
+    BOOST_REQUIRE(openuwb::radar::search_sfd(
         tx.data(), tx.size(),
         static_cast<int64_t>(64 * 1016), 64, 0.3f, sr, ss));
-    BOOST_CHECK(sr.status == gr::uwb::radar::SfdStatus::Ok);
+    BOOST_CHECK(sr.status == openuwb::radar::SfdStatus::Ok);
 }
 
 BOOST_AUTO_TEST_CASE(test_hrp_mod_4z2_no_sts_demod_fcs)
 {
-    auto bytes = gr::uwb::mod::make_random_psdu(8, 20260904u, true);
+    auto bytes = openuwb::mod::make_random_psdu(8, 20260904u, true);
     BOOST_REQUIRE_EQUAL(bytes.size(), size_t(10));
     HrpModConfig cfg;
     cfg.sfd_mode = "4z2";
@@ -481,12 +481,12 @@ BOOST_AUTO_TEST_CASE(test_hrp_mod_4z2_no_sts_demod_fcs)
     std::copy(tx.begin(), tx.end(), iq.begin() + static_cast<std::ptrdiff_t>(t0));
     auto prof = Qm35825Profile::Default();
     prof.sfd_mode = "4z2";
-    gr::uwb::demod::core::DemodScratch dscratch;
+    openuwb::demod::core::DemodScratch dscratch;
     dscratch.reserve(iq.size());
     const auto res = demodulate_one(iq.data(), iq.size(), prof, 1,
                                     static_cast<int64_t>(t0), 0,
                                     load_template(), dscratch);
-    BOOST_REQUIRE_MESSAGE(res.status == gr::uwb::demod::DemodStatus::Success,
+    BOOST_REQUIRE_MESSAGE(res.status == openuwb::demod::DemodStatus::Success,
                           "4z2 demod status=" +
                               std::to_string(static_cast<int>(res.status)));
     BOOST_CHECK(res.payload.fcs_pass);
@@ -528,15 +528,15 @@ BOOST_AUTO_TEST_CASE(test_hrp_mod_4z2_sts_matches_radar_length_and_sfd)
     BOOST_CHECK_GT(num / (std::sqrt(da * db) + 1e-18), 0.999);
 
     auto tmpl = load_template();
-    const auto seq = gr::uwb::demod::GetSfdSequence("4z2");
-    gr::uwb::radar::RadarSfdScratch ss;
-    BOOST_REQUIRE(gr::uwb::radar::prepare_sfd_template(
+    const auto seq = openuwb::demod::GetSfdSequence("4z2");
+    openuwb::radar::RadarSfdScratch ss;
+    BOOST_REQUIRE(openuwb::radar::prepare_sfd_template(
         seq.data(), seq.size(), tmpl.data(), tmpl.size(), ss));
-    gr::uwb::radar::RadarSfdResult sr;
-    BOOST_REQUIRE(gr::uwb::radar::search_sfd(
+    openuwb::radar::RadarSfdResult sr;
+    BOOST_REQUIRE(openuwb::radar::search_sfd(
         tx.data(), tx.size(), /*predicted=*/65024, /*margin=*/64,
         0.3f, sr, ss));
-    BOOST_CHECK(sr.status == gr::uwb::radar::SfdStatus::Ok);
+    BOOST_CHECK(sr.status == openuwb::radar::SfdStatus::Ok);
     BOOST_CHECK_EQUAL(sr.sfd_start_sample, int64_t(65024));
 }
 
@@ -544,8 +544,8 @@ BOOST_AUTO_TEST_CASE(test_hrp_mod_sync_lengths_ieee_psdu0)
 {
     HrpModConfig cfg;
     HrpModScratch scratch;
-    scratch.reserve(0, gr::uwb::mod::kMaxHrpTxSamples);
-    std::vector<gr_complex> tx(gr::uwb::mod::kMaxHrpTxSamples);
+    scratch.reserve(0, openuwb::mod::kMaxHrpTxSamples);
+    std::vector<gr_complex> tx(openuwb::mod::kMaxHrpTxSamples);
     const size_t lens[] = { 32, 128, 256, 512, 1024, 2048 };
     for (size_t reps : lens) {
         cfg.sync_repetitions = reps;
@@ -576,7 +576,7 @@ BOOST_AUTO_TEST_CASE(test_hrp_mod_prefix_cache_preserves_p1)
     BOOST_REQUIRE_EQUAL(n, size_t(249280));
     BOOST_CHECK_LT(l2_rel(tx, window.data() + 9984, n), 1e-6);
 
-    auto other = gr::uwb::mod::make_random_psdu(8, 99u, true);
+    auto other = openuwb::mod::make_random_psdu(8, 99u, true);
     const size_t n_other = packet_samples_998p4(64, 8, other.size());
     std::vector<gr_complex> tx2(n_other);
     size_t n2 = 0;
@@ -593,7 +593,7 @@ BOOST_AUTO_TEST_CASE(test_hrp_mod_prefix_cache_preserves_p1)
 
 BOOST_AUTO_TEST_CASE(test_hrp_mod_code10_ieee_fcs)
 {
-    auto bytes = gr::uwb::mod::make_random_psdu(8, 7u, true);
+    auto bytes = openuwb::mod::make_random_psdu(8, 7u, true);
     HrpModConfig cfg;
     cfg.code_index = 10;
     HrpModScratch scratch;
@@ -622,11 +622,11 @@ BOOST_AUTO_TEST_CASE(test_hrp_mod_code10_ieee_fcs)
     const size_t t0 = 9984;
     std::vector<gr_complex> iq(t0 + n + 8192, gr_complex(0.f, 0.f));
     std::copy(tx.begin(), tx.end(), iq.begin() + static_cast<std::ptrdiff_t>(t0));
-    gr::uwb::demod::core::DemodScratch dscratch;
+    openuwb::demod::core::DemodScratch dscratch;
     dscratch.reserve(iq.size());
     const auto res = demodulate_one(iq.data(), iq.size(), prof, 1,
                                     static_cast<int64_t>(t0), 0, tmpl, dscratch);
-    BOOST_REQUIRE_MESSAGE(res.status == gr::uwb::demod::DemodStatus::Success,
+    BOOST_REQUIRE_MESSAGE(res.status == openuwb::demod::DemodStatus::Success,
                           "code10 demod status=" +
                               std::to_string(static_cast<int>(res.status)));
     BOOST_CHECK(res.payload.fcs_pass);
@@ -634,7 +634,7 @@ BOOST_AUTO_TEST_CASE(test_hrp_mod_code10_ieee_fcs)
 
 BOOST_AUTO_TEST_CASE(unit_real_impulses_match_complex_modulation)
 {
-    using namespace gr::uwb;
+    using namespace openuwb;
     for (const size_t length : {size_t(2), size_t(32), size_t(127)}) {
         mod::HrpModConfig cfg;
         cfg.code_index=10; cfg.sync_repetitions=64; cfg.sfd_mode="4z2";
@@ -677,7 +677,7 @@ BOOST_AUTO_TEST_CASE(unit_real_impulses_match_complex_modulation)
 
 BOOST_AUTO_TEST_CASE(pulse_list_matches_unit_real_impulses)
 {
-    using namespace gr::uwb;
+    using namespace openuwb;
     for (const size_t length : {size_t(2), size_t(32), size_t(127)}) {
         mod::HrpModConfig cfg;
         cfg.code_index=10; cfg.sync_repetitions=64; cfg.sfd_mode="4z2";
@@ -751,7 +751,7 @@ BOOST_AUTO_TEST_CASE(pulse_list_matches_unit_real_impulses)
 
 BOOST_AUTO_TEST_CASE(prefix_pulse_list_span_is_sync_plus_sfd)
 {
-    using namespace gr::uwb;
+    using namespace openuwb;
     mod::HrpModConfig cfg;
     cfg.code_index = 9;
     cfg.sync_repetitions = 64;
@@ -834,7 +834,7 @@ BOOST_AUTO_TEST_CASE(prefix_pulse_list_span_is_sync_plus_sfd)
 
 BOOST_AUTO_TEST_CASE(test_hrp_mod_pn_cache_lifecycle)
 {
-    namespace mod = gr::uwb::mod;
+    namespace mod = openuwb::mod;
     const size_t cap = 300000;
     mod::HrpModScratch scratch;
     scratch.reserve(127, cap);

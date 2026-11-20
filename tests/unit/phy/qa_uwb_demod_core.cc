@@ -34,7 +34,7 @@
 
 namespace {
 
-using namespace gr::uwb::demod;
+using namespace openuwb::demod;
 
 // Load a CF32 (interleaved float I/Q) file into gr_complex.
 bool load_cf32(const std::string& path, std::vector<gr_complex>& out)
@@ -127,7 +127,7 @@ std::vector<gr_complex> load_reference_template()
 // ---------------------------------------------------------------------------
 BOOST_AUTO_TEST_CASE(integer_chip_grid_tolerance_matches_the_drift_budget)
 {
-    using namespace gr::uwb::demod::core;
+    using namespace openuwb::demod::core;
 
     // Default admission is 1.5 ppm = 0.23 samples of drift over a 127 B
     // payload.  The hard ceiling is 1 sample = 6.468 ppm.
@@ -3186,7 +3186,7 @@ BOOST_AUTO_TEST_CASE(test_demod_core_sfd_dot_numeric_equivalence)
     // Test with IEEE SFD and SFD 4z2
     const char* modes[] = { "ieee", "4z2" };
     for (const char* mode : modes) {
-        const std::vector<int8_t> sfd_seq = gr::uwb::demod::GetSfdSequence(mode);
+        const std::vector<int8_t> sfd_seq = openuwb::demod::GetSfdSequence(mode);
         const size_t len = sfd_seq.size();
         BOOST_REQUIRE_GT(len, 0);
 
@@ -3258,7 +3258,7 @@ BOOST_AUTO_TEST_CASE(test_demod_core_cached_sequence_invalidation)
     for (size_t i = 0; i < expected_sampled9.size(); ++i) {
         BOOST_CHECK_EQUAL(scratch.cached_seq.sampled_pcode[i], expected_sampled9[i]);
     }
-    const std::vector<int8_t> expected_sfd4z2 = gr::uwb::demod::GetSfdSequence("4z2");
+    const std::vector<int8_t> expected_sfd4z2 = openuwb::demod::GetSfdSequence("4z2");
     BOOST_CHECK_EQUAL(scratch.cached_seq.sfd_seq.size(), expected_sfd4z2.size());
     for (size_t i = 0; i < expected_sfd4z2.size(); ++i) {
         BOOST_CHECK_EQUAL(scratch.cached_seq.sfd_seq[i], expected_sfd4z2[i]);
@@ -3280,7 +3280,7 @@ BOOST_AUTO_TEST_CASE(test_demod_core_cached_sequence_invalidation)
     // Update with "ieee" (SFD mode change, code unchanged)
     scratch.cached_seq.update(10, "ieee");
     BOOST_CHECK_EQUAL(scratch.cached_seq.sfd_mode, "ieee");
-    const std::vector<int8_t> expected_ieee = gr::uwb::demod::GetSfdSequence("ieee");
+    const std::vector<int8_t> expected_ieee = openuwb::demod::GetSfdSequence("ieee");
     BOOST_CHECK_EQUAL(scratch.cached_seq.sfd_seq.size(), expected_ieee.size());
     for (size_t i = 0; i < expected_ieee.size(); ++i) {
         BOOST_CHECK_EQUAL(scratch.cached_seq.sfd_seq[i], expected_ieee[i]);
@@ -3330,7 +3330,7 @@ BOOST_AUTO_TEST_CASE(test_demod_core_vector_accumulate_scale)
 BOOST_AUTO_TEST_CASE(test_demod_core_sfd_fold_window_equivalence)
 {
     const size_t sym = kQm35SamplesPerSymbol; // 1016
-    const auto sfd_seq = gr::uwb::demod::GetSfdSequence("4z2");
+    const auto sfd_seq = openuwb::demod::GetSfdSequence("4z2");
     const size_t len = sfd_seq.size(); // 8
 
     std::vector<gr_complex> tmpl(sym);
@@ -3375,7 +3375,7 @@ BOOST_AUTO_TEST_CASE(test_demod_core_ns_sfd_sparse_sliding_equivalence)
     prof.code_index = 10;
     prof.sfd_mode = "4z2";
 
-    const auto sfd_seq = gr::uwb::demod::GetSfdSequence(prof.sfd_mode);
+    const auto sfd_seq = openuwb::demod::GetSfdSequence(prof.sfd_mode);
     const size_t total_chips = 80 * kQm35ChipsPerSymbol;
 
     std::vector<float> soft_chips(total_chips, 0.0f);
@@ -3543,9 +3543,9 @@ BOOST_AUTO_TEST_CASE(test_demod_core_soft_trace_viterbi_matches_plain)
             l1[i] = nd(rng);
         }
         std::vector<int8_t> plain;
-        gr::uwb::demod::core::detail::vitdec_cl3_soft(l0.data(), l1.data(), n, plain);
-        gr::uwb::demod::core::detail::Cl3TrellisTrace tr;
-        gr::uwb::demod::core::detail::vitdec_cl3_soft_trace(l0.data(), l1.data(), n, tr);
+        openuwb::demod::core::detail::vitdec_cl3_soft(l0.data(), l1.data(), n, plain);
+        openuwb::demod::core::detail::Cl3TrellisTrace tr;
+        openuwb::demod::core::detail::vitdec_cl3_soft_trace(l0.data(), l1.data(), n, tr);
         BOOST_REQUIRE_EQUAL(tr.bits.size(), n);
         BOOST_REQUIRE_EQUAL(plain.size(), n);
         BOOST_CHECK(std::equal(plain.begin(), plain.end(), tr.bits.begin()));
@@ -4024,7 +4024,7 @@ bool encode_systematic(const int* data55, int* out63)
 
 BOOST_AUTO_TEST_CASE(test_fec_opt_gf64_tables_match_bitserial_reference)
 {
-    using namespace gr::uwb::codec;
+    using namespace openuwb::codec;
     // 64 x 64 exhaustive multiply.
     for (int a = 0; a < 64; ++a) {
         for (int b = 0; b < 64; ++b) {
@@ -4063,7 +4063,7 @@ BOOST_AUTO_TEST_CASE(test_fec_opt_gf64_tables_match_bitserial_reference)
 
 BOOST_AUTO_TEST_CASE(test_fec_opt_bit_packing_matches_reference)
 {
-    using namespace gr::uwb::codec;
+    using namespace openuwb::codec;
     std::mt19937 rng(20261120u);
     std::uniform_int_distribution<int> bit(0, 1);
     for (int rep = 0; rep < 8; ++rep) {
@@ -4088,7 +4088,7 @@ BOOST_AUTO_TEST_CASE(test_fec_opt_bit_packing_matches_reference)
         for (auto& b : psdu)
             b = static_cast<int8_t>(bit(rng));
         std::vector<uint8_t> new_bytes, ref_bytes;
-        gr::uwb::demod::core::detail::pack_psdu_bytes(psdu, new_bytes);
+        openuwb::demod::core::detail::pack_psdu_bytes(psdu, new_bytes);
         fec_opt_ref::pack_psdu_bytes(psdu, ref_bytes);
         BOOST_REQUIRE(new_bytes == ref_bytes);
         BOOST_REQUIRE_EQUAL(new_bytes.size(), 37u);
@@ -4097,7 +4097,7 @@ BOOST_AUTO_TEST_CASE(test_fec_opt_bit_packing_matches_reference)
         // shifted term keeps only its low 8 bits).
         for (auto& b : psdu)
             b = static_cast<int8_t>(static_cast<int>(rng() % 8) - 2);
-        gr::uwb::demod::core::detail::pack_psdu_bytes(psdu, new_bytes);
+        openuwb::demod::core::detail::pack_psdu_bytes(psdu, new_bytes);
         fec_opt_ref::pack_psdu_bytes(psdu, ref_bytes);
         BOOST_REQUIRE(new_bytes == ref_bytes);
     }
@@ -4105,7 +4105,7 @@ BOOST_AUTO_TEST_CASE(test_fec_opt_bit_packing_matches_reference)
 
 BOOST_AUTO_TEST_CASE(test_fec_opt_rs_decode_block_matches_reference)
 {
-    using namespace gr::uwb::demod::core::detail;
+    using namespace openuwb::demod::core::detail;
     std::mt19937 rng(20261121u);
     std::uniform_int_distribution<int> sym(0, 63);
     std::uniform_int_distribution<int> pos(0, 62);
@@ -4168,7 +4168,7 @@ BOOST_AUTO_TEST_CASE(test_fec_opt_rs_decode_block_matches_reference)
 
 BOOST_AUTO_TEST_CASE(test_fec_opt_viterbi_hard_matches_reference)
 {
-    using namespace gr::uwb::demod::core::detail;
+    using namespace openuwb::demod::core::detail;
     std::mt19937 rng(20261122u);
     std::uniform_int_distribution<int> bit(0, 1);
     const size_t lengths[] = { 1, 2, 3, 7, 64, 1229, 2048, 2049 };
@@ -4211,7 +4211,7 @@ BOOST_AUTO_TEST_CASE(test_fec_opt_viterbi_hard_matches_reference)
 
 BOOST_AUTO_TEST_CASE(test_fec_opt_viterbi_soft_matches_reference)
 {
-    using namespace gr::uwb::demod::core::detail;
+    using namespace openuwb::demod::core::detail;
     std::mt19937 rng(20261123u);
     std::normal_distribution<float> nd(0.0f, 2.0f);
     const size_t lengths[] = { 1, 2, 3, 7, 64, 1229, 2048, 2049 };
@@ -4267,7 +4267,7 @@ BOOST_AUTO_TEST_CASE(test_fec_opt_viterbi_soft_matches_reference)
 
 BOOST_AUTO_TEST_CASE(test_fec_opt_viterbi_soft_trace_matches_reference)
 {
-    using namespace gr::uwb::demod::core::detail;
+    using namespace openuwb::demod::core::detail;
     std::mt19937 rng(20261124u);
     std::normal_distribution<float> nd(0.0f, 1.5f);
     const size_t lengths[] = { 1, 2, 3, 7, 64, 257, 1229, 2048, 2049 };
@@ -4308,7 +4308,7 @@ BOOST_AUTO_TEST_CASE(test_fec_opt_rs_kernels_match_reference)
     // Direct bit-exactness of the individually rewritten RS kernels, including
     // the degrees the errors-and-erasures rescue path reaches (Forney with
     // L = Le + v up to 8), which rs_decode_block alone never exercises.
-    using namespace gr::uwb::demod::core::detail;
+    using namespace openuwb::demod::core::detail;
     std::mt19937 rng(20261125u);
     std::uniform_int_distribution<int> sym(0, 63);
     std::uniform_int_distribution<int> pos(0, 62);
@@ -4364,17 +4364,17 @@ BOOST_AUTO_TEST_CASE(test_fec_opt_rs_kernels_match_reference)
 // independent references written in this anonymous namespace: a nested
 // `for (st) for (u)` DP (the pre-unrolling loop shape), a brute-force
 // enumeration of every input sequence for the tiny exact-ML case, and a local
-// CL-3 encoder built from gr::uwb::codec::cl3_transition.  The new production
+// CL-3 encoder built from openuwb::codec::cl3_transition.  The new production
 // code is never used as its own oracle.
 // ---------------------------------------------------------------------------
 namespace {
 
-using gr::uwb::codec::Cl3Transition;
-using gr::uwb::codec::cl3_transition;
-using gr::uwb::codec::crc16_802154;
-using gr::uwb::codec::hrp_secded;
-using gr::uwb::codec::rs_bits_to_syms;
-using gr::uwb::codec::rs_syms_to_bits;
+using openuwb::codec::Cl3Transition;
+using openuwb::codec::cl3_transition;
+using openuwb::codec::crc16_802154;
+using openuwb::codec::hrp_secded;
+using openuwb::codec::rs_bits_to_syms;
+using openuwb::codec::rs_syms_to_bits;
 
 // Joint ML branch metric, written straight from the task definition.
 float qa_branch(float m0, float m1, int o0, int o1)
@@ -4746,7 +4746,7 @@ void qa_add_noise(std::vector<float>& m0, std::vector<float>& m1, float sigma,
 
 BOOST_AUTO_TEST_CASE(test_w1_joint_ml_exact_counterexample)
 {
-    using namespace gr::uwb::demod::core::detail;
+    using namespace openuwb::demod::core::detail;
 
     // The documented coupling: a +1.0 half and a -0.8 half make (1,1) the true
     // runner-up (cost -0.8), while the split LLRs score (1,1) as the worst
@@ -4808,7 +4808,7 @@ BOOST_AUTO_TEST_CASE(test_w1_joint_ml_exact_counterexample)
 
 BOOST_AUTO_TEST_CASE(test_w1_joint_ml_awgn_gain_over_split_llr)
 {
-    using namespace gr::uwb::demod::core::detail;
+    using namespace openuwb::demod::core::detail;
 
     // 600 frames x 128 coded bits at sigma = 0.4 places the split-LLR FER in
     // the requested 20-40% band while the joint ML decoder is far below it.
@@ -4879,7 +4879,7 @@ BOOST_AUTO_TEST_CASE(test_w1_joint_ml_awgn_gain_over_split_llr)
 
 BOOST_AUTO_TEST_CASE(test_w1_joint_ml_terminated_tail_beats_truncated)
 {
-    using namespace gr::uwb::demod::core::detail;
+    using namespace openuwb::demod::core::detail;
 
     // 400 frames with the standard two zero tail bits.  Only the last eight
     // symbols carry noise, so the endpoint decision is what matters.
@@ -4935,7 +4935,7 @@ BOOST_AUTO_TEST_CASE(test_w1_joint_ml_terminated_tail_beats_truncated)
 
 BOOST_AUTO_TEST_CASE(test_w1_joint_ml_pulse_clipping_recovers_fcs)
 {
-    using namespace gr::uwb::demod::core::detail;
+    using namespace openuwb::demod::core::detail;
 
     // Direct clipping contract: median one, 50x spikes clamped to 4x.
     {
@@ -5007,8 +5007,8 @@ BOOST_AUTO_TEST_CASE(test_w1_joint_ml_pulse_clipping_recovers_fcs)
 
 BOOST_AUTO_TEST_CASE(test_w1_joint_ml_end_to_end_and_boundaries)
 {
-    using namespace gr::uwb::demod::core::detail;
-    using gr::uwb::demod::core::decode_phr_decisions;
+    using namespace openuwb::demod::core::detail;
+    using openuwb::demod::core::decode_phr_decisions;
 
     // ---- Payload: biorth must agree with decode_payload_soft() ------------
     QaFrame frame;
@@ -5179,7 +5179,7 @@ void qa_ref_local_flip(const std::vector<float>& m0,
 
 BOOST_AUTO_TEST_CASE(test_w1_joint_ml_local_flip_and_rescue_phase1)
 {
-    using namespace gr::uwb::demod::core::detail;
+    using namespace openuwb::demod::core::detail;
 
     QaFrame frame;
     BOOST_REQUIRE(qa_build_frame(24, 4242u, frame));

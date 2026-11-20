@@ -117,8 +117,7 @@
 #include <string>
 #include <vector>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace twr {
 
 namespace {
@@ -326,5 +325,4 @@ bool m2a_apply_impairment(std::vector<std::complex<float>>& iq, double native_ra
 }
 
 } // namespace twr
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

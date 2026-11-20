@@ -2,7 +2,7 @@
 # Copyright 2026
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""QA for :mod:`uwb.twr_config` -- the pure-Python TWR configuration layer.
+"""QA for :mod:`openuwb.twr_config` -- the pure-Python TWR configuration layer.
 
 Run:
     python3 gr-uwb/apps/test_twr_config.py
@@ -54,25 +54,24 @@ import unittest
 # --------------------------------------------------------------------------
 # Import the module under test from the source checkout, with no C++ library.
 # --------------------------------------------------------------------------
-_HERE = os.path.dirname(os.path.abspath(__file__))             # gr-uwb/tests/integration
-_GR_UWB = os.path.dirname(os.path.dirname(_HERE))              # gr-uwb
-_PYTHON_DIR = os.path.join(_GR_UWB, "python")                   # gr-uwb/python
-_REPO_ROOT = os.path.dirname(_GR_UWB)                           # repository root
+_HERE = os.path.dirname(os.path.abspath(__file__))             # tests/integration
+_REPO_ROOT = os.path.dirname(os.path.dirname(_HERE))           # repository root
+_PYTHON_DIR = os.path.join(_REPO_ROOT, "python")                # python/
 if _PYTHON_DIR not in sys.path:
     sys.path.insert(0, _PYTHON_DIR)
 
 try:
-    T = importlib.import_module("uwb.twr_config")
+    T = importlib.import_module("openuwb.twr_config")
 except ModuleNotFoundError as exc:  # pragma: no cover - setup guard
-    raise SystemExit("cannot import uwb.twr_config from %s: %s"
+    raise SystemExit("cannot import openuwb.twr_config from %s: %s"
                      % (_PYTHON_DIR, exc))
 
 if "gnuradio" in sys.modules:  # pragma: no cover - setup guard
     raise SystemExit("twr_config must import with NO GNU Radio present")
 
-_CXX_HEADER = os.path.join(_REPO_ROOT, "gr-uwb", "include", "openuwb", "twr",
+_CXX_HEADER = os.path.join(_REPO_ROOT, "include", "openuwb", "twr",
                            "config.h")
-_CXX_TYPES = os.path.join(_REPO_ROOT, "gr-uwb", "include", "openuwb", "twr",
+_CXX_TYPES = os.path.join(_REPO_ROOT, "include", "openuwb", "twr",
                           "types.h")
 _WHITELIST_CSV = os.path.join(_REPO_ROOT, "testdata", "twr",
                              "phy_matrix_whitelist_737280000.csv")
@@ -3644,7 +3643,7 @@ class TestModuleContract(TwrConfigTestBase):
     def test_module_has_no_third_party_dependency(self):
         """stdlib only: no numpy, no jsonschema, no pybind11, no GNU Radio."""
         import ast
-        path = os.path.join(_PYTHON_DIR, "uwb", "twr_config.py")
+        path = os.path.join(_PYTHON_DIR, "openuwb", "twr_config.py")
         with open(path, "r", encoding="utf-8") as handle:
             tree = ast.parse(handle.read(), path)
         imported = set()
@@ -3667,11 +3666,11 @@ class TestModuleContract(TwrConfigTestBase):
         for name in ("numpy", "jsonschema", "gnuradio", "uhd", "pmt",
                      "pybind11"):
             self.assertNotIn(name, sys.modules,
-                             "importing uwb.twr_config pulled in %s" % name)
+                             "importing openuwb.twr_config pulled in %s" % name)
 
     def test_package_does_not_import_native_runtime(self):
         """The source-only package exposes configuration without a binding."""
-        init_py = os.path.join(_PYTHON_DIR, "uwb", "__init__.py")
+        init_py = os.path.join(_PYTHON_DIR, "openuwb", "__init__.py")
         with open(init_py, "r", encoding="utf-8") as handle:
             module = ast.parse(handle.read())
         self.assertFalse(any(isinstance(node, (ast.Import, ast.ImportFrom))
@@ -3692,7 +3691,7 @@ class TestModuleContract(TwrConfigTestBase):
         # goes stale the next time a symbol is added.
         import ast as _ast
         import inspect as _inspect
-        src_path = os.path.join(_PYTHON_DIR, "uwb", "twr_config.py")
+        src_path = os.path.join(_PYTHON_DIR, "openuwb", "twr_config.py")
         with open(src_path, "r", encoding="utf-8") as handle:
             tree = _ast.parse(handle.read(), src_path)
         by_lineno = {}
@@ -4906,9 +4905,9 @@ class TestConfigParityCorpus(TwrConfigTestBase):
         self.assertNotIn("gnuradio", sys.modules)
         for name in ("numpy", "jsonschema", "uhd", "pmt", "pybind11"):
             self.assertNotIn(name, sys.modules,
-                             "importing uwb.twr_config pulled in %s" % name)
+                             "importing openuwb.twr_config pulled in %s" % name)
         # The corpus loader is stdlib-only too: json + os, nothing else.
-        src = _read(os.path.join(_PYTHON_DIR, "uwb", "twr_config.py"))
+        src = _read(os.path.join(_PYTHON_DIR, "openuwb", "twr_config.py"))
         self.assertIn("import json", src)
         self.assertIn("import os", src)
 

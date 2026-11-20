@@ -36,8 +36,7 @@
 #include <vector>
 #include <volk/volk.h>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace mod {
 
 inline constexpr size_t kPulseTaps = 48;
@@ -1456,5 +1455,4 @@ inline bool modulate_prefix_waveform(const HrpModConfig& cfg,
 }
 
 } // namespace mod
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

@@ -6,7 +6,7 @@
 #include <openuwb/phy/hrp/rx/rx_matched_filter.h>
 #include <openuwb/dsp/detector_core.h>
 
-namespace gr::uwb::demod::core {
+namespace openuwb::demod::core {
 // ---------------------------------------------------------------------------
 // R1 implementations: Stage 1 (timing), Stage 2 (CFO), Stage 3 (SFD refine).
 // Coordinates are 0-based positions within the input window. The complete
@@ -45,16 +45,16 @@ inline float window_power_8acc(const std::complex<float>* x, size_t count)
 
 namespace detail {
 
-using gr::uwb::core::LinearFit;
-using gr::uwb::core::normalized_correlation_power;
-using gr::uwb::core::sample_power_sum;
-using gr::uwb::core::conjugate_dot_scalar;
+using openuwb::core::LinearFit;
+using openuwb::core::normalized_correlation_power;
+using openuwb::core::sample_power_sum;
+using openuwb::core::conjugate_dot_scalar;
 
 inline std::complex<float> timing_conjugate_dot(const std::complex<float>* input,
                                                 const std::complex<float>* taps,
                                                 size_t count)
 {
-    return gr::uwb::core::conjugate_dot(input, taps, count);
+    return openuwb::core::conjugate_dot(input, taps, count);
 }
 
 inline const rxopt::SparseCirTemplate* prepare_sparse_sync_template(
@@ -483,4 +483,4 @@ inline bool fold_anchor_fit(const std::complex<float>* rx,
 
 } // namespace detail
 
-} // namespace gr::uwb::demod::core
+} // namespace openuwb::demod::core

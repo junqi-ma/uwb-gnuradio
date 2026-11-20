@@ -19,7 +19,7 @@
 #include <ctime>
 #include <memory>
 #include <array>
-using namespace gr::uwb;
+using namespace openuwb;
 using C = std::complex<float>;
 using Clock = std::chrono::steady_clock;
 namespace fs = std::filesystem;

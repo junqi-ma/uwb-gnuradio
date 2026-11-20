@@ -41,8 +41,7 @@
 #include <immintrin.h>
 #endif
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace sic {
 
 static std::atomic<int> s_force_disable_b3(-1);
@@ -1035,5 +1034,4 @@ DiscreteCirResult fullpacket_cancel_discrete(
 }
 
 } // namespace sic
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

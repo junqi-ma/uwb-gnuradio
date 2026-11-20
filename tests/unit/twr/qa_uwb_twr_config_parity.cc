@@ -107,8 +107,8 @@
 #include <string>
 #include <vector>
 
-namespace twr = gr::uwb::twr;
-using namespace gr::uwb::twr;
+namespace twr = openuwb::twr;
+using namespace openuwb::twr;
 
 #ifndef UWB_TESTDATA_DIR
 #define UWB_TESTDATA_DIR "../../../testdata"

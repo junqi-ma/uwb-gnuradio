@@ -40,8 +40,7 @@
 #include <string>
 #include <vector>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace uhd {
 
 // ---------------------------------------------------------------------------
@@ -650,7 +649,6 @@ inline std::string print_uhd_dry_run_plan(const UhdDryRunPlan& p)
 }
 
 } // namespace uhd
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb
 
 #endif /* INCLUDED_GNURADIO_UWB_UWB_UHD_BACKEND_CONFIG_H */

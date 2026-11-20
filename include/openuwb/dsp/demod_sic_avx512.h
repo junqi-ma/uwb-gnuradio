@@ -49,8 +49,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace core {
 namespace simd {
 namespace avx512 {
@@ -132,5 +131,4 @@ void fold_sfd_window(const gr_complex* rx_base, size_t sym,
 } // namespace avx512
 } // namespace simd
 } // namespace core
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

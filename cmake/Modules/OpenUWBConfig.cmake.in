@@ -1,0 +1,31 @@
+# Native (GNU-Radio-free) package configuration for openUWB.
+#
+# Installed as
+#   <prefix>/<libdir>/cmake/OpenUWB/OpenUWBConfig.cmake
+# and deliberately does NOT find_package(Gnuradio): the openuwb::* targets link
+# only the C++ standard library, VOLK, Threads and (when built with UHD) UHD.
+#
+# Usage:
+#   find_package(OpenUWB CONFIG REQUIRED)
+#   target_link_libraries(app PRIVATE openuwb::runtime)
+#
+# The legacy package name and target spellings (find_package(uwb) +
+# uwb::uwb_native) are kept by the sibling cmake/uwb/uwbConfig.cmake.
+# TODO(openuwb-compat-removal): drop the legacy package in Phase 4.
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+find_dependency(Threads)
+find_dependency(Volk)
+# TRUE unless the UHD dependency of a UHD-enabled build could not be closed
+# (then OpenUWBConfigUhdDep.cmake has already reported why).
+set(OPENUWB_UHD_DEP_OK TRUE)
+@OPENUWB_CONFIG_UHD_DEP@
+if(OPENUWB_UHD_DEP_OK)
+    include("${CMAKE_CURRENT_LIST_DIR}/OpenUWBTargets.cmake")
+    set(OpenUWB_FOUND TRUE)
+else()
+    set(OpenUWB_FOUND FALSE)
+    set(OpenUWB_NOT_FOUND_MESSAGE "${OpenUWB_NOT_FOUND_MESSAGE}")
+endif()

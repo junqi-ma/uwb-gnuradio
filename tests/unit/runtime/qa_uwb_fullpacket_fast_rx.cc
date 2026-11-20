@@ -7,7 +7,7 @@
 #include <utility>
 
 namespace {
-using namespace gr::uwb;
+using namespace openuwb;
 using cf = std::complex<float>;
 
 struct Packet {

@@ -44,13 +44,13 @@
 #include <string>
 #include <vector>
 
-namespace defaults = gr::uwb::defaults;
-using gr::uwb::UwbDetectorStateMachineSc16;
-using gr::uwb::core::UwbPreambleVerifierSc16;
-using gr::uwb::pipeline::PipelineConfig;
-using gr::uwb::pipeline::StreamReadMeta;
-using gr::uwb::pipeline::StreamSourceType;
-using gr::uwb::pipeline::UhdDeviceSc16Source;
+namespace defaults = openuwb::defaults;
+using openuwb::UwbDetectorStateMachineSc16;
+using openuwb::core::UwbPreambleVerifierSc16;
+using openuwb::pipeline::PipelineConfig;
+using openuwb::pipeline::StreamReadMeta;
+using openuwb::pipeline::StreamSourceType;
+using openuwb::pipeline::UhdDeviceSc16Source;
 
 namespace {
 
@@ -471,7 +471,7 @@ int main(int argc, char* argv[])
     verifier.configure(tmpl, vcfg);
     verifier.reserve_coarse(
         opt.pre_trigger + 32 * 100 + tmpl.size() +
-        tmpl.size() * (gr::uwb::core::kUwbSyncSymbols + gr::uwb::core::kUwbSfdSymbols + 4));
+        tmpl.size() * (openuwb::core::kUwbSyncSymbols + openuwb::core::kUwbSfdSymbols + 4));
 
     std::vector<RegionStat> regions;
     std::vector<Packet> packets;

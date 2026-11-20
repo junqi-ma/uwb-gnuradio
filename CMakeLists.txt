@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 cmake_minimum_required(VERSION 3.8)
-project(gr-uwb CXX C)
+# Phase 3: the repository root is the project.  `OpenUWB` is the package name
+# consumers find; targets keep the `openuwb_` prefix (see lib/CMakeLists.txt).
+project(OpenUWB LANGUAGES CXX)
 enable_testing()
 
 set(CMAKE_CXX_STANDARD 17)
@@ -15,7 +17,14 @@ if(UWB_BUILD_GNURADIO)
 endif()
 
 include(GNUInstallDirs)
-set(UWB_DATA_DIR ${CMAKE_INSTALL_DATADIR}/${PROJECT_NAME})
+# Runtime resources (taps, preamble template) live under share/openuwb; the
+# lowercase directory is deliberate, `share/OpenUWB` would look like a casing
+# accident on case-sensitive filesystems.
+set(UWB_DATA_DIR ${CMAKE_INSTALL_DATADIR}/openuwb)
+# Primary package: find_package(OpenUWB CONFIG REQUIRED) + openuwb::* targets.
+set(OPENUWB_CMAKE_DIR ${CMAKE_INSTALL_LIBDIR}/cmake/OpenUWB)
+# Legacy package kept for existing consumers.
+# TODO(openuwb-compat-removal): drop the uwb package once downstream migrated.
 set(UWB_CMAKE_DIR ${CMAKE_INSTALL_LIBDIR}/cmake/uwb)
 
 find_package(Volk REQUIRED)
@@ -50,8 +59,8 @@ option(UWB_SPARSE_MF_AVX512_16LAG
     "Use AVX-512 16-lag batching for sparse ternary matched filtering when AVX-512 is enabled"
     ${_uwb_sparse_mf_avx512_default})
 configure_file(
-    ${CMAKE_CURRENT_SOURCE_DIR}/include/gnuradio/uwb/uwb_simd_config.h.in
-    ${CMAKE_CURRENT_BINARY_DIR}/include/gnuradio/uwb/uwb_simd_config.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/openuwb/support/simd_config.h.in
+    ${CMAKE_CURRENT_BINARY_DIR}/include/openuwb/support/simd_config.h
     @ONLY)
 # The generated header must be visible to every subdirectory (and to the
 # installed consumer, which gets the same file from the install rule).
@@ -122,14 +131,14 @@ endif()
 message(STATUS "UHD backends (ENABLE_UHD_BACKEND=${ENABLE_UHD_BACKEND_UC}): ${UWB_HAVE_UHD}")
 
 if(UWB_HAVE_UHD)
-    # The exported uwb::uwb_native references UHD::UHD; the installed config
+    # The exported openuwb::uwb_native references UHD::UHD; the installed config
     # must define that target even when the consumer's UHD package does not
     # (some UHD packages only set UHD_LIBRARIES/UHD_INCLUDE_DIRS or pkg-config).
     # \${...} escapes keep the consumer-time ${CMAKE_CURRENT_LIST_DIR} literal.
-    set(UWB_CONFIG_UHD_DEP
-        "include(\"\${CMAKE_CURRENT_LIST_DIR}/uwbConfigUhdDep.cmake\")")
+    set(OPENUWB_CONFIG_UHD_DEP
+        "include(\"\${CMAKE_CURRENT_LIST_DIR}/OpenUWBConfigUhdDep.cmake\")")
 else()
-    set(UWB_CONFIG_UHD_DEP "# this build has no UHD dependency")
+    set(OPENUWB_CONFIG_UHD_DEP "# this build has no UHD dependency")
 endif()
 
 
@@ -146,12 +155,23 @@ add_subdirectory(apps)
 add_subdirectory(tests)
 
 include(CMakePackageConfigHelpers)
+# Primary package: find_package(OpenUWB CONFIG REQUIRED) + openuwb::* targets.
+configure_package_config_file(
+    cmake/Modules/OpenUWBConfig.cmake.in
+    ${CMAKE_CURRENT_BINARY_DIR}/OpenUWBConfig.cmake
+    INSTALL_DESTINATION ${OPENUWB_CMAKE_DIR})
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/OpenUWBConfig.cmake
+    cmake/Modules/OpenUWBConfigUhdDep.cmake
+    DESTINATION ${OPENUWB_CMAKE_DIR})
+
+# Legacy package name.  Same exported targets, with the old uwb:: spellings
+# re-created on top.
+# TODO(openuwb-compat-removal): remove the uwb package and its config.
 configure_package_config_file(
     cmake/Modules/uwbConfig.cmake.in
     ${CMAKE_CURRENT_BINARY_DIR}/uwbConfig.cmake
     INSTALL_DESTINATION ${UWB_CMAKE_DIR})
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/uwbConfig.cmake
-    cmake/Modules/uwbConfigUhdDep.cmake
     DESTINATION ${UWB_CMAKE_DIR})
 
 # Install the runtime resources the native live receiver needs (resampler

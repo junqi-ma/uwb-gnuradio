@@ -7101,8 +7101,8 @@ def default_parity_corpus_path() -> str:
     environment variable, no cwd dependence: the corpus is a repository
     artifact and is looked up like one.
     """
-    here = os.path.dirname(os.path.abspath(__file__))   # gr-uwb/python/uwb
-    repo = os.path.dirname(os.path.dirname(os.path.dirname(here)))
+    here = os.path.dirname(os.path.abspath(__file__))   # python/openuwb
+    repo = os.path.dirname(os.path.dirname(here))
     return os.path.join(repo, PARITY_CORPUS_PATH)
 
 

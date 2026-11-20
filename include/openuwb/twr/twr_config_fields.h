@@ -12,8 +12,7 @@
 #define INCLUDED_OPENUWB_TWR_CONFIG_FIELDS_H
 
 #include <openuwb/twr/twr_config_types.h>
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace twr {
 
 // ===========================================================================
@@ -589,7 +588,6 @@ inline bool role_is_known(Role v)
 }
 
 } // namespace twr
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb
 
 #endif /* INCLUDED_OPENUWB_TWR_CONFIG_FIELDS_H */

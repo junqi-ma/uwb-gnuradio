@@ -12,8 +12,7 @@
 #define INCLUDED_OPENUWB_TWR_CONFIG_EFFECTIVE_H
 
 #include <openuwb/twr/twr_config_validator.h>
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace twr {
 
 // ===========================================================================
@@ -2158,7 +2157,6 @@ inline ValidationReport from_json_string(const std::string& text, TwrConfig& out
 }
 
 } // namespace twr
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb
 
 #endif /* INCLUDED_OPENUWB_TWR_CONFIG_EFFECTIVE_H */

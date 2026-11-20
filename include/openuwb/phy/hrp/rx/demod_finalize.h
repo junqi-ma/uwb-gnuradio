@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 #include <openuwb/phy/hrp/rx/demod_result.h>
-namespace gr::uwb::demod::core {
+namespace openuwb::demod::core {
 // Called exactly once on each pipeline exit. Stages use window-local sample
 // positions; only the fields historically published as absolute are rebased.
 // Soft-chip positions and other local diagnostic fields are left unchanged.
@@ -39,4 +39,4 @@ inline void finalize_demod_result(DemodResult& res, const PayloadSubTimers& payl
     if (res.cir.ok)
         res.cir.first_path_sample += window_start;
 }
-} // namespace gr::uwb::demod::core
+} // namespace openuwb::demod::core

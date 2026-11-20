@@ -154,11 +154,11 @@ std::string to_string_u128(unsigned __int128 v)
 
 int main(int argc, char** argv)
 {
-    gr::uwb::uhd::UhdBurstBackendConfig cfg;
+    openuwb::uhd::UhdBurstBackendConfig cfg;
     cfg.clock_source = "internal";
     cfg.time_source = "internal";
 
-    gr::uwb::echo::EchoSchedulerConfig sched;
+    openuwb::echo::EchoSchedulerConfig sched;
     uint64_t tx_samples = 140982;
     uint64_t rx_samples = 55591;
     int64_t t0_ticks = 36864000; // 0.05 s arm delay at 737.28 MS/s
@@ -274,9 +274,9 @@ int main(int argc, char** argv)
             tx_chs.push_back(static_cast<size_t>(u));
         }
         if (tx_chs.empty() ||
-            tx_chs.size() > gr::uwb::echo::kEchoMaxTxChannels) {
+            tx_chs.size() > openuwb::echo::kEchoMaxTxChannels) {
             std::cerr << "dry-run: --tx-channels needs 1.."
-                      << gr::uwb::echo::kEchoMaxTxChannels << " entries\n";
+                      << openuwb::echo::kEchoMaxTxChannels << " entries\n";
             return 2;
         }
         for (size_t i = 0; i < tx_chs.size(); ++i) {
@@ -362,7 +362,7 @@ int main(int argc, char** argv)
     // M1 vector fill when the member exists (same field names as
     // uhd::assign_tx_channels; this TU mirrors it to stay UHD-free).
     if constexpr (HasTxChannels<
-                      gr::uwb::uhd::UhdBurstBackendConfig>::value) {
+                      openuwb::uhd::UhdBurstBackendConfig>::value) {
         cfg.tx_channels.clear();
         for (size_t i = 0; i < ntx; ++i) {
             typename std::decay_t<decltype(cfg.tx_channels)>::value_type e;
@@ -374,22 +374,22 @@ int main(int argc, char** argv)
         }
     }
 
-    gr::uwb::echo::EchoSchedulerPrepared grid;
+    openuwb::echo::EchoSchedulerPrepared grid;
     std::string err;
-    if (!gr::uwb::echo::prepare_echo_scheduler(sched, grid, &err)) {
+    if (!openuwb::echo::prepare_echo_scheduler(sched, grid, &err)) {
         std::cerr << "dry-run: invalid scheduler config: " << err << "\n";
         return 2;
     }
 
-    gr::uwb::uhd::UhdDryRunPlan plan;
-    if (!gr::uwb::uhd::build_uhd_dry_run_plan(
+    openuwb::uhd::UhdDryRunPlan plan;
+    if (!openuwb::uhd::build_uhd_dry_run_plan(
             cfg, grid, t0_ticks, schedule_index, tx_samples, rx_samples,
             plan, &err)) {
         std::cerr << "dry-run: invalid contract: " << err << "\n";
         return 2;
     }
 
-    std::cout << gr::uwb::uhd::print_uhd_dry_run_plan(plan);
+    std::cout << openuwb::uhd::print_uhd_dry_run_plan(plan);
 
     // [multitx] section (M2 §6.3): logical→physical map, per-channel and
     // aggregate (wire) SC16 bytes, active-waveform placeholder, worst-case
@@ -433,21 +433,21 @@ int main(int argc, char** argv)
                   << tx_samples
                   << ") per channel (M3 schedule PDU refines sense/jam "
                      "intervals)\n";
-        gr::uwb::echo::EchoFragmentSpan spans
-            [gr::uwb::echo::kEchoMaxFragmentsPerBurst];
+        openuwb::echo::EchoFragmentSpan spans
+            [openuwb::echo::kEchoMaxFragmentsPerBurst];
         size_t nfr = 0;
-        if (gr::uwb::echo::plan_fragments(tx_samples,
+        if (openuwb::echo::plan_fragments(tx_samples,
                                           grid.max_fragment_size, spans,
-                                          gr::uwb::echo::
+                                          openuwb::echo::
                                               kEchoMaxFragmentsPerBurst,
                                           nfr)) {
             std::cout << "worst_tx_fragments         = " << nfr
                       << " (max_fragment_size=" << grid.max_fragment_size
                       << ", cap="
-                      << gr::uwb::echo::kEchoMaxFragmentsPerBurst << ": ok)\n";
+                      << openuwb::echo::kEchoMaxFragmentsPerBurst << ": ok)\n";
         } else {
             std::cout << "worst_tx_fragments         = EXCEEDS cap "
-                      << gr::uwb::echo::kEchoMaxFragmentsPerBurst
+                      << openuwb::echo::kEchoMaxFragmentsPerBurst
                       << " (max_fragment_size=" << grid.max_fragment_size
                       << ")\n";
         }

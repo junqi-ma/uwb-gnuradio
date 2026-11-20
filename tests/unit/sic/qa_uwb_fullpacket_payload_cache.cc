@@ -7,7 +7,7 @@
 #include <random>
 
 namespace {
-using namespace gr::uwb;
+using namespace openuwb;
 using cf = std::complex<float>;
 constexpr size_t payload_start = 64 * 1016 + 8 * 1016 + 21 * 1024;
 // The encoder concatenates19 PHR input bits with RS bits; the emitted

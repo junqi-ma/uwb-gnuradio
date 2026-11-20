@@ -49,8 +49,7 @@
 #define UWB_CIR_FIR_HAVE_AVX2 0
 #endif
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace demod {
 namespace cir_fir {
 
@@ -180,7 +179,7 @@ dot_volk(const std::complex<float>* rx_win,
          const std::complex<float>* values_natural,
          size_t tap_count)
 {
-    return gr::uwb::core::conjugate_dot(rx_win, values_natural, tap_count);
+    return openuwb::core::conjugate_dot(rx_win, values_natural, tap_count);
 }
 
 // Zero-padded edge of a forward FIR window. Sparse tap indices, when
@@ -395,5 +394,4 @@ static constexpr Kernel kDefaultKernel = Kernel::MultiAcc8;
 
 } // namespace cir_fir
 } // namespace demod
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

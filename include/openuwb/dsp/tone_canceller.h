@@ -25,8 +25,7 @@
 #include <stdexcept>
 #include <vector>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace core {
 
 struct ToneEstimate {
@@ -376,5 +375,4 @@ inline void sc16_to_cf32(const int16_t* interleaved,
 }
 
 } // namespace core
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

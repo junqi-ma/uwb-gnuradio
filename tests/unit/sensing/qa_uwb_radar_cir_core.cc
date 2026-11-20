@@ -33,16 +33,16 @@
 
 namespace {
 
-using gr::uwb::demod::GetPreambleCode;
-using gr::uwb::demod::GetSfdSequence;
-using gr::uwb::demod::kQm35CodeLength;
-using gr::uwb::demod::kQm35SamplesPerSymbol;
-using gr::uwb::radar::prepare_radar_cir_core;
-using gr::uwb::radar::radar_cir_one;
-using gr::uwb::radar::RadarCirConfig;
-using gr::uwb::radar::RadarCirCoreScratch;
-using gr::uwb::radar::RadarCirResult;
-using gr::uwb::radar::RadarCirStatus;
+using openuwb::demod::GetPreambleCode;
+using openuwb::demod::GetSfdSequence;
+using openuwb::demod::kQm35CodeLength;
+using openuwb::demod::kQm35SamplesPerSymbol;
+using openuwb::radar::prepare_radar_cir_core;
+using openuwb::radar::radar_cir_one;
+using openuwb::radar::RadarCirConfig;
+using openuwb::radar::RadarCirCoreScratch;
+using openuwb::radar::RadarCirResult;
+using openuwb::radar::RadarCirStatus;
 
 #ifndef UWB_TESTDATA_DIR
 #define UWB_TESTDATA_DIR "../../../testdata"

@@ -25,7 +25,7 @@
 
 namespace {
 
-using namespace gr::uwb;
+using namespace openuwb;
 using cf = std::complex<float>;
 using cd = std::complex<double>;
 

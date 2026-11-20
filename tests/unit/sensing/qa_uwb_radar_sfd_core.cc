@@ -32,14 +32,14 @@
 
 namespace {
 
-using gr::uwb::demod::GetSfdSequence;
-using gr::uwb::demod::kQm35SamplesPerSymbol;
-using gr::uwb::demod::Qm35825Profile;
-using gr::uwb::radar::prepare_sfd_template;
-using gr::uwb::radar::RadarSfdResult;
-using gr::uwb::radar::RadarSfdScratch;
-using gr::uwb::radar::search_sfd;
-using gr::uwb::radar::SfdStatus;
+using openuwb::demod::GetSfdSequence;
+using openuwb::demod::kQm35SamplesPerSymbol;
+using openuwb::demod::Qm35825Profile;
+using openuwb::radar::prepare_sfd_template;
+using openuwb::radar::RadarSfdResult;
+using openuwb::radar::RadarSfdScratch;
+using openuwb::radar::search_sfd;
+using openuwb::radar::SfdStatus;
 
 #ifndef UWB_TESTDATA_DIR
 #define UWB_TESTDATA_DIR "../../../testdata"

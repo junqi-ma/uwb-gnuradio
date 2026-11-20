@@ -70,8 +70,7 @@
 #include <limits>
 #include <vector>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace demod {
 namespace rxfusion {
 
@@ -1915,5 +1914,4 @@ inline bool correlate_phr_known_hop(const std::complex<float>* rx,
 
 } // namespace rxfusion
 } // namespace demod
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

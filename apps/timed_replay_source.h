@@ -21,8 +21,7 @@
 #include <gnuradio/uwb/uwb_timed_rx_plan.h>
 #include <gnuradio/uwb/uwb_uhd_sc16_pipeline.h>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace live {
 
 // ---------------------------------------------------------------------------
@@ -188,7 +187,6 @@ private:
 };
 
 } // namespace live
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb
 
 #endif /* GR_UWB_TIMED_REPLAY_SOURCE_H */

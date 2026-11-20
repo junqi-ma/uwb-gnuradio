@@ -22,10 +22,10 @@
 
 namespace {
 
-using gr::uwb::live::AutocorrGate;
-using gr::uwb::live::AutocorrWhenLocked;
-using gr::uwb::live::parse_autocorr_when_locked;
-using gr::uwb::live::resolve_autocorr_suspend;
+using openuwb::live::AutocorrGate;
+using openuwb::live::AutocorrWhenLocked;
+using openuwb::live::parse_autocorr_when_locked;
+using openuwb::live::resolve_autocorr_suspend;
 
 AutocorrGate make_gate(bool enabled)
 {

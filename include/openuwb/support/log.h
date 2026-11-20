@@ -37,8 +37,7 @@
 #include <string_view>
 #include <utility>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace log {
 
 enum class Level { Off = 0, Error = 1, Warn = 2, Info = 3, Debug = 4 };
@@ -208,47 +207,46 @@ inline void emit(Level level, std::string_view tag, std::string_view message)
 }
 
 } // namespace log
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb
 
 /// ostream-style logging macros with strict lazy evaluation: when the level is
 /// filtered out, no argument expression is evaluated at all.
 #define UWB_LOG_ERR(tag, ...)                                                  \
     do {                                                                       \
-        if (::gr::uwb::log::enabled(::gr::uwb::log::Level::Error)) {           \
+        if (::openuwb::log::enabled(::openuwb::log::Level::Error)) {           \
             std::ostringstream uwb_log_oss;                                    \
             uwb_log_oss << __VA_ARGS__;                                        \
-            ::gr::uwb::log::emit(::gr::uwb::log::Level::Error, (tag),          \
+            ::openuwb::log::emit(::openuwb::log::Level::Error, (tag),          \
                                  uwb_log_oss.str());                           \
         }                                                                      \
     } while (false)
 
 #define UWB_LOG_WARN(tag, ...)                                                 \
     do {                                                                       \
-        if (::gr::uwb::log::enabled(::gr::uwb::log::Level::Warn)) {            \
+        if (::openuwb::log::enabled(::openuwb::log::Level::Warn)) {            \
             std::ostringstream uwb_log_oss;                                    \
             uwb_log_oss << __VA_ARGS__;                                        \
-            ::gr::uwb::log::emit(::gr::uwb::log::Level::Warn, (tag),           \
+            ::openuwb::log::emit(::openuwb::log::Level::Warn, (tag),           \
                                  uwb_log_oss.str());                           \
         }                                                                      \
     } while (false)
 
 #define UWB_LOG_INFO(tag, ...)                                                 \
     do {                                                                       \
-        if (::gr::uwb::log::enabled(::gr::uwb::log::Level::Info)) {            \
+        if (::openuwb::log::enabled(::openuwb::log::Level::Info)) {            \
             std::ostringstream uwb_log_oss;                                    \
             uwb_log_oss << __VA_ARGS__;                                        \
-            ::gr::uwb::log::emit(::gr::uwb::log::Level::Info, (tag),           \
+            ::openuwb::log::emit(::openuwb::log::Level::Info, (tag),           \
                                  uwb_log_oss.str());                           \
         }                                                                      \
     } while (false)
 
 #define UWB_LOG_DEBUG(tag, ...)                                                \
     do {                                                                       \
-        if (::gr::uwb::log::enabled(::gr::uwb::log::Level::Debug)) {           \
+        if (::openuwb::log::enabled(::openuwb::log::Level::Debug)) {           \
             std::ostringstream uwb_log_oss;                                    \
             uwb_log_oss << __VA_ARGS__;                                        \
-            ::gr::uwb::log::emit(::gr::uwb::log::Level::Debug, (tag),          \
+            ::openuwb::log::emit(::openuwb::log::Level::Debug, (tag),          \
                                  uwb_log_oss.str());                           \
         }                                                                      \
     } while (false)

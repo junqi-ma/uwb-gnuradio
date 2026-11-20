@@ -6,7 +6,7 @@
  *
  * S0/S1 preamble-only SIC math core (S1 contract:
  * docs/sic/S1_八符号模型API.md; S0 contract: docs/sic/S0_sic_core_api.md).
- * Namespace gr::uwb::sic.
+ * Namespace openuwb::sic.
  *
  * This is the PURE math core of the detection-triggered preamble SIC branch.
  * It has NO GNU Radio types, NO scheduler, NO file I/O and does NOT allocate
@@ -62,8 +62,7 @@
 #include <string>
 #include <vector>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace sic {
 
 // ---------------------------------------------------------------------------
@@ -721,5 +720,4 @@ UWB_API bool sic_one(const std::complex<float>* y,
                      const SicTruth* truth = nullptr);
 
 } // namespace sic
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

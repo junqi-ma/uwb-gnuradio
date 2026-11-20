@@ -23,8 +23,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace demod {
 
 // ---------------------------------------------------------------------------
@@ -453,5 +452,4 @@ struct DemodTolerance {
 };
 
 } // namespace demod
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

@@ -19,21 +19,21 @@
 #include <unistd.h>
 #include <vector>
 
-using gr::uwb::core::DemodResultMeta;
-using gr::uwb::core::DumpWindowMeta;
-using gr::uwb::core::json_f64;
-using gr::uwb::core::json_i64;
-using gr::uwb::core::json_str;
-using gr::uwb::core::JsonField;
-using gr::uwb::core::load_capture_jsonl;
-using gr::uwb::core::load_demod_jsonl;
-using gr::uwb::core::parse_demod_jsonl_line;
-using gr::uwb::core::parse_dump_jsonl_line;
-using gr::uwb::core::plan_window_crop;
-using gr::uwb::core::read_sc16_window;
-using gr::uwb::core::WindowCropGeom;
-using gr::uwb::core::write_json_object;
-using gr::uwb::core::write_sc16_window;
+using openuwb::core::DemodResultMeta;
+using openuwb::core::DumpWindowMeta;
+using openuwb::core::json_f64;
+using openuwb::core::json_i64;
+using openuwb::core::json_str;
+using openuwb::core::JsonField;
+using openuwb::core::load_capture_jsonl;
+using openuwb::core::load_demod_jsonl;
+using openuwb::core::parse_demod_jsonl_line;
+using openuwb::core::parse_dump_jsonl_line;
+using openuwb::core::plan_window_crop;
+using openuwb::core::read_sc16_window;
+using openuwb::core::WindowCropGeom;
+using openuwb::core::write_json_object;
+using openuwb::core::write_sc16_window;
 
 BOOST_AUTO_TEST_CASE(test_parse_writer_style_jsonl)
 {

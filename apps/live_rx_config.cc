@@ -17,8 +17,7 @@
 
 #include <gnuradio/uwb/uwb_autocorr_gate.h>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace live {
 
 // Runtime resource root for the resampler taps + preamble template.
@@ -219,5 +218,4 @@ void validate_live_rx_config(LiveRxConfig& o)
 }
 
 } // namespace live
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

@@ -1,24 +1,48 @@
-# Native (GNU-Radio-free) package configuration for the gr-uwb core.
+# LEGACY package name: find_package(uwb CONFIG REQUIRED).
 #
-# Installed as
+# Phase 3 made `OpenUWB` the project and `openuwb::*` the exported targets.
+# Existing consumers still call find_package(uwb) and link uwb::uwb_native /
+# uwb::uwb_core / uwb::uwb_twr_core, so this config replays the same
+# dependency closure over the SAME target file and then re-creates the old
+# target spellings as thin INTERFACE IMPORTED aliases.
+#
+# It is installed next to the primary package:
 #   <prefix>/<libdir>/cmake/uwb/uwbConfig.cmake
-# and deliberately does NOT find_package(Gnuradio): the uwb::uwb_core /
-# uwb::uwb_native targets link only the C++ standard library, VOLK, Threads
-# and (when built with UHD) UHD.
+#   <prefix>/<libdir>/cmake/OpenUWB/OpenUWBConfig.cmake
+# so the relative include below stays relocatable.
 #
-# Usage:
-#   find_package(uwb CONFIG REQUIRED)
-#   target_link_libraries(app PRIVATE uwb::uwb_native)
+# TODO(openuwb-compat-removal): delete this package once downstream projects
+# use find_package(OpenUWB) and the openuwb:: target names.
+@PACKAGE_INIT@
 
 include(CMakeFindDependencyMacro)
 
 find_dependency(Threads)
 find_dependency(Volk)
-# TRUE unless the UHD dependency of a UHD-enabled build could not be closed
-# (then uwbConfigUhdDep.cmake has already set uwb_FOUND FALSE and the
-# uwbTargets include below is skipped).
-set(UWB_UHD_DEP_OK TRUE)
-@UWB_CONFIG_UHD_DEP@
-if(UWB_UHD_DEP_OK)
-    include("${CMAKE_CURRENT_LIST_DIR}/uwbTargets.cmake")
+set(OPENUWB_UHD_DEP_OK TRUE)
+include("${CMAKE_CURRENT_LIST_DIR}/../OpenUWB/OpenUWBConfigUhdDep.cmake")
+if(NOT OPENUWB_UHD_DEP_OK)
+    set(uwb_FOUND FALSE)
+    set(uwb_NOT_FOUND_MESSAGE "${OpenUWB_NOT_FOUND_MESSAGE}")
+    return()
 endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/../OpenUWB/OpenUWBTargets.cmake")
+
+# TODO(openuwb-compat-removal): legacy target names.  Each one forwards to the
+# real imported target, so there is exactly one set of link interfaces.
+foreach(_uwb_legacy_pair
+        "uwb_core;uwb_core"
+        "uwb_native;uwb_native"
+        "uwb_twr_core;twr_core"
+        "uwb_twr_phy;twr_phy")
+    list(GET _uwb_legacy_pair 0 _uwb_old)
+    list(GET _uwb_legacy_pair 1 _uwb_new)
+    if(NOT TARGET uwb::${_uwb_old})
+        add_library(uwb::${_uwb_old} INTERFACE IMPORTED)
+        set_target_properties(uwb::${_uwb_old} PROPERTIES
+            INTERFACE_LINK_LIBRARIES openuwb::${_uwb_new})
+    endif()
+endforeach()
+
+set(uwb_FOUND TRUE)

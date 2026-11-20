@@ -45,8 +45,7 @@
 #include <mutex>
 #include <vector>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace core {
 
 // ---------------------------------------------------------------------------
@@ -651,5 +650,4 @@ inline std::vector<PhysicalRxInterval> merge_physical_rx_intervals(
 }
 
 } // namespace core
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

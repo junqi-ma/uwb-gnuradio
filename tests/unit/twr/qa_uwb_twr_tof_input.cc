@@ -50,66 +50,66 @@ namespace test_tools {
 namespace tt_detail {
 
 template <>
-struct print_log_value<gr::uwb::twr::ExchangeStatus> {
-    void operator()(std::ostream& os, gr::uwb::twr::ExchangeStatus const& s) const
+struct print_log_value<openuwb::twr::ExchangeStatus> {
+    void operator()(std::ostream& os, openuwb::twr::ExchangeStatus const& s) const
     {
-        os << gr::uwb::twr::exchange_status_to_string(s);
+        os << openuwb::twr::exchange_status_to_string(s);
     }
 };
 
 template <>
-struct print_log_value<gr::uwb::twr::TimeIntervalStatus> {
-    void operator()(std::ostream& os, gr::uwb::twr::TimeIntervalStatus const& s) const
+struct print_log_value<openuwb::twr::TimeIntervalStatus> {
+    void operator()(std::ostream& os, openuwb::twr::TimeIntervalStatus const& s) const
     {
-        os << gr::uwb::twr::time_interval_status_to_string(s);
+        os << openuwb::twr::time_interval_status_to_string(s);
     }
 };
 
 template <>
-struct print_log_value<gr::uwb::twr::TimestampMarker> {
-    void operator()(std::ostream& os, gr::uwb::twr::TimestampMarker const& m) const
+struct print_log_value<openuwb::twr::TimestampMarker> {
+    void operator()(std::ostream& os, openuwb::twr::TimestampMarker const& m) const
     {
-        os << gr::uwb::twr::timestamp_marker_to_string(m);
+        os << openuwb::twr::timestamp_marker_to_string(m);
     }
 };
 
 template <>
-struct print_log_value<gr::uwb::twr::RangeAdmissionReason> {
-    void operator()(std::ostream& os, gr::uwb::twr::RangeAdmissionReason const& r) const
+struct print_log_value<openuwb::twr::RangeAdmissionReason> {
+    void operator()(std::ostream& os, openuwb::twr::RangeAdmissionReason const& r) const
     {
-        os << gr::uwb::twr::range_admission_reason_to_string(r);
+        os << openuwb::twr::range_admission_reason_to_string(r);
     }
 };
 
 template <>
-struct print_log_value<gr::uwb::twr::RangeTimeSide> {
-    void operator()(std::ostream& os, gr::uwb::twr::RangeTimeSide const& s) const
+struct print_log_value<openuwb::twr::RangeTimeSide> {
+    void operator()(std::ostream& os, openuwb::twr::RangeTimeSide const& s) const
     {
-        os << gr::uwb::twr::range_time_side_to_string(s);
+        os << openuwb::twr::range_time_side_to_string(s);
     }
 };
 
 template <>
-struct print_log_value<gr::uwb::twr::FirstPathDecision> {
-    void operator()(std::ostream& os, gr::uwb::twr::FirstPathDecision const& d) const
+struct print_log_value<openuwb::twr::FirstPathDecision> {
+    void operator()(std::ostream& os, openuwb::twr::FirstPathDecision const& d) const
     {
-        os << gr::uwb::twr::first_path_decision_to_string(d);
+        os << openuwb::twr::first_path_decision_to_string(d);
     }
 };
 
 template <>
-struct print_log_value<gr::uwb::twr::TimestampSource> {
-    void operator()(std::ostream& os, gr::uwb::twr::TimestampSource const& s) const
+struct print_log_value<openuwb::twr::TimestampSource> {
+    void operator()(std::ostream& os, openuwb::twr::TimestampSource const& s) const
     {
-        os << gr::uwb::twr::timestamp_source_to_string(s);
+        os << openuwb::twr::timestamp_source_to_string(s);
     }
 };
 
 template <>
-struct print_log_value<gr::uwb::twr::CalibrationResult> {
-    void operator()(std::ostream& os, gr::uwb::twr::CalibrationResult const& r) const
+struct print_log_value<openuwb::twr::CalibrationResult> {
+    void operator()(std::ostream& os, openuwb::twr::CalibrationResult const& r) const
     {
-        os << gr::uwb::twr::calibration_result_to_string(r);
+        os << openuwb::twr::calibration_result_to_string(r);
     }
 };
 
@@ -120,36 +120,36 @@ struct print_log_value<gr::uwb::twr::CalibrationResult> {
 
 namespace {
 
-using gr::uwb::twr::AdmittedRangingInterval;
-using gr::uwb::twr::admit_ranging_interval;
-using gr::uwb::twr::admit_range_capable_time;
-using gr::uwb::twr::CalibrationApplication;
-using gr::uwb::twr::CalibrationResult;
-using gr::uwb::twr::CalibrationStamp;
-using gr::uwb::twr::ExchangeStatus;
-using gr::uwb::twr::FirstPathDecision;
-using gr::uwb::twr::FirstPathQuality;
-using gr::uwb::twr::Duration;
-using gr::uwb::twr::kRangeAdmissionReasonMax;
-using gr::uwb::twr::RangeAdmission;
-using gr::uwb::twr::RangeAdmissionContext;
-using gr::uwb::twr::RangeAdmissionReason;
-using gr::uwb::twr::range_admission_reason_from_string;
-using gr::uwb::twr::range_admission_reason_to_exchange_status;
-using gr::uwb::twr::range_admission_reason_to_string;
-using gr::uwb::twr::RangeCapableTime;
-using gr::uwb::twr::RangingIntervalAdmission;
-using gr::uwb::twr::RangeTimeSide;
-using gr::uwb::twr::RelativeTickInterval;
-using gr::uwb::twr::TimeInterval;
-using gr::uwb::twr::TimeIntervalStatus;
-using gr::uwb::twr::timestamp_interval;
-using gr::uwb::twr::Timestamp;
-using gr::uwb::twr::TimestampMarker;
-using gr::uwb::twr::TimestampSource;
-using gr::uwb::twr::tx_outcome_is_known;
-using gr::uwb::twr::TxOutcome;
-using gr::uwb::twr::TxSendEvidence;
+using openuwb::twr::AdmittedRangingInterval;
+using openuwb::twr::admit_ranging_interval;
+using openuwb::twr::admit_range_capable_time;
+using openuwb::twr::CalibrationApplication;
+using openuwb::twr::CalibrationResult;
+using openuwb::twr::CalibrationStamp;
+using openuwb::twr::ExchangeStatus;
+using openuwb::twr::FirstPathDecision;
+using openuwb::twr::FirstPathQuality;
+using openuwb::twr::Duration;
+using openuwb::twr::kRangeAdmissionReasonMax;
+using openuwb::twr::RangeAdmission;
+using openuwb::twr::RangeAdmissionContext;
+using openuwb::twr::RangeAdmissionReason;
+using openuwb::twr::range_admission_reason_from_string;
+using openuwb::twr::range_admission_reason_to_exchange_status;
+using openuwb::twr::range_admission_reason_to_string;
+using openuwb::twr::RangeCapableTime;
+using openuwb::twr::RangingIntervalAdmission;
+using openuwb::twr::RangeTimeSide;
+using openuwb::twr::RelativeTickInterval;
+using openuwb::twr::TimeInterval;
+using openuwb::twr::TimeIntervalStatus;
+using openuwb::twr::timestamp_interval;
+using openuwb::twr::Timestamp;
+using openuwb::twr::TimestampMarker;
+using openuwb::twr::TimestampSource;
+using openuwb::twr::tx_outcome_is_known;
+using openuwb::twr::TxOutcome;
+using openuwb::twr::TxSendEvidence;
 
 // ---------------------------------------------------------------------------
 // Expected correction masks, written out by hand from the requirement text
@@ -234,35 +234,35 @@ struct has_seconds_member<T, std::void_t<decltype(std::declval<const T&>().secon
 // ---------------------------------------------------------------------------
 
 // DW UUS grid: 1/(499.2e6*128) s per tick ~ 15.645 ps, 40-bit wire field.
-bool make_uus_domain(gr::uwb::twr::ClockDomain& out,
+bool make_uus_domain(openuwb::twr::ClockDomain& out,
                      const std::string& name = "dw1000_sn0001_ch5_uus",
                      uint64_t epoch = 7u,
                      uint32_t bits = 40u)
 {
-    return gr::uwb::twr::ClockDomain::make(name, 499.2e6 * 128.0, epoch, bits, out);
+    return openuwb::twr::ClockDomain::make(name, 499.2e6 * 128.0, epoch, bits, out);
 }
 
 bool make_raw_iq_sample(int64_t ticks,
-                        const gr::uwb::twr::ClockDomain& domain,
+                        const openuwb::twr::ClockDomain& domain,
                         Timestamp& out)
 {
     // EXACTLY the reviewer's reproducer inputs.
     return Timestamp::from_ticks(ticks, domain, TimestampMarker::UhdRxFirstIqSample,
                                  TimestampSource::HardwareMeasured,
-                                 gr::uwb::twr::kCorrectionNone, out);
+                                 openuwb::twr::kCorrectionNone, out);
 }
 
 bool make_mapped(int64_t ticks,
                  TimestampMarker marker,
                  uint32_t corrections,
-                 const gr::uwb::twr::ClockDomain& domain,
+                 const openuwb::twr::ClockDomain& domain,
                  Timestamp& out)
 {
     Timestamp ts;
     if (!Timestamp::from_ticks(ticks, domain, marker, TimestampSource::HardwareMeasured,
                                corrections, ts))
         return false;
-    if (gr::uwb::twr::apply_calibration_ticks(ts, "cal-dw1000-sn0001-ch5-uus-r1", 0, 0, 0u,
+    if (openuwb::twr::apply_calibration_ticks(ts, "cal-dw1000-sn0001-ch5-uus-r1", 0, 0, 0u,
                                                0u) != CalibrationResult::Applied)
         return false;
     out = ts;
@@ -294,7 +294,7 @@ CalibrationStamp good_calibration(uint64_t epoch = 7u,
 
 BOOST_AUTO_TEST_CASE(tof_r6_raw_iq_sample_pair_is_refused_as_ranging_input)
 {
-    gr::uwb::twr::ClockDomain d;
+    openuwb::twr::ClockDomain d;
     BOOST_REQUIRE(make_uus_domain(d));
 
     Timestamp a;
@@ -351,7 +351,7 @@ BOOST_AUTO_TEST_CASE(tof_rmarker_without_the_rmarker_offset_is_refused)
     // A corrected RX chain whose RMARKER <-> waveform mapping was never
     // applied: the corrections for `RmarkerRx` are one bit short, and the
     // refusal must NAME that bit rather than report a generic failure.
-    gr::uwb::twr::ClockDomain d;
+    openuwb::twr::ClockDomain d;
     BOOST_REQUIRE(make_uus_domain(d));
 
     const uint32_t missing_one = kBitRmarkerOffset;
@@ -384,7 +384,7 @@ BOOST_AUTO_TEST_CASE(tof_rmarker_without_the_rmarker_offset_is_refused)
 
 BOOST_AUTO_TEST_CASE(tof_fully_evidenced_rmarker_pair_is_admitted)
 {
-    gr::uwb::twr::ClockDomain d;
+    openuwb::twr::ClockDomain d;
     BOOST_REQUIRE(make_uus_domain(d));
 
     Timestamp rx;
@@ -439,7 +439,7 @@ BOOST_AUTO_TEST_CASE(tof_antenna_plane_marker_is_range_capable)
 {
     // REQ-TIME-02 puts the calibrated antenna reference plane in the same
     // family as the protocol RMARKER: both denote an on-air instant.
-    gr::uwb::twr::ClockDomain d;
+    openuwb::twr::ClockDomain d;
     BOOST_REQUIRE(make_uus_domain(d));
 
     Timestamp plane;
@@ -463,7 +463,7 @@ BOOST_AUTO_TEST_CASE(tof_sub_mid_preamble_and_sfd_are_not_range_capable)
 {
     // Those are waveform-geometry coordinates, not protocol instants.  Even
     // with the full RX chain they must not become ranging inputs.
-    gr::uwb::twr::ClockDomain d;
+    openuwb::twr::ClockDomain d;
     BOOST_REQUIRE(make_uus_domain(d));
     const CalibrationStamp cal = good_calibration();
     RangeAdmissionContext ctx;
@@ -497,7 +497,7 @@ BOOST_AUTO_TEST_CASE(tof_scheduled_calibrated_source_is_permitted_only_with_send
     // that a scheduled TX must be refused -- which would have blocked the
     // planned X410 timed-TX route and pushed the pipeline toward mislabelling
     // its own timestamps as HardwareMeasured.
-    gr::uwb::twr::ClockDomain d;
+    openuwb::twr::ClockDomain d;
     BOOST_REQUIRE(make_uus_domain(d));
 
     // (1) A scheduled RECEIVE time is still refused: it is a PREDICTION.
@@ -505,7 +505,7 @@ BOOST_AUTO_TEST_CASE(tof_scheduled_calibrated_source_is_permitted_only_with_send
     BOOST_REQUIRE(Timestamp::from_ticks(9000, d, TimestampMarker::RmarkerRx,
                                         TimestampSource::ScheduledCalibrated,
                                         mask_of(rmarker_rx_bits()), ts));
-    BOOST_TEST(gr::uwb::twr::apply_calibration_ticks(
+    BOOST_TEST(openuwb::twr::apply_calibration_ticks(
                    ts, "cal-dw1000-sn0001-ch5-uus-r1", 0, 0, 0u, 0u) ==
                CalibrationResult::Applied);
 
@@ -528,7 +528,7 @@ BOOST_AUTO_TEST_CASE(tof_scheduled_calibrated_source_is_permitted_only_with_send
     BOOST_REQUIRE(Timestamp::from_ticks(5000, d, TimestampMarker::RmarkerTx,
                                         TimestampSource::ScheduledCalibrated,
                                         mask_of(rmarker_tx_bits()), txs));
-    BOOST_TEST(gr::uwb::twr::apply_calibration_ticks(
+    BOOST_TEST(openuwb::twr::apply_calibration_ticks(
                    txs, "cal-dw1000-sn0001-ch5-uus-r1", 0, 0, 0u, 0u) ==
                CalibrationResult::Applied);
 
@@ -624,13 +624,13 @@ BOOST_AUTO_TEST_CASE(tof_scheduled_calibrated_source_is_permitted_only_with_send
 // publish a ranging instant.
 BOOST_AUTO_TEST_CASE(tof_out_of_domain_tx_outcome_is_refused)
 {
-    gr::uwb::twr::ClockDomain d;
+    openuwb::twr::ClockDomain d;
     BOOST_REQUIRE(make_uus_domain(d));
     Timestamp txs;
     BOOST_REQUIRE(Timestamp::from_ticks(5000, d, TimestampMarker::RmarkerTx,
                                         TimestampSource::ScheduledCalibrated,
                                         mask_of(rmarker_tx_bits()), txs));
-    BOOST_TEST(gr::uwb::twr::apply_calibration_ticks(
+    BOOST_TEST(openuwb::twr::apply_calibration_ticks(
                    txs, "cal-dw1000-sn0001-ch5-uus-r1", 0, 0, 0u, 0u) ==
                CalibrationResult::Applied);
 
@@ -682,7 +682,7 @@ BOOST_AUTO_TEST_CASE(tof_out_of_domain_tx_outcome_is_refused)
 
 BOOST_AUTO_TEST_CASE(tof_estimated_and_reconstructed_sources_are_refused)
 {
-    gr::uwb::twr::ClockDomain d;
+    openuwb::twr::ClockDomain d;
     BOOST_REQUIRE(make_uus_domain(d));
     const CalibrationStamp cal = good_calibration();
     RangeAdmissionContext ctx;
@@ -696,7 +696,7 @@ BOOST_AUTO_TEST_CASE(tof_estimated_and_reconstructed_sources_are_refused)
         Timestamp ts;
         BOOST_REQUIRE(Timestamp::from_ticks(9000, d, TimestampMarker::RmarkerRx, s,
                                             mask_of(rmarker_rx_bits()), ts));
-        BOOST_TEST(gr::uwb::twr::apply_calibration_ticks(
+        BOOST_TEST(openuwb::twr::apply_calibration_ticks(
                        ts, "cal-dw1000-sn0001-ch5-uus-r1", 0, 0, 0u, 0u) ==
                    CalibrationResult::Applied);
         const RangeAdmission r = admit_range_capable_time(ts, ctx);
@@ -711,7 +711,7 @@ BOOST_AUTO_TEST_CASE(tof_estimated_and_reconstructed_sources_are_refused)
 
 BOOST_AUTO_TEST_CASE(tof_every_missing_rx_correction_is_named)
 {
-    gr::uwb::twr::ClockDomain d;
+    openuwb::twr::ClockDomain d;
     BOOST_REQUIRE(make_uus_domain(d));
     const CalibrationStamp cal = good_calibration();
     RangeAdmissionContext ctx;
@@ -729,7 +729,7 @@ BOOST_AUTO_TEST_CASE(tof_every_missing_rx_correction_is_named)
         BOOST_TEST(!r.admitted);
         BOOST_TEST(r.reason == RangeAdmissionReason::MissingCorrection);
         BOOST_TEST(r.missing_correction == bit);
-        BOOST_TEST(r.detail.find(gr::uwb::twr::timestamp_correction_name(bit)) !=
+        BOOST_TEST(r.detail.find(openuwb::twr::timestamp_correction_name(bit)) !=
                    std::string::npos);
         BOOST_TEST(!r.value.has_value());
     }
@@ -737,7 +737,7 @@ BOOST_AUTO_TEST_CASE(tof_every_missing_rx_correction_is_named)
 
 BOOST_AUTO_TEST_CASE(tof_every_missing_tx_correction_is_named)
 {
-    gr::uwb::twr::ClockDomain d;
+    openuwb::twr::ClockDomain d;
     BOOST_REQUIRE(make_uus_domain(d));
     const CalibrationStamp cal = good_calibration();
     RangeAdmissionContext ctx;
@@ -759,7 +759,7 @@ BOOST_AUTO_TEST_CASE(tof_every_missing_tx_correction_is_named)
 
 BOOST_AUTO_TEST_CASE(tof_every_missing_antenna_plane_correction_is_named)
 {
-    gr::uwb::twr::ClockDomain d;
+    openuwb::twr::ClockDomain d;
     BOOST_REQUIRE(make_uus_domain(d));
     const CalibrationStamp cal = good_calibration();
     RangeAdmissionContext ctx;
@@ -786,7 +786,7 @@ BOOST_AUTO_TEST_CASE(tof_every_missing_antenna_plane_correction_is_named)
 
 BOOST_AUTO_TEST_CASE(tof_missing_calibration_is_refused)
 {
-    gr::uwb::twr::ClockDomain d;
+    openuwb::twr::ClockDomain d;
     BOOST_REQUIRE(make_uus_domain(d));
 
     // Fully corrected and measured, but never calibrated.
@@ -810,7 +810,7 @@ BOOST_AUTO_TEST_CASE(tof_missing_calibration_is_refused)
 
 BOOST_AUTO_TEST_CASE(tof_absent_or_empty_calibration_context_is_refused)
 {
-    gr::uwb::twr::ClockDomain d;
+    openuwb::twr::ClockDomain d;
     BOOST_REQUIRE(make_uus_domain(d));
     Timestamp ts;
     BOOST_REQUIRE(make_mapped(9000, TimestampMarker::RmarkerRx, mask_of(rmarker_rx_bits()),
@@ -852,7 +852,7 @@ BOOST_AUTO_TEST_CASE(tof_absent_or_empty_calibration_context_is_refused)
 
 BOOST_AUTO_TEST_CASE(tof_calibration_applied_twice_is_refused)
 {
-    gr::uwb::twr::ClockDomain d;
+    openuwb::twr::ClockDomain d;
     BOOST_REQUIRE(make_uus_domain(d));
     Timestamp ts;
     BOOST_REQUIRE(make_mapped(9000, TimestampMarker::RmarkerRx, mask_of(rmarker_rx_bits()),
@@ -921,7 +921,7 @@ BOOST_AUTO_TEST_CASE(tof_calibration_applied_twice_is_refused)
 
 BOOST_AUTO_TEST_CASE(tof_calibration_id_mismatch_is_refused)
 {
-    gr::uwb::twr::ClockDomain d;
+    openuwb::twr::ClockDomain d;
     BOOST_REQUIRE(make_uus_domain(d));
     Timestamp ts;
     BOOST_REQUIRE(make_mapped(9000, TimestampMarker::RmarkerRx, mask_of(rmarker_rx_bits()),
@@ -945,7 +945,7 @@ BOOST_AUTO_TEST_CASE(tof_calibration_id_mismatch_is_refused)
 
 BOOST_AUTO_TEST_CASE(tof_stale_calibration_is_refused)
 {
-    gr::uwb::twr::ClockDomain d;
+    openuwb::twr::ClockDomain d;
     BOOST_REQUIRE(make_uus_domain(d));
     Timestamp ts;
     BOOST_REQUIRE(make_mapped(9000, TimestampMarker::RmarkerRx, mask_of(rmarker_rx_bits()),
@@ -1029,7 +1029,7 @@ BOOST_AUTO_TEST_CASE(tof_stale_calibration_is_refused)
 
 BOOST_AUTO_TEST_CASE(tof_first_path_quality_gate)
 {
-    gr::uwb::twr::ClockDomain d;
+    openuwb::twr::ClockDomain d;
     BOOST_REQUIRE(make_uus_domain(d));
     Timestamp rx;
     BOOST_REQUIRE(make_mapped(9000, TimestampMarker::RmarkerRx, mask_of(rmarker_rx_bits()),
@@ -1117,8 +1117,8 @@ BOOST_AUTO_TEST_CASE(tof_first_path_quality_gate)
 
 BOOST_AUTO_TEST_CASE(tof_cross_epoch_pair_is_refused)
 {
-    gr::uwb::twr::ClockDomain d7;
-    gr::uwb::twr::ClockDomain d8;
+    openuwb::twr::ClockDomain d7;
+    openuwb::twr::ClockDomain d8;
     BOOST_REQUIRE(make_uus_domain(d7, "dw1000_sn0001_ch5_uus", 7u, 40u));
     BOOST_REQUIRE(make_uus_domain(d8, "dw1000_sn0001_ch5_uus", 8u, 40u));
 
@@ -1170,10 +1170,10 @@ BOOST_AUTO_TEST_CASE(tof_cross_domain_pair_is_refused)
     };
 
     for (const Case& c : cases) {
-        gr::uwb::twr::ClockDomain a;
-        gr::uwb::twr::ClockDomain b;
+        openuwb::twr::ClockDomain a;
+        openuwb::twr::ClockDomain b;
         BOOST_REQUIRE(make_uus_domain(a));
-        BOOST_REQUIRE(gr::uwb::twr::ClockDomain::make(c.other_name, c.other_rate, 7u,
+        BOOST_REQUIRE(openuwb::twr::ClockDomain::make(c.other_name, c.other_rate, 7u,
                                                      c.other_bits, b));
 
         Timestamp ta;
@@ -1205,7 +1205,7 @@ BOOST_AUTO_TEST_CASE(tof_cross_domain_pair_is_refused)
 
 BOOST_AUTO_TEST_CASE(tof_disallowed_marker_pair_is_refused)
 {
-    gr::uwb::twr::ClockDomain d;
+    openuwb::twr::ClockDomain d;
     BOOST_REQUIRE(make_uus_domain(d));
     const CalibrationStamp cal = good_calibration();
     RangeAdmissionContext ctx;
@@ -1240,7 +1240,7 @@ BOOST_AUTO_TEST_CASE(tof_residual_interval_failure_is_surfaced)
     // Two individually perfect RMARKERs that are more than half a wrap period
     // apart: the modular difference is ambiguous, so the pair is refused with
     // the underlying interval status attached rather than guessed.
-    gr::uwb::twr::ClockDomain d;
+    openuwb::twr::ClockDomain d;
     BOOST_REQUIRE(make_uus_domain(d));
     const CalibrationStamp cal = good_calibration();
     RangeAdmissionContext ctx;
@@ -1275,7 +1275,7 @@ BOOST_AUTO_TEST_CASE(tof_residual_interval_failure_is_surfaced)
 
 BOOST_AUTO_TEST_CASE(tof_admitted_interval_is_lossless_and_carries_no_nanoseconds)
 {
-    gr::uwb::twr::ClockDomain d;
+    openuwb::twr::ClockDomain d;
     BOOST_REQUIRE(make_uus_domain(d));
     const CalibrationStamp cal = good_calibration();
     RangeAdmissionContext ctx;
@@ -1292,7 +1292,7 @@ BOOST_AUTO_TEST_CASE(tof_admitted_interval_is_lossless_and_carries_no_nanosecond
         BOOST_REQUIRE(Timestamp::from_ticks(1000, d, TimestampMarker::RmarkerRx,
                                             TimestampSource::HardwareMeasured,
                                             mask_of(rmarker_rx_bits()), tmp));
-        BOOST_TEST(gr::uwb::twr::apply_calibration_ticks(
+        BOOST_TEST(openuwb::twr::apply_calibration_ticks(
                        tmp, cal.id, 0, 0, 0u, 0u) == CalibrationResult::Applied);
         a = tmp;
     }
@@ -1301,7 +1301,7 @@ BOOST_AUTO_TEST_CASE(tof_admitted_interval_is_lossless_and_carries_no_nanosecond
         BOOST_REQUIRE(Timestamp::from_fractional_ticks(
             500, 1, 2, d, TimestampMarker::RmarkerRx, TimestampSource::HardwareMeasured,
             mask_of(rmarker_rx_bits()), tmp));
-        BOOST_TEST(gr::uwb::twr::apply_calibration_ticks(
+        BOOST_TEST(openuwb::twr::apply_calibration_ticks(
                        tmp, cal.id, 0, 0, 0u, 0u) == CalibrationResult::Applied);
         b = tmp;
     }
@@ -1352,7 +1352,7 @@ BOOST_AUTO_TEST_CASE(tof_wrap_crossing_pair_is_admitted_with_the_wrap_flag)
     // A reply that crosses the counter wrap is a normal TWR event, not an
     // error.  The admitted value must say so, because the caller cannot see
     // the wrap anywhere else.
-    gr::uwb::twr::ClockDomain d;
+    openuwb::twr::ClockDomain d;
     BOOST_REQUIRE(make_uus_domain(d));
     const CalibrationStamp cal = good_calibration();
     RangeAdmissionContext ctx;
@@ -1484,7 +1484,7 @@ BOOST_AUTO_TEST_CASE(tof_every_reason_round_trips_and_maps_to_a_defined_status)
 
     // A refusal can never yield a range (REQ-PROTO-03 / types.h).
     for (int i = 1; i < n; ++i) {
-        BOOST_TEST(!gr::uwb::twr::exchange_status_yields_range(expected[i].status));
+        BOOST_TEST(!openuwb::twr::exchange_status_yields_range(expected[i].status));
     }
 }
 
@@ -1492,7 +1492,7 @@ BOOST_AUTO_TEST_CASE(tof_detail_strings_name_the_evidence)
 {
     // A machine-readable reason is not enough for an operator reading a log:
     // the detail must say which calibration, which epoch, which marker.
-    gr::uwb::twr::ClockDomain d;
+    openuwb::twr::ClockDomain d;
     BOOST_REQUIRE(make_uus_domain(d));
     Timestamp ts;
     BOOST_REQUIRE(make_mapped(9000, TimestampMarker::RmarkerRx, mask_of(rmarker_rx_bits()),
@@ -1537,7 +1537,7 @@ BOOST_AUTO_TEST_CASE(tof_admission_result_json_names_the_reason)
     // REQ-OUT-01: the result record has to survive into the exchange result,
     // and a machine must be able to read the terminal status and the specific
     // reason out of it without parsing prose.
-    gr::uwb::twr::ClockDomain d;
+    openuwb::twr::ClockDomain d;
     BOOST_REQUIRE(make_uus_domain(d));
     Timestamp ts;
     BOOST_REQUIRE(make_mapped(9000, TimestampMarker::RmarkerRx,
@@ -1594,7 +1594,7 @@ BOOST_AUTO_TEST_CASE(tof_value_is_engaged_exactly_when_admitted)
     // The invariant that makes the type worth having: there is no path that
     // yields a populated value together with a refusal, or an empty value
     // together with an acceptance.
-    gr::uwb::twr::ClockDomain d;
+    openuwb::twr::ClockDomain d;
     BOOST_REQUIRE(make_uus_domain(d));
     const CalibrationStamp cal = good_calibration();
 
@@ -1647,7 +1647,7 @@ BOOST_AUTO_TEST_CASE(tof_value_is_engaged_exactly_when_admitted)
             BOOST_TEST(r.admitted == (r.reason == RangeAdmissionReason::Admitted));
             BOOST_TEST(r.value.has_value() == r.admitted);
             if (!r.admitted) {
-                BOOST_TEST(!gr::uwb::twr::exchange_status_yields_range(r.status));
+                BOOST_TEST(!openuwb::twr::exchange_status_yields_range(r.status));
             }
         }
     }
@@ -1655,7 +1655,7 @@ BOOST_AUTO_TEST_CASE(tof_value_is_engaged_exactly_when_admitted)
 
 BOOST_AUTO_TEST_CASE(tof_invalid_timestamp_is_refused_before_anything_else)
 {
-    gr::uwb::twr::ClockDomain d;
+    openuwb::twr::ClockDomain d;
     BOOST_REQUIRE(make_uus_domain(d));
     const CalibrationStamp cal = good_calibration();
     RangeAdmissionContext ctx;
@@ -1692,9 +1692,9 @@ BOOST_AUTO_TEST_CASE(tof_invalid_timestamp_is_refused_before_anything_else)
 
 BOOST_AUTO_TEST_CASE(tof_interval_upper_bound_after_fraction_is_refused)
 {
-    gr::uwb::twr::ClockDomain d;
-    BOOST_REQUIRE(gr::uwb::twr::ClockDomain::make("dw1000_n04_12bit", 737.28e6, 7u, 12u, d));
-    BOOST_TEST(gr::uwb::twr::clock_domain_wrap_period(d) == 4096u);
+    openuwb::twr::ClockDomain d;
+    BOOST_REQUIRE(openuwb::twr::ClockDomain::make("dw1000_n04_12bit", 737.28e6, 7u, 12u, d));
+    BOOST_TEST(openuwb::twr::clock_domain_wrap_period(d) == 4096u);
 
     const CalibrationStamp cal = good_calibration();
     RangeAdmissionContext ctx;
@@ -1712,7 +1712,7 @@ BOOST_AUTO_TEST_CASE(tof_interval_upper_bound_after_fraction_is_refused)
         if (!Timestamp::from_fractional_ticks(ticks, num, den, d, marker,
                                               TimestampSource::HardwareMeasured, corrections, ts))
             return false;
-        if (gr::uwb::twr::apply_calibration_ticks(ts, cal.id, 0, 0, 0u, 0u) !=
+        if (openuwb::twr::apply_calibration_ticks(ts, cal.id, 0, 0, 0u, 0u) !=
             CalibrationResult::Applied)
             return false;
         out = ts;

@@ -59,15 +59,15 @@ int main(int argc, char** argv)
     std::mt19937 rng(seed);
     std::uniform_int_distribution<int> byte_dist(0, 255);
 
-    gr::uwb::mod::HrpModConfig cfg;
+    openuwb::mod::HrpModConfig cfg;
     cfg.code_index = code;
     cfg.sync_repetitions = sync_reps;
     cfg.sfd_mode = sfd.c_str();
     cfg.peak_amplitude = 0.8f;
 
-    const size_t count = gr::uwb::mod::packet_samples_998p4(
+    const size_t count = openuwb::mod::packet_samples_998p4(
         sync_reps, 8, psdu_bytes, cfg.insert_sts, &cfg.pulse);
-    gr::uwb::mod::HrpModScratch scratch;
+    openuwb::mod::HrpModScratch scratch;
     scratch.reserve(psdu_bytes, count);
 
     std::vector<cf> wave(count);
@@ -85,7 +85,7 @@ int main(int argc, char** argv)
         std::vector<uint8_t> wire(psdu_bytes - 2);
         for (auto& b : wire)
             b = static_cast<uint8_t>(byte_dist(rng));
-        gr::uwb::mod::append_ieee_fcs(wire);
+        openuwb::mod::append_ieee_fcs(wire);
         if (truth.is_open()) {
             constexpr char hex[] = "0123456789abcdef";
             for (const auto b : wire)
@@ -93,7 +93,7 @@ int main(int argc, char** argv)
             truth << '\n';
         }
         size_t written = 0;
-        if (!gr::uwb::mod::modulate_one(wire.data(), wire.size(), cfg,
+        if (!openuwb::mod::modulate_one(wire.data(), wire.size(), cfg,
                                        scratch, wave.data(), wave.size(),
                                        written)) {
             std::fprintf(stderr, "modulate_one failed at packet %zu\n", p);

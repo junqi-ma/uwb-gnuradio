@@ -32,11 +32,11 @@
 
 namespace {
 
-using gr::uwb::demod::rxopt::PhrPhaseRefineResult;
-using gr::uwb::demod::rxopt::build_fractional_cir_bank;
-using gr::uwb::demod::rxopt::decompose_sfo_position;
-using gr::uwb::demod::rxopt::kSfoPhaseBins;
-using gr::uwb::demod::rxopt::refine_phase_cfo_from_phr;
+using openuwb::demod::rxopt::PhrPhaseRefineResult;
+using openuwb::demod::rxopt::build_fractional_cir_bank;
+using openuwb::demod::rxopt::decompose_sfo_position;
+using openuwb::demod::rxopt::kSfoPhaseBins;
+using openuwb::demod::rxopt::refine_phase_cfo_from_phr;
 using cf = std::complex<float>;
 using cd = std::complex<double>;
 

@@ -140,8 +140,7 @@
 #include <cstdint>
 #include <limits>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace demod {
 namespace rxopt {
 
@@ -384,5 +383,4 @@ inline void decompose_sfo_position(double pos_samples,
 
 } // namespace rxopt
 } // namespace demod
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

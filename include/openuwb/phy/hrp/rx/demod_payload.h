@@ -2,7 +2,7 @@
 #pragma once
 #include <openuwb/phy/hrp/rx/demod_phr.h>
 
-namespace gr::uwb::demod::core {
+namespace openuwb::demod::core {
 // ---------------------------------------------------------------------------
 // Stage 7 — payload BPM-BPSK + RS + FCS (R4).
 // Mirrors helperUWBPayloadDecode + lrwpan.internal.hrpRS + ieee802154CRC16:
@@ -611,4 +611,4 @@ inline bool stage_payload_fused_cmf(const std::complex<float>* rx,
     return false;
 }
 
-} // namespace gr::uwb::demod::core
+} // namespace openuwb::demod::core

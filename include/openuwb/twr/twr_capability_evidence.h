@@ -84,8 +84,7 @@
 
 #include <array>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace twr {
 namespace evidence {
 
@@ -1009,7 +1008,6 @@ capture_git(const std::string& repo_dir, std::string& revision, std::string& tre
 
 } // namespace evidence
 } // namespace twr
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb
 
 #endif /* INCLUDED_GNURADIO_UWB_UWB_TWR_CAPABILITY_EVIDENCE_H */

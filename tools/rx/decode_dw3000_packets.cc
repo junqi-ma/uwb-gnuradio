@@ -4,13 +4,13 @@
 #include <gnuradio/uwb/uwb_demod_sfd.h>
 #include <gnuradio/uwb/uwb_rational_resampler_core.h>
 #include <gnuradio/uwb/uwb_resample_window.h>
-#include "../../gr-uwb/apps/bpm_ablation_env.h"
+#include "../../apps/bpm_ablation_env.h"
 #include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <stdexcept>
 
-using namespace gr::uwb;
+using namespace openuwb;
 
 template <class T> std::vector<T> load(const std::string& path)
 {

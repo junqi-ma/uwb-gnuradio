@@ -5,7 +5,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  *
  * Unified UWB SIC Architecture (Stage M2 Contract).
- * Namespace gr::uwb::sic.
+ * Namespace openuwb::sic.
  *
  * Core Principle:
  *   "Preamble-only SIC is a special case of Full-packet SIC where
@@ -92,8 +92,7 @@
 #include <string>
 #include <vector>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace sic {
 
 // ---------------------------------------------------------------------------
@@ -615,5 +614,4 @@ UWB_API bool sic_process_unified(
     SicUnifiedResult& result);
 
 } // namespace sic
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

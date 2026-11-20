@@ -15,15 +15,14 @@
 #include <openuwb/support/kernel_backend.h>
 
 #include <openuwb/support/simd.h>
-#include <gnuradio/uwb/uwb_simd_config.h>
+#include <openuwb/support/simd_config.h>
 
 #include <array>
 #include <atomic>
 #include <stdexcept>
 #include <string>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace core {
 namespace simd {
 
@@ -213,5 +212,4 @@ void reset_kernel_backends() noexcept
 
 } // namespace simd
 } // namespace core
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

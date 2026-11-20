@@ -155,7 +155,7 @@
 // File-scope alias so the evidence vocabulary reads as `evidence::...` in the
 // capability tables below.  C++ forbids a namespace alias as a *member*, so it
 // must live at namespace scope.
-namespace evidence = ::gr::uwb::twr::evidence;
+namespace evidence = ::openuwb::twr::evidence;
 
 #include <cerrno>
 #include <cmath>
@@ -168,8 +168,7 @@ namespace evidence = ::gr::uwb::twr::evidence;
 #include <utility>
 #include <vector>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace twr {
 
 // ===========================================================================
@@ -198,7 +197,7 @@ public:
     T value() const
     {
         if (!d_has)
-            throw std::logic_error("gr::uwb::twr::Opt: no value");
+            throw std::logic_error("openuwb::twr::Opt: no value");
         return d_value;
     }
     T value_or(T fallback) const { return d_has ? d_value : fallback; }
@@ -1171,7 +1170,6 @@ inline bool time_unit_from_string(const std::string& s, TimeUnit& out)
 }
 
 } // namespace twr
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb
 
 #endif /* INCLUDED_OPENUWB_TWR_CONFIG_UTIL_H */

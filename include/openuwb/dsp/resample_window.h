@@ -5,7 +5,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace gr::uwb::core {
+namespace openuwb::core {
 // One independent native SC16 window -> work-rate CF32, including FIR tail.
 // Worker owns resampler/output. Resets filter history between windows, keeps
 // output capacity across calls. Caller chooses scaling and resampler policy.
@@ -36,4 +36,4 @@ size_t resample_sc16_window(Resampler& rs, const std::complex<int16_t>* input,
     }
     return produced;
 }
-} // namespace gr::uwb::core
+} // namespace openuwb::core

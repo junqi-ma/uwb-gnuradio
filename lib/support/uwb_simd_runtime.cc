@@ -24,8 +24,7 @@
 #define UWB_SIMD_X86 0
 #endif
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace core {
 namespace simd {
 
@@ -74,5 +73,4 @@ void require_simd_backend()
 
 } // namespace simd
 } // namespace core
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

@@ -18,7 +18,7 @@
 #include <string>
 #include <vector>
 
-using gr::uwb::core::RationalResampler65_32Core;
+using openuwb::core::RationalResampler65_32Core;
 using gr_complex = std::complex<float>;
 
 namespace {

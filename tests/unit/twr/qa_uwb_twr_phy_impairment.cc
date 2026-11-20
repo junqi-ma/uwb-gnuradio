@@ -60,7 +60,7 @@
 #include <string>
 #include <vector>
 
-namespace twr = gr::uwb::twr;
+namespace twr = openuwb::twr;
 
 using gr_complex = std::complex<float>;
 using dcomplex = std::complex<double>;

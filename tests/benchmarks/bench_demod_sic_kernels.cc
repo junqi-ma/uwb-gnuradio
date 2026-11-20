@@ -30,7 +30,7 @@
 #include <gnuradio/uwb/uwb_kernel_backend.h>
 #include <gnuradio/uwb/uwb_rx_fused_cmf.h>
 #include <gnuradio/uwb/uwb_rx_sync_opt.h>
-#include <gnuradio/uwb/uwb_simd_config.h>
+#include <openuwb/support/simd_config.h>
 
 #include <algorithm>
 #include <chrono>
@@ -340,7 +340,7 @@ UWB_BENCH_AVX512 inline cf dot_fixed52_avx512(const cf* rx_win, const cf* taps)
     acc = _mm512_add_ps(acc, cir_group8_avx512(xp, hp, 80));
     // 52 complex = 13 groups: 12 in the 512-bit accumulator (6 pairs) plus the
     // final even group 12, which belongs in the LOW half only.
-    const __m256 g12 = gr::uwb::demod::cir_fir::cir_fir_avx2_group4(xp, hp, 96);
+    const __m256 g12 = openuwb::demod::cir_fir::cir_fir_avx2_group4(xp, hp, 96);
     return reduce_group_acc_avx512(acc, g12);
 }
 
@@ -354,7 +354,7 @@ UWB_BENCH_AVX512 inline cf dot_fixed38_avx512(const cf* rx_win,
     acc = _mm512_add_ps(acc, cir_group8_avx512(xp, hp, 32));
     acc = _mm512_add_ps(acc, cir_group8_avx512(xp, hp, 48));
     // 38 taps = 9 groups of 4 + a 2-tap scalar tail (same as the AVX2 kernel).
-    const __m256 g8 = gr::uwb::demod::cir_fir::cir_fir_avx2_group4(xp, hp, 64);
+    const __m256 g8 = openuwb::demod::cir_fir::cir_fir_avx2_group4(xp, hp, 64);
     const cf acc_c = reduce_group_acc_avx512(acc, g8);
     // The AVX2 kernel adds each tail tap as (re + (a - b)); keep that
     // association so the result stays bit-identical.
@@ -434,14 +434,14 @@ int main(int argc, char** argv)
     // The reference arm must be the AVX2 kernel, not "whatever the default
     // policy picks" -- in an AVX-512 build the Sync default is AVX-512, which
     // would silently compare AVX-512 against itself.
-    gr::uwb::core::simd::set_kernel_backend(
-        gr::uwb::core::simd::KernelGroup::Sync,
-        gr::uwb::core::simd::Backend::Avx2);
+    openuwb::core::simd::set_kernel_backend(
+        openuwb::core::simd::KernelGroup::Sync,
+        openuwb::core::simd::Backend::Avx2);
     std::printf("bench_demod_sic_kernels: UWB_SIMD=%s level=%d avx512=%d\n",
                 UWB_SIMD_NAME, UWB_SIMD_LEVEL, UWB_SIMD_HAVE_AVX512);
     std::printf("reference arm: sync group forced to %s\n",
-                gr::uwb::core::simd::resolved_backend_name(
-                    gr::uwb::core::simd::KernelGroup::Sync));
+                openuwb::core::simd::resolved_backend_name(
+                    openuwb::core::simd::KernelGroup::Sync));
     std::printf("rounds=%d iters=%d (median of batched loops)\n", rounds, iters);
 
     std::mt19937 rng(20261116u);
@@ -468,7 +468,7 @@ int main(int argc, char** argv)
             [&] {
                 for (int i = 0; i < 8; ++i) {
                     cf o[4];
-                    gr::uwb::demod::rxopt::real_template_dot_4lag(
+                    openuwb::demod::rxopt::real_template_dot_4lag(
                         rx.data() + i, taps_dup.data(), kSym, o);
                     g_sink += o[0].real();
                 }
@@ -516,7 +516,7 @@ int main(int argc, char** argv)
         bool same = true;
         for (int half = 0; half < 2; ++half) {
             cf ref4[4];
-            gr::uwb::demod::rxopt::real_template_dot_4lag(
+            openuwb::demod::rxopt::real_template_dot_4lag(
                 rx.data() + 4 * half, taps_dup.data(), kSym, ref4);
             for (int m = 0; m < 4; ++m)
                 if (std::memcmp(&got[4 * half + m], &ref4[m], sizeof(cf)) != 0)
@@ -554,7 +554,7 @@ int main(int argc, char** argv)
             };
             check("accumulate",
                   [&](std::vector<cf>& d) {
-                      gr::uwb::demod::rxopt::vector_accumulate_complex(
+                      openuwb::demod::rxopt::vector_accumulate_complex(
                           d.data(), b.data(), n);
                   },
                   [&](std::vector<cf>& d) {
@@ -562,7 +562,7 @@ int main(int argc, char** argv)
                   });
             check("sub",
                   [&](std::vector<cf>& d) {
-                      gr::uwb::demod::rxopt::vector_sub_complex(d.data(),
+                      openuwb::demod::rxopt::vector_sub_complex(d.data(),
                                                                 b.data(), n);
                   },
                   [&](std::vector<cf>& d) {
@@ -570,7 +570,7 @@ int main(int argc, char** argv)
                   });
             check("scale",
                   [&](std::vector<cf>& d) {
-                      gr::uwb::demod::rxopt::vector_scale_complex(d.data(),
+                      openuwb::demod::rxopt::vector_scale_complex(d.data(),
                                                                   0.5f, n);
                   },
                   [&](std::vector<cf>& d) {
@@ -595,7 +595,7 @@ int main(int argc, char** argv)
 
         header("K3  fold_sfd_window (8 SFD symbols, fold_len=700)");
         auto fold_avx2 = [&] {
-            gr::uwb::demod::rxopt::fold_sfd_window(
+            openuwb::demod::rxopt::fold_sfd_window(
                 rx.data(), kSym, seq.data(), kSfdLen, kFoldLen, out_a.data());
         };
         const double t2 = bench_ns(fold_avx2, rounds, iters);
@@ -706,14 +706,14 @@ int main(int argc, char** argv)
         };
         bench_dot("dot_fixed52 (payload CMF)",
                   [&](const cf* p) {
-                      return gr::uwb::demod::rxfusion::dot_fixed52(p,
+                      return openuwb::demod::rxfusion::dot_fixed52(p,
                                                                    t52.data());
                   },
                   [&](const cf* p) { return dot_fixed52_avx512(p, t52.data()); },
                   [&](const cf* p) { return dot_fixed52_scalar(p, t52.data()); });
         bench_dot("dot_fixed38 (CIR FIR)",
                   [&](const cf* p) {
-                      return gr::uwb::demod::cir_fir::dot_avx2_fixed38(
+                      return openuwb::demod::cir_fir::dot_avx2_fixed38(
                           p, t38.data(), 38);
                   },
                   [&](const cf* p) { return dot_fixed38_avx512(p, t38.data()); },

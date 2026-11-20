@@ -57,7 +57,23 @@ uwb_simd_apply(uwb_native)
 
 ########################################################################
 # Install and export the native libraries.
+#
+# The exported names drop the `openuwb_` target prefix, so consumers write
+# openuwb::support, openuwb::dsp, openuwb::phy_hrp, openuwb::sic,
+# openuwb::twr_core, openuwb::twr_phy, openuwb::radio, openuwb::runtime.
+# The two compatibility aggregates keep their own names:
+# openuwb::uwb_core and openuwb::uwb_native.
 ########################################################################
+set_target_properties(openuwb_support PROPERTIES EXPORT_NAME support)
+set_target_properties(openuwb_dsp PROPERTIES EXPORT_NAME dsp)
+set_target_properties(openuwb_phy_hrp PROPERTIES EXPORT_NAME phy_hrp)
+set_target_properties(openuwb_sic PROPERTIES EXPORT_NAME sic)
+set_target_properties(openuwb_sensing PROPERTIES EXPORT_NAME sensing)
+set_target_properties(openuwb_twr_core PROPERTIES EXPORT_NAME twr_core)
+set_target_properties(openuwb_twr_phy PROPERTIES EXPORT_NAME twr_phy)
+set_target_properties(openuwb_radio PROPERTIES EXPORT_NAME radio)
+set_target_properties(openuwb_runtime PROPERTIES EXPORT_NAME runtime)
+
 install(TARGETS openuwb_support openuwb_dsp openuwb_phy_hrp openuwb_sic
                 openuwb_twr_core openuwb_twr_phy openuwb_radio openuwb_runtime
                 uwb_core uwb_native
@@ -65,8 +81,8 @@ install(TARGETS openuwb_support openuwb_dsp openuwb_phy_hrp openuwb_sic
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
 # INTERFACE libraries take no destination.
 install(TARGETS openuwb_sensing EXPORT uwb-export)
-install(EXPORT uwb-export FILE uwbTargets.cmake NAMESPACE uwb::
-    DESTINATION ${UWB_CMAKE_DIR})
+install(EXPORT uwb-export FILE OpenUWBTargets.cmake NAMESPACE openuwb::
+    DESTINATION ${OPENUWB_CMAKE_DIR})
 
 ########################################################################
 # UHD backend dry-run CLI (Radar Step 11)

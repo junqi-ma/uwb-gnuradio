@@ -17,11 +17,11 @@
 
 #pragma once
 
-#include <openuwb/dsp/detector_core.h> // gr::uwb::core::uwb_l2_normalize
+#include <openuwb/dsp/detector_core.h> // openuwb::core::uwb_l2_normalize
 #include <openuwb/dsp/demod_sic_avx512.h> // phase-2 wide kernels
 #include <openuwb/support/kernel_backend.h>   // per-group backend policy
 #include <openuwb/phy/hrp/common/profile.h>      // kQm35SamplesPerSymbol
-#include <gnuradio/uwb/uwb_simd_config.h>      // UWB_SIMD_HAVE_AVX2
+#include <openuwb/support/simd_config.h>      // UWB_SIMD_HAVE_AVX2
 
 #include <volk/volk.h>
 #if defined(__x86_64__) || defined(_M_X64)
@@ -47,12 +47,11 @@
 #define UWB_RXOPT_HAVE_AVX2 0
 #endif
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace demod {
 namespace rxopt {
 
-using gr::uwb::core::conjugate_dot;
+using openuwb::core::conjugate_dot;
 
 // ---------------------------------------------------------------------------
 // Pre-duplicated real-valued SYNC template for AVX2 fast dot product.
@@ -452,13 +451,13 @@ inline void vector_scale_complex_avx2(std::complex<float>* dst,
 // batch boundaries: once per 8-lag dot, once per whole fold, once per whole
 // vector op -- never per tap, chip or sample.
 // ---------------------------------------------------------------------------
-inline bool use_avx512(const gr::uwb::core::simd::KernelGroup group)
+inline bool use_avx512(const openuwb::core::simd::KernelGroup group)
 {
 #if UWB_SIMD_HAVE_AVX512
     // The wide translation unit only exists in an AVX-512 build, so the call
     // sites below are compiled out otherwise (no dangling link reference).
-    return gr::uwb::core::simd::resolve_backend(group) ==
-           gr::uwb::core::simd::Backend::Avx512;
+    return openuwb::core::simd::resolve_backend(group) ==
+           openuwb::core::simd::Backend::Avx512;
 #else
     (void)group;
     return false;
@@ -474,8 +473,8 @@ inline void real_template_dot_8lag(const std::complex<float>* rx,
                                    std::complex<float> out[8])
 {
 #if UWB_SIMD_HAVE_AVX512
-    if (use_avx512(gr::uwb::core::simd::KernelGroup::Sync)) {
-        gr::uwb::core::simd::avx512::real_template_dot_8lag(rx, taps_dup, L,
+    if (use_avx512(openuwb::core::simd::KernelGroup::Sync)) {
+        openuwb::core::simd::avx512::real_template_dot_8lag(rx, taps_dup, L,
                                                             out);
         return;
     }
@@ -491,8 +490,8 @@ inline void vector_accumulate_complex(std::complex<float>* dst,
     if (count == 0)
         return;
 #if UWB_SIMD_HAVE_AVX512
-    if (use_avx512(gr::uwb::core::simd::KernelGroup::Sync)) {
-        gr::uwb::core::simd::avx512::accumulate_cf32(dst, src, count);
+    if (use_avx512(openuwb::core::simd::KernelGroup::Sync)) {
+        openuwb::core::simd::avx512::accumulate_cf32(dst, src, count);
         return;
     }
 #endif
@@ -513,8 +512,8 @@ inline void vector_sub_complex(std::complex<float>* dst,
     if (count == 0)
         return;
 #if UWB_SIMD_HAVE_AVX512
-    if (use_avx512(gr::uwb::core::simd::KernelGroup::Sync)) {
-        gr::uwb::core::simd::avx512::sub_cf32(dst, src, count);
+    if (use_avx512(openuwb::core::simd::KernelGroup::Sync)) {
+        openuwb::core::simd::avx512::sub_cf32(dst, src, count);
         return;
     }
 #endif
@@ -539,8 +538,8 @@ inline void vector_sub3_complex(std::complex<float>* dst,
     if (count == 0)
         return;
 #if UWB_SIMD_HAVE_AVX512
-    if (use_avx512(gr::uwb::core::simd::KernelGroup::Sync)) {
-        gr::uwb::core::simd::avx512::sub3_cf32(dst, a, b, count);
+    if (use_avx512(openuwb::core::simd::KernelGroup::Sync)) {
+        openuwb::core::simd::avx512::sub3_cf32(dst, a, b, count);
         return;
     }
 #endif
@@ -628,10 +627,10 @@ inline void fold_sfd_window(const std::complex<float>* rx_base,
     if (!rx_base || !sfd_seq || !out || sym == 0 || sfd_len == 0 || fold_len == 0)
         return;
 #if UWB_SIMD_HAVE_AVX512
-    if (use_avx512(gr::uwb::core::simd::KernelGroup::Sync)) {
+    if (use_avx512(openuwb::core::simd::KernelGroup::Sync)) {
         // Batched: the whole symbol loop runs inside the wide translation
         // unit, so the fold pays one call instead of one per symbol.
-        gr::uwb::core::simd::avx512::fold_sfd_window(rx_base, sym, sfd_seq,
+        openuwb::core::simd::avx512::fold_sfd_window(rx_base, sym, sfd_seq,
                                                      sfd_len, fold_len, out);
         return;
     }
@@ -809,8 +808,8 @@ inline void vector_scale_complex(std::complex<float>* dst,
     if (count == 0)
         return;
 #if UWB_SIMD_HAVE_AVX512
-    if (use_avx512(gr::uwb::core::simd::KernelGroup::Sync)) {
-        gr::uwb::core::simd::avx512::scale_cf32(dst, scale, count);
+    if (use_avx512(openuwb::core::simd::KernelGroup::Sync)) {
+        openuwb::core::simd::avx512::scale_cf32(dst, scale, count);
         return;
     }
 #endif
@@ -922,7 +921,7 @@ build_sfd_template(const std::vector<std::complex<float>>& template_wf,
                 std::complex<float>(static_cast<float>(s) * template_wf[k].real(),
                                     static_cast<float>(s) * template_wf[k].imag());
     }
-    gr::uwb::core::uwb_l2_normalize(out);
+    openuwb::core::uwb_l2_normalize(out);
 }
 
 // ---------------------------------------------------------------------------
@@ -942,5 +941,4 @@ inline int64_t seed_refine_radius(size_t configured_radius, size_t stride)
 
 } // namespace rxopt
 } // namespace demod
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

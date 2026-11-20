@@ -20,8 +20,7 @@
 
 #include <cstdint>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace core {
 
 struct WindowCropGeom {
@@ -120,5 +119,4 @@ inline WindowCropPlan plan_window_crop(int64_t window_start,
 }
 
 } // namespace core
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

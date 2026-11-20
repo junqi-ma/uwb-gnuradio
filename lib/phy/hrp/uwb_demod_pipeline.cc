@@ -3,7 +3,7 @@
 #include <openuwb/phy/hrp/rx/softchip_fir_diag.h>
 #include <openuwb/phy/hrp/rx/demod_execution.h>
 #include <openuwb/phy/hrp/rx/demod_finalize.h>
-namespace gr::uwb::demod::core {
+namespace openuwb::demod::core {
 namespace {
 
 struct StageClock {
@@ -1411,4 +1411,4 @@ DemodResult demodulate_one(const std::complex<float>* rx,
 }
 
 
-} // namespace gr::uwb::demod::core
+} // namespace openuwb::demod::core

@@ -54,8 +54,7 @@
 #define UWB_TESTDATA_DIR "testdata"
 #endif
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace pipeline {
 
 // UhdDeviceSc16Source
@@ -249,5 +248,4 @@ double UhdDeviceSc16Source::actual_rx_rate() const
 #endif
 
 } // namespace pipeline
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

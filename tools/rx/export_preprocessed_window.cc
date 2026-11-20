@@ -7,7 +7,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <vector>
-using namespace gr::uwb;
+using namespace openuwb;
 template<class T> std::vector<T> load(const std::string& path) {
     std::ifstream f(path,std::ios::binary|std::ios::ate);
     if(!f)throw std::runtime_error(path);

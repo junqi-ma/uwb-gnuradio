@@ -51,14 +51,13 @@
 #include <vector>
 
 #include <openuwb/support/simd.h>
-#include <gnuradio/uwb/uwb_simd_config.h>
+#include <openuwb/support/simd_config.h>
 
 #if UWB_SIMD_LEVEL >= 1
 #include <immintrin.h>
 #endif
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace core {
 namespace simd {
 namespace transposed {
@@ -594,5 +593,4 @@ using TransposedResampler32_65 = TransposedResampler<32, 65>;
 } // namespace transposed
 } // namespace simd
 } // namespace core
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

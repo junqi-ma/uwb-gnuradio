@@ -65,9 +65,9 @@
 #include <string>
 #include <vector>
 
-using gr::uwb::core::RationalResampler48_65Core;
-using gr::uwb::core::RationalResampler65_32Core;
-using gr::uwb::core::RationalResampler65_48Core;
+using openuwb::core::RationalResampler48_65Core;
+using openuwb::core::RationalResampler65_32Core;
+using openuwb::core::RationalResampler65_48Core;
 using gr_complex = std::complex<float>;
 using sc16 = std::complex<int16_t>;
 
@@ -1295,7 +1295,7 @@ void check_window_entry(const std::vector<float>& taps, const std::string& tag)
 
             // resample_sc16_window() is the production wrapper around it.
             std::vector<gr_complex> y2;
-            const size_t made = gr::uwb::core::resample_sc16_window(
+            const size_t made = openuwb::core::resample_sc16_window(
                 win, in.empty() ? nullptr : in.data(), n, kUnitScale, y2);
             BOOST_REQUIRE_EQUAL(made, y_ref.size());
             BOOST_REQUIRE_EQUAL(y2.size(), y_ref.size());

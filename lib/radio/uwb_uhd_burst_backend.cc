@@ -55,8 +55,7 @@
 #include <utility>
 #include <vector>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace uhd {
 
 // ---------------------------------------------------------------------------
@@ -1226,5 +1225,4 @@ echo::TxAsyncCounts UhdBurstBackend::tx_async_counts() const
 }
 
 } // namespace uhd
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

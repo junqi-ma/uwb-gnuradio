@@ -14,8 +14,8 @@
 #include <cstdio>
 #include <string>
 
-namespace twr = gr::uwb::twr;
-namespace ev = gr::uwb::twr::evidence;
+namespace twr = openuwb::twr;
+namespace ev = openuwb::twr::evidence;
 
 // The exact correction masks the TWR contract requires for each marker
 // family.  Written out here from the requirement text (REQ-TIME-02 / 03)

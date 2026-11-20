@@ -52,8 +52,7 @@
 #define UWB_BUILD_DIR ""
 #endif
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace twr {
 namespace testout {
 
@@ -146,7 +145,6 @@ resolve(std::string& why_out)
 
 } // namespace testout
 } // namespace twr
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb
 
 #endif /* INCLUDED_GNURADIO_UWB_UWB_TWR_TEST_OUTPUT_H */

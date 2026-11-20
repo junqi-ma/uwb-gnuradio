@@ -15,7 +15,7 @@
 #include <thread>
 #include <vector>
 
-namespace gr::uwb::live {
+namespace openuwb::live {
 // Identity and coordinates carried from planning through completion. Native
 // absolute coordinates belong to the scheduler; predicted_rel_work belongs to
 // the resampled window. Slot/generation are provenance, not a completion order.
@@ -303,4 +303,4 @@ private:
     bool stopping_ = false;
     std::string error_;
 };
-} // namespace gr::uwb::live
+} // namespace openuwb::live

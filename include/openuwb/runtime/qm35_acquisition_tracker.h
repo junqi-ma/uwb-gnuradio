@@ -30,8 +30,7 @@
 #include <limits>
 #include <string>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace core {
 
 inline constexpr double kNativeRateHz = defaults::kNativeSampleRateHz;
@@ -522,5 +521,4 @@ inline bool classify_lock_obs_mapping(const Qm35LockObservation& obs,
 }
 
 } // namespace core
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

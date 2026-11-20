@@ -29,8 +29,8 @@
 #include <stdexcept>
 #include <string>
 
-using namespace gr::uwb::echo;
-namespace uhd_cfg = gr::uwb::uhd;
+using namespace openuwb::echo;
+namespace uhd_cfg = openuwb::uhd;
 
 BOOST_AUTO_TEST_SUITE(uhd_backend_device)
 

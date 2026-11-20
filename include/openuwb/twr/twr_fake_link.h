@@ -79,8 +79,7 @@
 #include <deque>
 #include <string>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace twr {
 
 // ---------------------------------------------------------------------------
@@ -324,7 +323,6 @@ private:
 };
 
 } // namespace twr
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb
 
 #endif /* INCLUDED_GNURADIO_UWB_UWB_TWR_FAKE_LINK_H */

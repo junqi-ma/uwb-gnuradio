@@ -5,8 +5,7 @@
 
 #include <stdexcept>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace experiment {
 
 // Reuses the mature RX core, including its timing/CFO/SFD refinements and
@@ -121,5 +120,4 @@ private:
 };
 
 } // namespace experiment
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

@@ -22,15 +22,15 @@
 
 namespace {
 
-using gr::uwb::core::merge_physical_rx_intervals;
-using gr::uwb::core::PhysicalRxInterval;
-using gr::uwb::core::TimedRxAssembled;
-using gr::uwb::core::TimedRxChunk;
-using gr::uwb::core::TimedRxPlanConfig;
-using gr::uwb::core::TimedRxPlanCore;
-using gr::uwb::core::TimedRxRequest;
-using gr::uwb::core::TimedRxTerminal;
-using gr::uwb::core::TimedRxWindowSpec;
+using openuwb::core::merge_physical_rx_intervals;
+using openuwb::core::PhysicalRxInterval;
+using openuwb::core::TimedRxAssembled;
+using openuwb::core::TimedRxChunk;
+using openuwb::core::TimedRxPlanConfig;
+using openuwb::core::TimedRxPlanCore;
+using openuwb::core::TimedRxRequest;
+using openuwb::core::TimedRxTerminal;
+using openuwb::core::TimedRxWindowSpec;
 
 constexpr double kFs = 737280000.0;
 

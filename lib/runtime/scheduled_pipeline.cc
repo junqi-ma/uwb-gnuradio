@@ -54,8 +54,7 @@
 #define UWB_TESTDATA_DIR "testdata"
 #endif
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace pipeline {
 
 namespace {
@@ -2210,5 +2209,4 @@ void UhdSc16Pipeline::flush_pending_results()
 }
 
 } // namespace pipeline
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

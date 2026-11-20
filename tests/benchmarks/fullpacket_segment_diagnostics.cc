@@ -7,7 +7,7 @@
 #include <cstring>
 #include <limits>
 
-namespace gr::uwb::experiment::segment_diag {
+namespace openuwb::experiment::segment_diag {
 using namespace sic;
 namespace {
 using cf = std::complex<float>;

@@ -12,14 +12,12 @@
 
 #include "live_rx_config.h"
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace live {
 
 int run_live_rx(const LiveRxConfig& cfg);
 
 } // namespace live
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb
 
 #endif /* GR_UWB_LIVE_RX_SESSION_H */

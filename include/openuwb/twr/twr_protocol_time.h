@@ -59,8 +59,7 @@
 #include <cstdio>
 #include <string>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace twr {
 
 // ===========================================================================
@@ -949,7 +948,6 @@ inline ProtocolTofEstimate compute_protocol_ds_tof(const ProtocolInterval& ra,
 }
 
 } // namespace twr
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb
 
 #endif /* INCLUDED_GNURADIO_UWB_UWB_TWR_PROTOCOL_TIME_H */

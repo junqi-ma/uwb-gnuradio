@@ -25,8 +25,7 @@
 #include <limits>
 #include <vector>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace radar {
 
 enum class SfdStatus : uint8_t { Ok = 0, SfdFailed = 1, InvalidInput = 2 };
@@ -88,7 +87,7 @@ inline bool prepare_sfd_template(const int8_t* sfd_sequence,
         scratch.sfd_template.clear();
         return false;
     }
-    gr::uwb::core::uwb_l2_normalize(scratch.sfd_template);
+    openuwb::core::uwb_l2_normalize(scratch.sfd_template);
     return true;
 }
 
@@ -161,10 +160,10 @@ inline bool search_sfd(const std::complex<float>* rx,
             const size_t js = static_cast<size_t>(j);
             pwr += std::norm(rx[js + sfd_len - 1]) - std::norm(rx[js - 1]);
         }
-        const auto acc = gr::uwb::core::conjugate_dot_scalar(rx + j, tmpl, sfd_len);
+        const auto acc = openuwb::core::conjugate_dot_scalar(rx + j, tmpl, sfd_len);
         if (out.fine_correlations < std::numeric_limits<uint32_t>::max())
             ++out.fine_correlations;
-        const float m = std::norm(acc) / (pwr + gr::uwb::core::kUwbEpsilon);
+        const float m = std::norm(acc) / (pwr + openuwb::core::kUwbEpsilon);
         if (m > best) {
             best = m;
             best_j = j;
@@ -187,5 +186,4 @@ inline bool search_sfd(const std::complex<float>* rx,
 }
 
 } // namespace radar
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

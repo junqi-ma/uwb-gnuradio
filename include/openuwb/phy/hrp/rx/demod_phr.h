@@ -5,7 +5,7 @@
 #include <openuwb/phy/hrp/rx/demod_grid.h>
 #include <openuwb/phy/hrp/rx/rx_softchip_opt.h>
 
-namespace gr::uwb::demod::core {
+namespace openuwb::demod::core {
 // ---------------------------------------------------------------------------
 // Stage 5 — NS-SFD location in the soft-chip stream (R3).
 // Matches MATLAB locateNsSfd: spread = kron(sfd_sequence, spread_code), search
@@ -596,4 +596,4 @@ inline bool stage_phr_fused_cmf(const std::complex<float>* rx,
     return true;
 }
 
-} // namespace gr::uwb::demod::core
+} // namespace openuwb::demod::core

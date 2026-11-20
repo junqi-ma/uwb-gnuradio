@@ -40,7 +40,7 @@
 #include <unistd.h>
 #include <vector>
 
-using namespace gr::uwb::core;
+using namespace openuwb::core;
 
 namespace {
 

@@ -37,7 +37,7 @@
 #include <string>
 #include <vector>
 
-using namespace gr::uwb;
+using namespace openuwb;
 
 namespace {
 

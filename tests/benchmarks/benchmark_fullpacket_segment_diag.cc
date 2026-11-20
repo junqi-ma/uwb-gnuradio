@@ -20,8 +20,8 @@
 #endif
 
 namespace fs = std::filesystem;
-using namespace gr::uwb;
-namespace diag = gr::uwb::experiment::segment_diag;
+using namespace openuwb;
+namespace diag = openuwb::experiment::segment_diag;
 using cf = std::complex<float>;
 using cd = std::complex<double>;
 

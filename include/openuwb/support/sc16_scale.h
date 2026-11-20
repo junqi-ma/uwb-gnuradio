@@ -16,13 +16,11 @@
 
 #pragma once
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 
 enum class Sc16ScalePolicy {
     RawInteger = 0,
     UnitRange = 1,
 };
 
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

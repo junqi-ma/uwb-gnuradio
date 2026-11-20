@@ -68,8 +68,7 @@
 #include <type_traits>
 #include <vector>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace uhd {
 
 class UWB_API UhdBurstBackend : public echo::IRadioBurstBackend
@@ -197,7 +196,6 @@ inline void assign_tx_channels(UhdBurstBackendConfig& cfg,
 }
 
 } // namespace uhd
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb
 
 #endif /* INCLUDED_GNURADIO_UWB_UWB_UHD_BURST_BACKEND_H */

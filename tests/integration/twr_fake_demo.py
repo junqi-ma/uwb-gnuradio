@@ -11,7 +11,7 @@ A thin, pure-Python (stdlib only) front end that
   1. builds a *request* document in the small, versioned
      ``twr-m1b-demo/1`` envelope;
   2. optionally attaches a COMPLETE requested ``twr_config`` built with the
-     EXISTING :mod:`uwb.twr_config` module (R09: the Python side submits the
+     EXISTING :mod:`openuwb.twr_config` module (R09: the Python side submits the
      requested configuration through the one config module -- one validator,
      one schema -- never a parallel definition);
   3. runs the compiled pure-C++ demo binary on it; and
@@ -59,27 +59,26 @@ import tempfile
 
 SCHEMA = "twr-m1b-demo/1"
 
-_HERE = os.path.dirname(os.path.abspath(__file__))          # gr-uwb/tests/integration
-_GR_UWB = os.path.dirname(os.path.dirname(_HERE))           # gr-uwb
-_REPO = os.path.dirname(_GR_UWB)                             # repository root
+_HERE = os.path.dirname(os.path.abspath(__file__))          # tests/integration
+_REPO = os.path.dirname(os.path.dirname(_HERE))              # repository root
 
 # --------------------------------------------------------------------------
 # The EXISTING typed config module.  R09 requires the Python side to submit a
 # requested config through the one config module rather than a parallel schema;
 # it is pure stdlib, so importing it here keeps this driver free of GNU Radio.
 # --------------------------------------------------------------------------
-_PYTHON_DIR = os.path.join(_GR_UWB, "python")
+_PYTHON_DIR = os.path.join(_REPO, "python")
 if _PYTHON_DIR not in sys.path:
     sys.path.insert(0, _PYTHON_DIR)
 try:
-    import uwb.twr_config as T  # noqa: E402
+    import openuwb.twr_config as T  # noqa: E402
     TWR_CONFIG_IMPORT_ERROR = None
 except Exception as _exc:  # pragma: no cover - setup guard
     T = None
     TWR_CONFIG_IMPORT_ERROR = str(_exc)
 
 # Where the C++ demo is expected.  The first entry IS the documented default.
-DEFAULT_DEMO_PATH = os.path.join(_GR_UWB, "build", "twr_fake_demo")
+DEFAULT_DEMO_PATH = os.path.join(_REPO, "build", "twr_fake_demo")
 _FALLBACK_DEMO_PATHS = (
     DEFAULT_DEMO_PATH,
     os.path.join(_REPO, "twr_fake_demo"),
@@ -124,11 +123,11 @@ def build_hint():
         "  g++ -std=c++17 -Wall -Wextra -I %s \\\n"
         "      -o %s %s %s %s\n"
         % (
-            os.path.join(_GR_UWB, "include"),
+            os.path.join(_REPO, "include"),
             DEFAULT_DEMO_PATH,
-            os.path.join(_GR_UWB, "apps", "twr_fake_demo.cc"),
-            os.path.join(_GR_UWB, "lib", "uwb_twr_core.cc"),
-            os.path.join(_GR_UWB, "lib", "uwb_twr_fake_link.cc"),
+            os.path.join(_REPO, "apps", "twr_fake_demo.cc"),
+            os.path.join(_REPO, "lib", "twr", "uwb_twr_core.cc"),
+            os.path.join(_REPO, "lib", "twr", "uwb_twr_fake_link.cc"),
         )
     )
 
@@ -257,7 +256,7 @@ def build_twr_config(*, protocol="ss", local_address=257, peer_address=514,
                      profile_version="demo-frame/0", label="twr_fake_demo full config"):
     """Build a COMPLETE, currently-valid TwrConfig document.
 
-    This uses the EXISTING ``uwb.twr_config`` module -- one validator, one
+    This uses the EXISTING ``openuwb.twr_config`` module -- one validator, one
     schema, one hash -- and never a parallel definition.  Every field is set
     explicitly (there is no "fill in the blanks" path): a missing value would be
     a rejection, which is the point.
@@ -271,7 +270,7 @@ def build_twr_config(*, protocol="ss", local_address=257, peer_address=514,
     explicit instead of returning a partial document.
     """
     if T is None:  # pragma: no cover - setup guard
-        raise RuntimeError("cannot import uwb.twr_config from %s: %s"
+        raise RuntimeError("cannot import openuwb.twr_config from %s: %s"
                            % (_PYTHON_DIR, TWR_CONFIG_IMPORT_ERROR))
 
     proto = T.Protocol.SS if protocol == "ss" else T.Protocol.DS
@@ -538,7 +537,7 @@ def main(argv=None):
                              "verbatim for the C++ side to re-validate")
     parser.add_argument("--with-config", action="store_true",
                         help="attach a complete, validated TwrConfig built with "
-                             "the existing uwb.twr_config module (R09 full "
+                             "the existing openuwb.twr_config module (R09 full "
                              "config end-to-end run)")
     parser.add_argument("--protocol", choices=("ss", "ds"),
                         help="override the scenario protocol (the C++ side "

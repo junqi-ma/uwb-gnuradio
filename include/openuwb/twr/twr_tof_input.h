@@ -107,8 +107,7 @@
 #include <utility>
 #include <vector>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace twr {
 
 struct RangeAdmission;
@@ -1345,7 +1344,6 @@ inline RangingIntervalAdmission admit_ranging_interval(const Timestamp& later,
 }
 
 } // namespace twr
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb
 
 #endif /* INCLUDED_GNURADIO_UWB_UWB_TWR_TOF_INPUT_H */

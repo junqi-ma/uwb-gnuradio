@@ -23,7 +23,7 @@
 #include <cstring>
 #include <string>
 
-using namespace gr::uwb::twr;
+using namespace openuwb::twr;
 
 namespace {
 

@@ -11,8 +11,7 @@
 #include <cstdint>
 #include <limits>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace radar {
 
 // Checked integer coordinate operations shared by the header-only radar
@@ -79,5 +78,4 @@ inline bool radar_i64_sub(int64_t a, int64_t b, int64_t& out)
 }
 
 } // namespace radar
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

@@ -17,8 +17,7 @@
 
 #include <cstddef>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace defaults {
 
 // Host-side CF32 / SC16 stream rate used by production detector metadata and
@@ -121,5 +120,4 @@ inline constexpr size_t kReacquireMissCount = 8;
 inline constexpr double kProvisionalGuardUs = 25.0;
 
 } // namespace defaults
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

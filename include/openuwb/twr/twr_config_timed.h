@@ -12,8 +12,7 @@
 #define INCLUDED_OPENUWB_TWR_CONFIG_TIMED_H
 
 #include <openuwb/twr/twr_config_reasons.h>
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace twr {
 
 // ===========================================================================
@@ -89,7 +88,6 @@ inline int64_t quantise_duration(const Duration& d, double rate_hz, bool& ok)
 }
 
 } // namespace twr
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb
 
 #endif /* INCLUDED_OPENUWB_TWR_CONFIG_TIMED_H */

@@ -3,7 +3,7 @@
 #include <openuwb/phy/hrp/rx/demod_sync.h>
 #include <functional>
 
-namespace gr::uwb::demod::core {
+namespace openuwb::demod::core {
 // ---------------------------------------------------------------------------
 // Stage 3 — SFD timing refinement (R1).
 // Selects the best SFD template (from the profile; golden uses IEEE legacy
@@ -530,11 +530,11 @@ inline bool stage_sfd(const std::complex<float>* rx,
         if (use_real_sfd_fast)
             best *= sfd_scale * sfd_scale;
         const float power = window_power_8acc(rx + best_j, sfd_len);
-        best /= power + gr::uwb::core::kUwbEpsilon;
+        best /= power + openuwb::core::kUwbEpsilon;
     }
     out.metric = best;
     out.polarity = 1;
     return true;
 }
 
-} // namespace gr::uwb::demod::core
+} // namespace openuwb::demod::core

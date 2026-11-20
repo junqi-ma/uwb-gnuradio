@@ -12,8 +12,7 @@
 #define INCLUDED_OPENUWB_TWR_CONFIG_TYPES_H
 
 #include <openuwb/twr/twr_config_capabilities.h>
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace twr {
 
 // ===========================================================================
@@ -479,7 +478,6 @@ struct TwrConfig {
 };
 
 } // namespace twr
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb
 
 #endif /* INCLUDED_OPENUWB_TWR_CONFIG_TYPES_H */

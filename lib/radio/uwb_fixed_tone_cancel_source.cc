@@ -15,8 +15,7 @@
 #include <iostream>
 #include <limits>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace pipeline {
 
 namespace {
@@ -891,5 +890,4 @@ size_t FixedToneCancelSc16Source::read_samples(std::complex<int16_t>* dest,
 }
 
 } // namespace pipeline
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

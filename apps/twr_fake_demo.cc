@@ -117,7 +117,7 @@
 #include <string>
 #include <vector>
 
-namespace twr = gr::uwb::twr;
+namespace twr = openuwb::twr;
 using twr::json::Type;
 using twr::json::Value;
 

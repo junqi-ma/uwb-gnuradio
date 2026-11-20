@@ -8,7 +8,7 @@
 #include <limits>
 
 namespace {
-namespace diag = gr::uwb::experiment::cfo_diag;
+namespace diag = openuwb::experiment::cfo_diag;
 using diag::cf;
 using diag::cd;
 constexpr double pi = 3.14159265358979323846;

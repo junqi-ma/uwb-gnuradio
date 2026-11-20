@@ -41,8 +41,7 @@
 #include <utility>
 #include <vector>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace pipeline {
 namespace bench {
 
@@ -246,5 +245,4 @@ inline std::string meta_bool(bool v)
 
 } // namespace bench
 } // namespace pipeline
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

@@ -33,8 +33,7 @@
 #include <limits>
 #include <string>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace twr {
 
 // ---------------------------------------------------------------------------
@@ -591,7 +590,6 @@ inline constexpr double kTwrWorkSampleRateHz = 998.4e6;
 inline constexpr int64_t kTwrWorkSamplesPerSymbol = 1016;
 
 } // namespace twr
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb
 
 #endif /* INCLUDED_GNURADIO_UWB_UWB_TWR_TYPES_H */

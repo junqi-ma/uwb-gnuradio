@@ -35,8 +35,7 @@
 #include <gnuradio/uwb/uwb_fixed_tone_cancel_source.h>
 #include <gnuradio/uwb/uwb_live_packet_processor.h>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace live {
 
 struct PacketCost {
@@ -349,7 +348,6 @@ inline std::string format_request_tag(const live::PacketRequest& req,
 void print_live_help();
 
 } // namespace live
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb
 
 #endif /* GR_UWB_CONSOLE_REPORTER_H */

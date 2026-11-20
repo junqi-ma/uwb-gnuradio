@@ -22,8 +22,7 @@
 #include <gnuradio/uwb/uwb_defaults.h>
 #include <gnuradio/uwb/uwb_demod_grid.h>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace live {
 
 using Clock = std::chrono::steady_clock;
@@ -176,7 +175,6 @@ void validate_live_rx_config(LiveRxConfig& cfg);
 std::string resolve_res_dir(const LiveRxConfig& cfg);
 
 } // namespace live
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb
 
 #endif /* GR_UWB_LIVE_RX_CONFIG_H */

@@ -19,11 +19,8 @@ set_target_properties(openuwb_twr_phy PROPERTIES POSITION_INDEPENDENT_CODE ON)
 uwb_simd_apply(openuwb_twr_phy)
 
 # Phase 2 compatibility: the Phase 1 target names are still used by apps/ and
-# tests/.  ALIAS forwards them to the domain targets, and EXPORT_NAME keeps the
-# installed/exported names (uwb::uwb_twr_core, uwb::uwb_twr_phy) unchanged.
+# tests/.  ALIAS forwards them to the domain targets.
 # TODO(openuwb-compat-removal): switch the consumers and drop these.
 add_library(uwb_twr_core ALIAS openuwb_twr_core)
 add_library(uwb_twr_fake_link ALIAS openuwb_twr_fake_link)
 add_library(uwb_twr_phy ALIAS openuwb_twr_phy)
-set_target_properties(openuwb_twr_core PROPERTIES EXPORT_NAME uwb_twr_core)
-set_target_properties(openuwb_twr_phy PROPERTIES EXPORT_NAME uwb_twr_phy)

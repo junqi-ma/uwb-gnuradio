@@ -40,8 +40,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace core {
 namespace simd {
 namespace avx512 {
@@ -248,5 +247,4 @@ void fir_cf32_macroblock(const float* h_base, size_t h_stride,
 } // namespace avx512
 } // namespace simd
 } // namespace core
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

@@ -12,8 +12,7 @@
 #define INCLUDED_OPENUWB_TWR_CONFIG_CAPABILITIES_H
 
 #include <openuwb/twr/twr_config_timed.h>
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace twr {
 
 // ===========================================================================
@@ -634,7 +633,6 @@ inline const Capabilities& capabilities()
 }
 
 } // namespace twr
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb
 
 #endif /* INCLUDED_OPENUWB_TWR_CONFIG_CAPABILITIES_H */

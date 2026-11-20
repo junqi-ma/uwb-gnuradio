@@ -10,7 +10,7 @@
 #include <cstdint>
 #include <utility>
 
-namespace gr::uwb::demod::core {
+namespace openuwb::demod::core {
 // Half-open [lo, hi) window-relative sample interval.
 struct SampleRange {
     size_t lo = 0;
@@ -303,4 +303,4 @@ inline PacketExecutionPlan plan_packet_execution(
     }
     return plan;
 }
-} // namespace gr::uwb::demod::core
+} // namespace openuwb::demod::core

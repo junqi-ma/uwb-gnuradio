@@ -24,8 +24,7 @@
 #include <cstdint>
 #include <string>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace runtime {
 
 /// Which domain a configuration belongs to.
@@ -84,7 +83,6 @@ struct RadarConfig {
 };
 
 } // namespace runtime
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb
 
 #endif /* INCLUDED_OPENUWB_RUNTIME_CONFIG_H */

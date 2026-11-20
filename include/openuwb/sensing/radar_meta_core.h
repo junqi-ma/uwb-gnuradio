@@ -22,8 +22,7 @@
 #include <cstdint>
 #include <cstddef>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace radar_meta {
 
 inline constexpr double kRateTolRel = 1e-6;
@@ -192,5 +191,4 @@ inline constexpr const char* kLengthKeys[] = {
 };
 
 } // namespace radar_meta
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

@@ -27,8 +27,7 @@
 #include <cstdint>
 #include <limits>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace radar {
 
 enum class TimingStatus : uint8_t { Ok = 0, TimingFailed = 1, InvalidInput = 2 };
@@ -148,12 +147,12 @@ inline bool refine_sync_origin(const std::complex<float>* rx,
             const size_t js = static_cast<size_t>(j);
             pwr += std::norm(rx[js + sync_len - 1]) - std::norm(rx[js - 1]);
         }
-        const auto acc = gr::uwb::core::conjugate_dot_scalar(rx + j, sync_template, sync_len);
+        const auto acc = openuwb::core::conjugate_dot_scalar(rx + j, sync_template, sync_len);
         if (out.refine_correlations <
             std::numeric_limits<uint32_t>::max())
             ++out.refine_correlations;
         const float m =
-            std::norm(acc) / (pwr + gr::uwb::core::kUwbEpsilon);
+            std::norm(acc) / (pwr + openuwb::core::kUwbEpsilon);
         if (m > best) {
             best = m;
             best_j = j;
@@ -176,5 +175,4 @@ inline bool refine_sync_origin(const std::complex<float>* rx,
 }
 
 } // namespace radar
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

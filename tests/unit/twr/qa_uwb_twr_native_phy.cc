@@ -65,9 +65,9 @@
 #define UWB_TESTDATA_DIR "../../../testdata"
 #endif
 
-namespace twr = gr::uwb::twr;
-namespace mod = gr::uwb::mod;
-namespace demod = gr::uwb::demod;
+namespace twr = openuwb::twr;
+namespace mod = openuwb::mod;
+namespace demod = openuwb::demod;
 
 using gr_complex = std::complex<float>;
 
@@ -581,16 +581,16 @@ void check_resample_coordinates(twr::M2aNativeRate rate, bool tx, const char* na
         BOOST_CHECK_EQUAL(frozen_map(-1000, L, M, T), int64_t(0));
     };
     if (tx && rate == twr::M2aNativeRate::Uc200_737280000) {
-        gr::uwb::core::RationalResampler48_65Core c(cfg.tx_taps);
+        openuwb::core::RationalResampler48_65Core c(cfg.tx_taps);
         map_check(c);
     } else if (tx) {
-        gr::uwb::core::RationalResampler32_65Core c(cfg.tx_taps);
+        openuwb::core::RationalResampler32_65Core c(cfg.tx_taps);
         map_check(c);
     } else if (rate == twr::M2aNativeRate::Uc200_737280000) {
-        gr::uwb::core::RationalResampler65_48Core c(cfg.rx_taps);
+        openuwb::core::RationalResampler65_48Core c(cfg.rx_taps);
         map_check(c);
     } else {
-        gr::uwb::core::RationalResampler65_32Core c(cfg.rx_taps);
+        openuwb::core::RationalResampler65_32Core c(cfg.rx_taps);
         map_check(c);
     }
 
@@ -799,13 +799,13 @@ BOOST_AUTO_TEST_CASE(m2a_a02_fcs_ownership_and_malformed_rejection)
 // ===========================================================================
 BOOST_AUTO_TEST_CASE(m2a_a04_chunk_capacity_reset)
 {
-    check_core_chunk_invariance<gr::uwb::core::RationalResampler48_65Core>(
+    check_core_chunk_invariance<openuwb::core::RationalResampler48_65Core>(
         "tx_48_65", 48, 65, tx_taps_for(twr::M2aNativeRate::Uc200_737280000));
-    check_core_chunk_invariance<gr::uwb::core::RationalResampler32_65Core>(
+    check_core_chunk_invariance<openuwb::core::RationalResampler32_65Core>(
         "tx_32_65", 32, 65, tx_taps_for(twr::M2aNativeRate::Cg400_491520000));
-    check_core_chunk_invariance<gr::uwb::core::RationalResampler65_48Core>(
+    check_core_chunk_invariance<openuwb::core::RationalResampler65_48Core>(
         "rx_65_48", 65, 48, rx_taps_for(twr::M2aNativeRate::Uc200_737280000));
-    check_core_chunk_invariance<gr::uwb::core::RationalResampler65_32Core>(
+    check_core_chunk_invariance<openuwb::core::RationalResampler65_32Core>(
         "rx_65_32", 65, 32, rx_taps_for(twr::M2aNativeRate::Cg400_491520000));
 
     check_helper_stateless_bursts(twr::M2aNativeRate::Uc200_737280000, "uc200");
@@ -1343,13 +1343,13 @@ BOOST_AUTO_TEST_CASE(m2a_a05_stage_coordinates_polyphase_and_chunking)
     check_resample_coordinates(twr::M2aNativeRate::Cg400_491520000, false, "rx_65_32");
 
     // Chunked vs one-shot must publish the SAME output coordinate (length).
-    check_chunked_length_matches_formula<gr::uwb::core::RationalResampler48_65Core>(
+    check_chunked_length_matches_formula<openuwb::core::RationalResampler48_65Core>(
         tx_taps_for(twr::M2aNativeRate::Uc200_737280000), 257, 48, 65, "tx_48_65");
-    check_chunked_length_matches_formula<gr::uwb::core::RationalResampler32_65Core>(
+    check_chunked_length_matches_formula<openuwb::core::RationalResampler32_65Core>(
         tx_taps_for(twr::M2aNativeRate::Cg400_491520000), 257, 32, 65, "tx_32_65");
-    check_chunked_length_matches_formula<gr::uwb::core::RationalResampler65_48Core>(
+    check_chunked_length_matches_formula<openuwb::core::RationalResampler65_48Core>(
         rx_taps_for(twr::M2aNativeRate::Uc200_737280000), 257, 65, 48, "rx_65_48");
-    check_chunked_length_matches_formula<gr::uwb::core::RationalResampler65_32Core>(
+    check_chunked_length_matches_formula<openuwb::core::RationalResampler65_32Core>(
         rx_taps_for(twr::M2aNativeRate::Cg400_491520000), 257, 65, 32, "rx_65_32");
 
     // Every stage of a real prepared-context run must publish consistent

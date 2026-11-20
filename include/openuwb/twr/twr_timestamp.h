@@ -128,8 +128,7 @@
 #include <limits>
 #include <string>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace twr {
 
 // ===========================================================================
@@ -2701,7 +2700,6 @@ inline bool timestamp_from_json_string(const std::string& json, Timestamp& out)
 }
 
 } // namespace twr
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb
 
 #endif /* INCLUDED_GNURADIO_UWB_UWB_TWR_TIMESTAMP_H */

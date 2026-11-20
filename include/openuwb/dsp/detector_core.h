@@ -44,8 +44,7 @@
 #include <immintrin.h>
 #endif
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace core {
 
 // ---------------------------------------------------------------------------
@@ -1265,5 +1264,4 @@ using UwbDetectorStateMachine = UwbDetectorStateMachineT<std::complex<float>>;
 using UwbDetectorStateMachineSc16 =
     UwbDetectorStateMachineT<std::complex<int16_t>>;
 
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

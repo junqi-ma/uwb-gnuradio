@@ -30,7 +30,7 @@
 #include <gnuradio/uwb/uwb_rx_matched_filter.h>
 #include <gnuradio/uwb/uwb_rx_sync_opt.h>
 #include <gnuradio/uwb/uwb_simd.h>
-#include <gnuradio/uwb/uwb_simd_config.h>
+#include <openuwb/support/simd_config.h>
 
 #include <boost/test/unit_test.hpp>
 
@@ -46,8 +46,8 @@
 namespace {
 
 using cf = std::complex<float>;
-namespace simd = gr::uwb::core::simd;
-namespace rxopt = gr::uwb::demod::rxopt;
+namespace simd = openuwb::core::simd;
+namespace rxopt = openuwb::demod::rxopt;
 
 /** RAII: force one group for the duration of a scope, then restore. */
 struct ScopedBackend {
@@ -558,21 +558,21 @@ BOOST_AUTO_TEST_CASE(forced_backends_produce_identical_output)
         std::memcmp(f5.data(), fs.data(), fold_len * sizeof(cf)) == 0,
         "fold: AVX-512 vs scalar");
     // And the wide TU really is linked in.
-    BOOST_CHECK(gr::uwb::core::simd::avx512::available());
+    BOOST_CHECK(openuwb::core::simd::avx512::available());
 #endif
 }
 
 BOOST_AUTO_TEST_CASE(avx512_kernel_entry_points_exist_when_built)
 {
 #if UWB_SIMD_HAVE_AVX512
-    BOOST_CHECK(gr::uwb::core::simd::avx512::available());
+    BOOST_CHECK(openuwb::core::simd::avx512::available());
     // Direct calls to the TU, bypassing the dispatcher, must agree with the
     // dispatcher's AVX2 path.
     const size_t L = 2032;
     std::vector<cf> rx = make_random(L + 32, 6060u);
     std::vector<float> taps = make_taps_dup(L, 6061u);
     cf direct[8], reference[8];
-    gr::uwb::core::simd::avx512::real_template_dot_8lag(rx.data(),
+    openuwb::core::simd::avx512::real_template_dot_8lag(rx.data(),
                                                         taps.data(), L, direct);
     dot_8lag_reference(rx.data(), taps.data(), L, reference);
     for (int m = 0; m < 8; ++m)
@@ -591,11 +591,11 @@ BOOST_AUTO_TEST_CASE(avx512_kernel_entry_points_exist_when_built)
 BOOST_AUTO_TEST_CASE(sparse_ternary_wide_batches_match_8lag_reference)
 {
     for (size_t code_index : { 9, 10, 11, 12 }) {
-        const auto code = gr::uwb::demod::kPreambleCode9;
+        const auto code = openuwb::demod::kPreambleCode9;
         (void)code;
-        const int8_t* pc = gr::uwb::demod::GetPreambleCode(code_index);
+        const int8_t* pc = openuwb::demod::GetPreambleCode(code_index);
         rxopt::SparseCirTemplate tmpl;
-        rxopt::build_sparse_cir_template(pc, gr::uwb::demod::kQm35CodeLength,
+        rxopt::build_sparse_cir_template(pc, openuwb::demod::kQm35CodeLength,
                                          tmpl);
         BOOST_REQUIRE_GT(tmpl.entries.size(), 0u);
         BOOST_CHECK_EQUAL(size_t(tmpl.pos_count + tmpl.neg_count),
@@ -723,9 +723,9 @@ BOOST_AUTO_TEST_CASE(fold_sfd_window_single_pass_tail_and_zeros)
 // factorization is exact); the reconstruction gate rejects anything else.
 BOOST_AUTO_TEST_CASE(shaped_sparse_factorization_matches_dense)
 {
-    using gr::uwb::demod::GetPreambleCode;
-    using gr::uwb::demod::kQm35CodeLength;
-    const size_t L = gr::uwb::demod::kQm35SamplesPerSymbol;
+    using openuwb::demod::GetPreambleCode;
+    using openuwb::demod::kQm35CodeLength;
+    const size_t L = openuwb::demod::kQm35SamplesPerSymbol;
 
     const float p[8] = { 0.10f, 0.35f, 0.55f, 0.40f, 0.20f, -0.10f, 0.05f,
                          -0.02f };
@@ -789,7 +789,7 @@ BOOST_AUTO_TEST_CASE(shaped_sparse_factorization_matches_dense)
                        1e-5 * rms);
 
     // Normalized metric and winner: the shaped path must not lower the peak.
-    const float pw = gr::uwb::core::sample_power_sum(rx.data(), L);
+    const float pw = openuwb::core::sample_power_sum(rx.data(), L);
     const float Et = shaped.energy;
     const auto pd = rxopt::scan_normalized_sync(dense, rx.data(), lags, pw, Et);
     const auto pf = rxopt::scan_normalized_sync(fast, rx.data(), lags, pw, Et);

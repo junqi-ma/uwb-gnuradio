@@ -29,12 +29,11 @@
 #include <ostream>
 #include <string>
 
-using namespace gr::uwb::twr;
-using namespace gr::uwb::twr::m1b_test;
+using namespace openuwb::twr;
+using namespace openuwb::twr::m1b_test;
 
 // Printable enums for Boost.Test failure reports (ADL, no production change).
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace twr {
 inline std::ostream& operator<<(std::ostream& os, ExchangeStatus s)
 {
@@ -54,8 +53,7 @@ inline std::ostream& operator<<(std::ostream& os, FrameType t)
 }
 inline std::ostream& operator<<(std::ostream& os, Role r) { return os << role_to_string(r); }
 } // namespace twr
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb
 
 namespace {
 

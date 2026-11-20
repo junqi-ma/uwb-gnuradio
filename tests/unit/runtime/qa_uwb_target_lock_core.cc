@@ -27,14 +27,14 @@
 
 namespace {
 
-using gr::uwb::core::CandidateClass;
-using gr::uwb::core::InterferenceCandidate;
-using gr::uwb::core::TargetLockConfig;
-using gr::uwb::core::TargetLockCore;
-using gr::uwb::core::TargetLockState;
-using gr::uwb::core::TargetObservation;
-using gr::uwb::core::TargetSlotOutcome;
-using gr::uwb::core::TargetSlotPlan;
+using openuwb::core::CandidateClass;
+using openuwb::core::InterferenceCandidate;
+using openuwb::core::TargetLockConfig;
+using openuwb::core::TargetLockCore;
+using openuwb::core::TargetLockState;
+using openuwb::core::TargetObservation;
+using openuwb::core::TargetSlotOutcome;
+using openuwb::core::TargetSlotPlan;
 
 constexpr double kFs = 737280000.0;
 constexpr double kNominalPeriodS = 5.0e-3;
@@ -60,7 +60,7 @@ TargetLockConfig make_config()
     cfg.preamble_repetitions = 256;
     cfg.sfd_mode = "4z2";
     cfg.require_fcs = true;
-    cfg.geometry = gr::uwb::core::target_window_geometry(
+    cfg.geometry = openuwb::core::target_window_geometry(
         260096, 8128, 21504, 154624, 1024, 36864, 8192);
     // Job buffer for the widest geometry plus the holdover cap.  The QA spans
     // are the raw work-grid numbers, so this is larger than the live app's
@@ -315,13 +315,13 @@ BOOST_AUTO_TEST_CASE(native_work_coordinate_mapping_round_trips)
     for (int64_t p = 0; p < 200000; p += 977) {
         const int64_t work = static_cast<int64_t>(
             std::llround((static_cast<double>(p) * 65.0 + gd) / 48.0));
-        const int64_t native = gr::uwb::core::map_obs_sample_to_native(
+        const int64_t native = openuwb::core::map_obs_sample_to_native(
             work, 998400000.0, kFs, gd);
         BOOST_CHECK_LE(std::abs(native - p), 1);
     }
     // A 998.4-domain index presented as native is not silently accepted by the
     // tracker's classifier when a group delay is attached.
-    gr::uwb::core::Qm35LockObservation obs;
+    openuwb::core::Qm35LockObservation obs;
     obs.detected_start_sample = 123456;
     obs.has_sample_rate = true;
     obs.sample_rate = kFs;
@@ -329,7 +329,7 @@ BOOST_AUTO_TEST_CASE(native_work_coordinate_mapping_round_trips)
     obs.resample_filter_delay = gd;
     int64_t mapped = -1;
     bool used = false;
-    BOOST_CHECK(!gr::uwb::core::classify_lock_obs_mapping(obs, kFs, &mapped, &used));
+    BOOST_CHECK(!openuwb::core::classify_lock_obs_mapping(obs, kFs, &mapped, &used));
 }
 
 // ===========================================================================
@@ -344,20 +344,20 @@ BOOST_AUTO_TEST_CASE(locked_bounded_never_uses_a_wide_scan)
     const auto tmpl = make_real_template(L);
     const auto rx = make_preamble_window(tmpl, start, reps, n);
 
-    gr::uwb::demod::Qm35825Profile p;
+    openuwb::demod::Qm35825Profile p;
     p.code_index = 10;
     p.preamble_repetitions = reps;
     p.sfd_mode = "4z2";
-    p.sync_strategy = gr::uwb::demod::SyncStrategy::LockedBounded;
+    p.sync_strategy = openuwb::demod::SyncStrategy::LockedBounded;
     p.locked_roi_samples = 256;
     p.locked_allow_backtrack = false;
 
-    gr::uwb::demod::core::DemodScratch scratch;
+    openuwb::demod::core::DemodScratch scratch;
     scratch.reserve(n);
 
-    gr::uwb::demod::TimingResult ok;
+    openuwb::demod::TimingResult ok;
     // Seed 200 samples off the true origin: inside the ±256 ROI.
-    BOOST_REQUIRE(gr::uwb::demod::core::stage_timing(
+    BOOST_REQUIRE(openuwb::demod::core::stage_timing(
         rx.data(), n, p, tmpl, int64_t(start) + 200, ok, scratch));
     BOOST_CHECK_EQUAL(ok.bounded_attempts, 1u);
     BOOST_CHECK_EQUAL(ok.bounded_success, 1u);
@@ -370,8 +370,8 @@ BOOST_AUTO_TEST_CASE(locked_bounded_never_uses_a_wide_scan)
 
     // Seed half a SYNC symbol away: no SYNC start lies inside the ±256 ROI, so
     // this is an explicit tracking failure, still with no wide scan.
-    gr::uwb::demod::TimingResult miss;
-    BOOST_CHECK(!gr::uwb::demod::core::stage_timing(
+    openuwb::demod::TimingResult miss;
+    BOOST_CHECK(!openuwb::demod::core::stage_timing(
         rx.data(), n, p, tmpl, int64_t(start) + 508, miss, scratch));
     BOOST_CHECK_EQUAL(miss.bounded_attempts, 1u);
     BOOST_CHECK_EQUAL(miss.bounded_success, 0u);
@@ -382,11 +382,11 @@ BOOST_AUTO_TEST_CASE(locked_bounded_never_uses_a_wide_scan)
     // which proves the bounded path is genuinely more restrictive rather than
     // broken.
     auto legacy = p;
-    legacy.sync_strategy = gr::uwb::demod::SyncStrategy::AcquireLegacy;
+    legacy.sync_strategy = openuwb::demod::SyncStrategy::AcquireLegacy;
     legacy.timing_search_margin = 40960;
     legacy.timing_max_backtrack_symbols = 40;
-    gr::uwb::demod::TimingResult acq;
-    BOOST_REQUIRE(gr::uwb::demod::core::stage_timing(
+    openuwb::demod::TimingResult acq;
+    BOOST_REQUIRE(openuwb::demod::core::stage_timing(
         rx.data(), n, legacy, tmpl, int64_t(start) + 508, acq, scratch));
     BOOST_CHECK_EQUAL(acq.bounded_attempts, 0u);
     BOOST_CHECK_LE(std::abs(acq.preamble_start_sample - int64_t(start)), 2);

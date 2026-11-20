@@ -35,8 +35,7 @@
 #include <limits>
 #include <vector>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace radar {
 
 enum class RadarCirStatus : uint8_t {
@@ -237,7 +236,7 @@ inline bool prepare_radar_cir_core(const RadarCirConfig& cfg,
         detail::reset_radar_cir_core_scratch(scratch);
         return false;
     }
-    gr::uwb::core::uwb_l2_normalize(scratch.sync_template);
+    openuwb::core::uwb_l2_normalize(scratch.sync_template);
 
     if (!prepare_radar_cir_code(hrp_code, demod::kQm35CodeLength, max_pre,
                                 max_post, scratch.cir)) {
@@ -388,5 +387,4 @@ inline bool radar_cir_one(const std::complex<float>* rx,
 }
 
 } // namespace radar
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

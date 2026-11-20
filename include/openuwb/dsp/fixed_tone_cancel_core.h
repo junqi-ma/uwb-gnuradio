@@ -44,8 +44,7 @@
 #include <string>
 #include <vector>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace core {
 
 // Default validated configuration (X410 / 737.28 MS/s, 6256.64 - 6489.6 MHz).
@@ -224,5 +223,4 @@ private:
 };
 
 } // namespace core
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

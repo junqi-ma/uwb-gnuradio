@@ -22,8 +22,7 @@
 #define UWB_FIXED_TONE_X86 0
 #endif
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace core {
 
 namespace {
@@ -594,5 +593,4 @@ FixedToneProcessCounts FixedToneCancelCore::cancel_in_place(int16_t* iq,
 }
 
 } // namespace core
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

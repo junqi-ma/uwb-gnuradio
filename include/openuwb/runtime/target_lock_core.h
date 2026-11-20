@@ -60,8 +60,7 @@
 #include <string>
 #include <vector>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace core {
 
 // ---------------------------------------------------------------------------
@@ -1129,5 +1128,4 @@ inline TargetLockStats TargetLockCore::stats() const
 }
 
 } // namespace core
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

@@ -5,7 +5,7 @@
 #include <cmath>
 #include <cstdint>
 
-namespace gr::uwb::demod::rxopt {
+namespace openuwb::demod::rxopt {
 
 struct BpmDecision {
     int8_t position;
@@ -45,4 +45,4 @@ inline float bpm_polarity_llr(const float* metrics)
     return positive - negative;
 }
 
-} // namespace gr::uwb::demod::rxopt
+} // namespace openuwb::demod::rxopt

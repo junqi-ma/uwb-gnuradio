@@ -12,9 +12,9 @@ using std::isnan;
 #include <fstream>
 #include <cstdlib>
 
-using namespace gr::uwb;
-using namespace gr::uwb::sic;
-namespace simd = gr::uwb::core::simd;
+using namespace openuwb;
+using namespace openuwb::sic;
+namespace simd = openuwb::core::simd;
 using cf = std::complex<float>;
 
 constexpr size_t kSps = 1016;

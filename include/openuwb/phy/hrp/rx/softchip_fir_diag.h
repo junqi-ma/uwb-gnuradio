@@ -33,8 +33,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace demod {
 namespace core {
 namespace detail {
@@ -198,5 +197,4 @@ inline bool diagnose_softchip_fir_segments(
 } // namespace detail
 } // namespace core
 } // namespace demod
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

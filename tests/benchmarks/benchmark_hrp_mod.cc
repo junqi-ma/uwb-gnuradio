@@ -34,12 +34,12 @@
 #include <string>
 #include <vector>
 
-using gr::uwb::mod::HrpModConfig;
-using gr::uwb::mod::HrpModScratch;
-using gr::uwb::mod::kMaxHrpTxSamples;
-using gr::uwb::mod::make_random_psdu;
-using gr::uwb::mod::modulate_one;
-using gr::uwb::mod::packet_samples_998p4;
+using openuwb::mod::HrpModConfig;
+using openuwb::mod::HrpModScratch;
+using openuwb::mod::kMaxHrpTxSamples;
+using openuwb::mod::make_random_psdu;
+using openuwb::mod::modulate_one;
+using openuwb::mod::packet_samples_998p4;
 using gr_complex = std::complex<float>;
 
 namespace {
@@ -120,7 +120,7 @@ main(int argc, char** argv)
     }
 
     HrpModScratch scratch;
-    scratch.reserve(gr::uwb::radar_meta::kMaxPsduBytes, kMaxHrpTxSamples);
+    scratch.reserve(openuwb::radar_meta::kMaxPsduBytes, kMaxHrpTxSamples);
     std::vector<gr_complex> tx(kMaxHrpTxSamples);
 
     const auto psdu_fixed = make_random_psdu(125, 20260909u, true);

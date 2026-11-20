@@ -12,7 +12,7 @@
 #include <gnuradio/uwb/uwb_rational_resampler_core.h>
 #include <gnuradio/uwb/uwb_resample_window.h>
 #include <gnuradio/uwb/uwb_fixed_tone_cancel_core.h>
-using namespace gr::uwb;
+using namespace openuwb;
 template<class T> std::vector<T> load(const std::string& path) {
     std::ifstream f(path,std::ios::binary|std::ios::ate);
     if(!f) throw std::runtime_error(path);

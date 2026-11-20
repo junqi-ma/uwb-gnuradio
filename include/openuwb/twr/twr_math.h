@@ -98,8 +98,7 @@
 #include <limits>
 #include <string>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace twr {
 
 // ===========================================================================
@@ -1183,7 +1182,6 @@ inline bool tof_distance_m(const TofResult& r, double propagation_speed_mps, dou
 }
 
 } // namespace twr
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb
 
 #endif /* INCLUDED_GNURADIO_UWB_UWB_TWR_MATH_H */

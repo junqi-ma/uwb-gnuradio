@@ -5,7 +5,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  *
  * Unified UWB SIC Implementation (Stage M2 Contract).
- * Namespace gr::uwb::sic.
+ * Namespace openuwb::sic.
  */
 
 #include <openuwb/sic/sic_unified.h>
@@ -19,8 +19,7 @@
 #include <immintrin.h>
 #endif
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace sic {
 
 namespace {
@@ -1184,5 +1183,4 @@ bool sic_process_unified(
 }
 
 } // namespace sic
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

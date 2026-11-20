@@ -16,7 +16,7 @@
 #define UWB_LIVE_ACQ_HAVE_AVX2 0
 #endif
 
-namespace gr::uwb::live {
+namespace openuwb::live {
 // Streaming SC16 acquisition. Caller owns the ring and advances probe only
 // through available samples. Ring size must be a power of two; scan receives
 // step valid pairs. reset() invalidates all accumulated history after a gap.
@@ -242,4 +242,4 @@ struct Acquisition {
         return -1;
     }
 };
-} // namespace gr::uwb::live
+} // namespace openuwb::live

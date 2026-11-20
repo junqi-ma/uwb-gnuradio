@@ -52,8 +52,7 @@
 #include <string>
 #include <vector>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace sic {
 
 // Maximum finite lag support the estimator will ever prepare.  A support must
@@ -339,5 +338,4 @@ UWB_API void set_b3_simd_disabled(int disabled);
 UWB_API bool is_b3_simd_disabled();
 
 } // namespace sic
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

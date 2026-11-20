@@ -37,8 +37,8 @@
 
 namespace {
 
-using namespace gr::uwb;
-using namespace gr::uwb::demod;
+using namespace openuwb;
+using namespace openuwb::demod;
 using cf = std::complex<float>;
 using cd = std::complex<double>;
 

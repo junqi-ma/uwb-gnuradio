@@ -30,7 +30,7 @@
 #include <stdexcept>
 #include <string>
 
-namespace gr::uwb::live {
+namespace openuwb::live {
 
 // CLI values of --autocorr-when-locked.
 enum class AutocorrWhenLocked { Scan, Suspend, Auto };
@@ -150,4 +150,4 @@ struct AutocorrGate {
     }
 };
 
-} // namespace gr::uwb::live
+} // namespace openuwb::live

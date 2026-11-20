@@ -18,7 +18,7 @@
 
 #include <cstdlib>
 
-namespace gr::uwb::apps {
+namespace openuwb::apps {
 
 inline int bpm_ablation_level()
 {
@@ -68,4 +68,4 @@ inline void apply_bpm_ablation(demod::Qm35825Profile& p, bool fused_baseline)
     p.rx_fused_sfo_track = env_flag("UWB_BPM_SFO", p.rx_fused_sfo_track);
 }
 
-} // namespace gr::uwb::apps
+} // namespace openuwb::apps

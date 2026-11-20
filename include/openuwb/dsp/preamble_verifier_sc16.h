@@ -21,8 +21,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace core {
 
 class UwbPreambleVerifierSc16 {
@@ -292,5 +291,4 @@ private:
 };
 
 } // namespace core
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

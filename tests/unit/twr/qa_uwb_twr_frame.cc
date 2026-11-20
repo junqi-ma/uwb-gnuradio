@@ -4,7 +4,7 @@
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  *
- * QA for gr::uwb::twr frame codec (gr-uwb/include/gnuradio/uwb/uwb_twr_frame.h),
+ * QA for openuwb::twr frame codec (gr-uwb/include/gnuradio/uwb/uwb_twr_frame.h),
  * milestone M0 / REQ-QA-02 "帧" row.
  *
  * WHAT THIS TEST PROVES
@@ -66,8 +66,7 @@
 
 // Boost's print helper cannot render a scoped enum, so give it the codec's
 // own stable names.  Declared in the enum's namespace so ADL finds them.
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace twr {
 
 inline std::ostream& operator<<(std::ostream& os, FrameError e)
@@ -116,15 +115,14 @@ inline std::ostream& operator<<(std::ostream& os, FrameType t)
 }
 
 } // namespace twr
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb
 
-using gr::uwb::twr::Frame;
-using gr::uwb::twr::FrameError;
-using gr::uwb::twr::FrameLayout;
-using gr::uwb::twr::FrameMatch;
-using gr::uwb::twr::FrameProfile;
-using gr::uwb::twr::TimestampField;
+using openuwb::twr::Frame;
+using openuwb::twr::FrameError;
+using openuwb::twr::FrameLayout;
+using openuwb::twr::FrameMatch;
+using openuwb::twr::FrameProfile;
+using openuwb::twr::TimestampField;
 
 #ifndef UWB_TESTDATA_DIR
 #define UWB_TESTDATA_DIR "../../../testdata"
@@ -162,7 +160,7 @@ constexpr uint16_t kGoldenFlags = 0x0001; // ranging
 
 struct Golden {
     const char* name;
-    gr::uwb::twr::FrameType type;
+    openuwb::twr::FrameType type;
     uint16_t session_id;
     uint16_t seq;
     uint16_t src_addr;
@@ -175,7 +173,7 @@ struct Golden {
 
 const Golden kGoldens[] = {
     { "poll_v1",
-      gr::uwb::twr::FrameType::Poll,
+      openuwb::twr::FrameType::Poll,
       kGoldenSession,
       kGoldenSeq,
       kAddrA,
@@ -185,7 +183,7 @@ const Golden kGoldens[] = {
       14,
       "0100efbe02013412010002000100" },
     { "response_v1",
-      gr::uwb::twr::FrameType::Response,
+      openuwb::twr::FrameType::Response,
       kGoldenSession,
       kGoldenSeq,
       kAddrB,
@@ -195,7 +193,7 @@ const Golden kGoldens[] = {
       24,
       "0101efbe020134120200010001008967452301badcfe0000" },
     { "final_v1",
-      gr::uwb::twr::FrameType::Final,
+      openuwb::twr::FrameType::Final,
       kGoldenSession,
       kGoldenSeq,
       kAddrA,
@@ -205,7 +203,7 @@ const Golden kGoldens[] = {
       29,
       "0102efbe02013412010002000100554433221155667788990504030201" },
     { "poll_wrap_v1",
-      gr::uwb::twr::FrameType::Poll,
+      openuwb::twr::FrameType::Poll,
       0xFFFF,
       0xFFFF,
       kAddrA,
@@ -215,7 +213,7 @@ const Golden kGoldens[] = {
       14,
       "0100ffffffff3412010002000100" },
     { "response_wrap_v1",
-      gr::uwb::twr::FrameType::Response,
+      openuwb::twr::FrameType::Response,
       kGoldenSession,
       kGoldenSeq,
       kAddrB,
@@ -225,7 +223,7 @@ const Golden kGoldens[] = {
       24,
       "0101efbe02013412020001000100ffffffffff0000000000" },
     { "final_wrap_v1",
-      gr::uwb::twr::FrameType::Final,
+      openuwb::twr::FrameType::Final,
       kGoldenSession,
       kGoldenSeq,
       kAddrA,
@@ -243,7 +241,7 @@ FrameProfile default_profile() { return FrameProfile(); }
 Frame make_golden_frame(const Golden& g)
 {
     Frame f;
-    f.version = gr::uwb::twr::kFrameVersion;
+    f.version = openuwb::twr::kFrameVersion;
     f.function_code = g.type;
     f.session_id = g.session_id;
     f.seq = g.seq;
@@ -251,7 +249,7 @@ Frame make_golden_frame(const Golden& g)
     f.src_addr = g.src_addr;
     f.dst_addr = g.dst_addr;
     f.flags = kGoldenFlags;
-    for (size_t i = 0; i < gr::uwb::twr::kMaxTimestamps; ++i)
+    for (size_t i = 0; i < openuwb::twr::kMaxTimestamps; ++i)
         f.timestamps[i] = (i < g.timestamp_count) ? g.timestamps[i] : 0;
     return f;
 }
@@ -259,7 +257,7 @@ Frame make_golden_frame(const Golden& g)
 std::vector<uint8_t> golden_bytes(const Golden& g)
 {
     std::vector<uint8_t> v;
-    BOOST_REQUIRE(gr::uwb::twr::hex_to_bytes(g.mac_payload_hex, v));
+    BOOST_REQUIRE(openuwb::twr::hex_to_bytes(g.mac_payload_hex, v));
     BOOST_REQUIRE_EQUAL(v.size(), g.payload_bytes);
     return v;
 }
@@ -732,7 +730,7 @@ std::vector<std::string> list_files_recursive(const std::string& dir,
 
 BOOST_AUTO_TEST_CASE(uwb_twr_frame_layout_constants)
 {
-    using namespace gr::uwb::twr;
+    using namespace openuwb::twr;
     BOOST_CHECK_EQUAL(kFrameVersion, 0x01);
     BOOST_CHECK_EQUAL(kOffVersion, 0u);
     BOOST_CHECK_EQUAL(kOffFunctionCode, 1u);
@@ -752,7 +750,7 @@ BOOST_AUTO_TEST_CASE(uwb_twr_frame_layout_constants)
     static_assert(kPhyMaxPsduBytes == 127,
                   "UWBR_FK3WS: PHY max PSDU is 127 bytes today; if the PHY "
                   "changed, update this mirror and the golden file together");
-    BOOST_CHECK_EQUAL(gr::uwb::radar_meta::kMaxPsduBytes, kPhyMaxPsduBytes);
+    BOOST_CHECK_EQUAL(openuwb::radar_meta::kMaxPsduBytes, kPhyMaxPsduBytes);
 
     // The frozen function codes and timestamp counts.
     BOOST_CHECK_EQUAL(static_cast<int>(FrameType::Poll), 0x00);
@@ -795,7 +793,7 @@ BOOST_AUTO_TEST_CASE(uwb_twr_frame_layout_constants)
 
 BOOST_AUTO_TEST_CASE(uwb_twr_frame_golden_bytes_and_offsets)
 {
-    using namespace gr::uwb::twr;
+    using namespace openuwb::twr;
     const FrameProfile p = default_profile();
 
     for (size_t gi = 0; gi < kNumGoldens; ++gi) {
@@ -875,7 +873,7 @@ BOOST_AUTO_TEST_CASE(uwb_twr_frame_golden_bytes_and_offsets)
 
 BOOST_AUTO_TEST_CASE(uwb_twr_frame_golden_json_is_live_test_data)
 {
-    using namespace gr::uwb::twr;
+    using namespace openuwb::twr;
     const std::string path = testdata_path(kGoldenRel);
     std::string doc;
     BOOST_REQUIRE_MESSAGE(read_file(path, doc),
@@ -1023,7 +1021,7 @@ BOOST_AUTO_TEST_CASE(uwb_twr_frame_golden_json_is_live_test_data)
 
 BOOST_AUTO_TEST_CASE(uwb_twr_frame_round_trip)
 {
-    using namespace gr::uwb::twr;
+    using namespace openuwb::twr;
     const FrameProfile p = default_profile();
 
     for (size_t gi = 0; gi < kNumGoldens; ++gi) {
@@ -1082,7 +1080,7 @@ BOOST_AUTO_TEST_CASE(uwb_twr_frame_round_trip)
 
 BOOST_AUTO_TEST_CASE(uwb_twr_frame_report_is_rejected_not_implemented)
 {
-    using namespace gr::uwb::twr;
+    using namespace openuwb::twr;
     const FrameProfile p = default_profile();
 
     // Encode side.
@@ -1115,7 +1113,7 @@ BOOST_AUTO_TEST_CASE(uwb_twr_frame_report_is_rejected_not_implemented)
 
 BOOST_AUTO_TEST_CASE(uwb_twr_frame_unknown_version_rejected)
 {
-    using namespace gr::uwb::twr;
+    using namespace openuwb::twr;
     const FrameProfile p = default_profile();
 
     for (int v = 0; v < 256; ++v) {
@@ -1151,7 +1149,7 @@ BOOST_AUTO_TEST_CASE(uwb_twr_frame_unknown_version_rejected)
 
 BOOST_AUTO_TEST_CASE(uwb_twr_frame_unknown_function_code_rejected)
 {
-    using namespace gr::uwb::twr;
+    using namespace openuwb::twr;
     const FrameProfile p = default_profile();
 
     const uint8_t bad_codes[] = { 0x04, 0x05, 0x10, 0x7F, 0x80, 0xFE, 0xFF };
@@ -1185,7 +1183,7 @@ BOOST_AUTO_TEST_CASE(uwb_twr_frame_unknown_function_code_rejected)
 
 BOOST_AUTO_TEST_CASE(uwb_twr_frame_reserved_flag_bits_rejected)
 {
-    using namespace gr::uwb::twr;
+    using namespace openuwb::twr;
     const FrameProfile p = default_profile();
 
     for (unsigned b = 2; b < 16; ++b) {
@@ -1223,7 +1221,7 @@ BOOST_AUTO_TEST_CASE(uwb_twr_frame_reserved_flag_bits_rejected)
 
 BOOST_AUTO_TEST_CASE(uwb_twr_frame_sts_present_rejected)
 {
-    using namespace gr::uwb::twr;
+    using namespace openuwb::twr;
     const FrameProfile p = default_profile();
 
     std::vector<uint8_t> bytes = golden_bytes(kGoldens[1]);
@@ -1256,7 +1254,7 @@ BOOST_AUTO_TEST_CASE(uwb_twr_frame_sts_present_rejected)
 
 BOOST_AUTO_TEST_CASE(uwb_twr_frame_timestamp_out_of_range_rejected)
 {
-    using namespace gr::uwb::twr;
+    using namespace openuwb::twr;
     const FrameProfile p = default_profile();
 
     const uint64_t ts40_max = (static_cast<uint64_t>(1) << 40) - 1;
@@ -1316,7 +1314,7 @@ BOOST_AUTO_TEST_CASE(uwb_twr_frame_timestamp_out_of_range_rejected)
 
 BOOST_AUTO_TEST_CASE(uwb_twr_frame_timestamp_wrap_boundary)
 {
-    using namespace gr::uwb::twr;
+    using namespace openuwb::twr;
     const FrameProfile p = default_profile();
 
     // Exact values at both ends of the 40-bit range round trip.  The bounds
@@ -1366,7 +1364,7 @@ BOOST_AUTO_TEST_CASE(uwb_twr_frame_timestamp_wrap_boundary)
 
 BOOST_AUTO_TEST_CASE(uwb_twr_frame_alternate_profile_widths)
 {
-    using namespace gr::uwb::twr;
+    using namespace openuwb::twr;
 
     struct Width {
         uint8_t bits;
@@ -1428,7 +1426,7 @@ BOOST_AUTO_TEST_CASE(uwb_twr_frame_alternate_profile_widths)
 
 BOOST_AUTO_TEST_CASE(uwb_twr_frame_profile_validation)
 {
-    using namespace gr::uwb::twr;
+    using namespace openuwb::twr;
     std::string err;
     FrameError code = FrameError::None;
 
@@ -1482,7 +1480,7 @@ BOOST_AUTO_TEST_CASE(uwb_twr_frame_profile_validation)
 
 BOOST_AUTO_TEST_CASE(uwb_twr_frame_session_and_seq_wrap_independently)
 {
-    using namespace gr::uwb::twr;
+    using namespace openuwb::twr;
     const FrameProfile p = default_profile();
 
     // Independent 16-bit wraps.
@@ -1566,7 +1564,7 @@ BOOST_AUTO_TEST_CASE(uwb_twr_frame_session_and_seq_wrap_independently)
 
 BOOST_AUTO_TEST_CASE(uwb_twr_frame_malformed_input_rejected)
 {
-    using namespace gr::uwb::twr;
+    using namespace openuwb::twr;
     const FrameProfile p = default_profile();
     std::string err;
     FrameError code = FrameError::None;
@@ -1648,7 +1646,7 @@ BOOST_AUTO_TEST_CASE(uwb_twr_frame_malformed_input_rejected)
 
 BOOST_AUTO_TEST_CASE(uwb_twr_frame_length_vs_max_psdu)
 {
-    using namespace gr::uwb::twr;
+    using namespace openuwb::twr;
     const FrameProfile p = default_profile();
     std::string err;
     FrameError code = FrameError::None;
@@ -1669,7 +1667,7 @@ BOOST_AUTO_TEST_CASE(uwb_twr_frame_length_vs_max_psdu)
     // All three fit the PHY's 127-byte PSDU with room to spare.
     BOOST_CHECK(frame_length_for(FrameType::Final, p) + kFrameFcsBytes <=
                 kPhyMaxPsduBytes);
-    BOOST_CHECK_EQUAL(gr::uwb::radar_meta::kMaxPsduBytes, kPhyMaxPsduBytes);
+    BOOST_CHECK_EQUAL(openuwb::radar_meta::kMaxPsduBytes, kPhyMaxPsduBytes);
 
     // A profile that cannot hold Final + FCS refuses to build one up front
     // (REQ-API-01: reject before the radio starts).
@@ -1717,7 +1715,7 @@ BOOST_AUTO_TEST_CASE(uwb_twr_frame_length_vs_max_psdu)
 
 BOOST_AUTO_TEST_CASE(uwb_twr_frame_fcs_has_exactly_one_producer)
 {
-    using namespace gr::uwb::twr;
+    using namespace openuwb::twr;
     const FrameProfile p = default_profile();
     std::string err;
     FrameError code = FrameError::None;
@@ -1740,7 +1738,7 @@ BOOST_AUTO_TEST_CASE(uwb_twr_frame_fcs_has_exactly_one_producer)
         std::vector<uint8_t> out;
         BOOST_REQUIRE(encode(make_golden_frame(kGoldens[gi]), p, out, err, &code));
         const std::vector<uint8_t> codec_only = out;
-        gr::uwb::mod::append_ieee_fcs(out); // what UwbHrpPacketSource does
+        openuwb::mod::append_ieee_fcs(out); // what UwbHrpPacketSource does
         BOOST_CHECK_EQUAL(out.size(), want[gi] + kFrameFcsBytes);
         // The FCS is appended, nothing is rewritten.
         BOOST_REQUIRE(out.size() > codec_only.size());
@@ -1793,8 +1791,8 @@ BOOST_AUTO_TEST_CASE(uwb_twr_frame_only_one_source_file_appends_the_fcs)
     const std::string root = repo_root();
     BOOST_REQUIRE_MESSAGE(!root.empty(),
                           "cannot locate the repository root from UWB_TESTDATA_DIR");
-    const std::string hdr_dir = root + "/gr-uwb/include/openuwb";
-    const std::string lib_dir = root + "/gr-uwb/lib";
+    const std::string hdr_dir = root + "/include/openuwb";
+    const std::string lib_dir = root + "/lib";
     BOOST_REQUIRE_MESSAGE(!list_files_recursive(hdr_dir, ".h").empty(),
                           "no headers in " << hdr_dir);
     BOOST_REQUIRE_MESSAGE(!list_files_recursive(lib_dir, ".cc").empty(),
@@ -1870,7 +1868,7 @@ BOOST_AUTO_TEST_CASE(uwb_twr_frame_only_one_source_file_appends_the_fcs)
 
 BOOST_AUTO_TEST_CASE(uwb_twr_frame_semantic_timestamp_accessors)
 {
-    using namespace gr::uwb::twr;
+    using namespace openuwb::twr;
     const FrameProfile p = default_profile();
     std::string err;
     FrameError code = FrameError::None;
@@ -1948,7 +1946,7 @@ BOOST_AUTO_TEST_CASE(uwb_twr_frame_semantic_timestamp_accessors)
 
 BOOST_AUTO_TEST_CASE(uwb_twr_frame_encode_into_caller_storage)
 {
-    using namespace gr::uwb::twr;
+    using namespace openuwb::twr;
     const FrameProfile p = default_profile();
     std::string err;
     FrameError code = FrameError::None;
@@ -1998,7 +1996,7 @@ BOOST_AUTO_TEST_CASE(uwb_twr_frame_encode_into_caller_storage)
 
 BOOST_AUTO_TEST_CASE(uwb_twr_frame_match_reports_each_failure_separately)
 {
-    using namespace gr::uwb::twr;
+    using namespace openuwb::twr;
 
     PeerExpectation e;
     e.expected_type = FrameType::Response;
@@ -2077,7 +2075,7 @@ BOOST_AUTO_TEST_CASE(uwb_twr_frame_match_reports_each_failure_separately)
 
 BOOST_AUTO_TEST_CASE(uwb_twr_frame_hex_helpers)
 {
-    using namespace gr::uwb::twr;
+    using namespace openuwb::twr;
     std::vector<uint8_t> v;
     BOOST_REQUIRE(hex_to_bytes("00ff10aB", v));
     BOOST_REQUIRE_EQUAL(v.size(), 4u);
@@ -2117,7 +2115,7 @@ BOOST_AUTO_TEST_CASE(uwb_twr_frame_hex_helpers)
 
 BOOST_AUTO_TEST_CASE(uwb_twr_frame_profile_geometry_matches_frozen_constants)
 {
-    using namespace gr::uwb::twr;
+    using namespace openuwb::twr;
     const FrameProfile p = default_profile();
 
     FrameProfileGeometry g;
@@ -2154,7 +2152,7 @@ BOOST_AUTO_TEST_CASE(uwb_twr_frame_profile_geometry_matches_frozen_constants)
     // symbol count: kPhrSymbols = 19 coded bits + 2 trailing bits.
     BOOST_CHECK_EQUAL(kPhrStandardInfoBytes, 2u);
     BOOST_CHECK_EQUAL(kPhrStandardCodedBits, 19u);
-    BOOST_CHECK_EQUAL(gr::uwb::mod::kPhrSymbols,
+    BOOST_CHECK_EQUAL(openuwb::mod::kPhrSymbols,
                       static_cast<size_t>(kPhrStandardCodedBits) + 2u);
 
     // The MAC-appends variant: describeable, 2 reserved FCS bytes, and NOT
@@ -2194,7 +2192,7 @@ BOOST_AUTO_TEST_CASE(uwb_twr_frame_profile_geometry_matches_frozen_constants)
 // arithmetic cannot hide behind the 40-bit default.
 BOOST_AUTO_TEST_CASE(uwb_twr_frame_on_air_length_comes_from_one_place)
 {
-    using namespace gr::uwb::twr;
+    using namespace openuwb::twr;
     FrameProfileGeometry g;
     BOOST_REQUIRE(frame_geometry_for(FrameProfileId::TwrV1, g));
 
@@ -2248,7 +2246,7 @@ BOOST_AUTO_TEST_CASE(uwb_twr_frame_on_air_length_comes_from_one_place)
             BOOST_REQUIRE_MESSAGE(encode(f, q, out, err, &code), err);
             BOOST_CHECK_EQUAL(out.size(), g.mac_payload_bytes(kGoldens[gi].type, q));
             // The modulation layer then appends exactly the two FCS bytes.
-            gr::uwb::mod::append_ieee_fcs(out);
+            openuwb::mod::append_ieee_fcs(out);
             BOOST_CHECK_EQUAL(out.size(), g.on_air_bytes(kGoldens[gi].type, q));
         }
     }
@@ -2260,7 +2258,7 @@ BOOST_AUTO_TEST_CASE(uwb_twr_frame_on_air_length_comes_from_one_place)
 
 BOOST_AUTO_TEST_CASE(uwb_twr_frame_profile_identity_is_enumerated)
 {
-    using namespace gr::uwb::twr;
+    using namespace openuwb::twr;
 
     // Exactly one profile exists, and it is named.
     BOOST_CHECK_EQUAL(kFrameProfileIdCount, 1u);
@@ -2355,7 +2353,7 @@ BOOST_AUTO_TEST_CASE(uwb_twr_frame_profile_identity_is_enumerated)
 
 BOOST_AUTO_TEST_CASE(uwb_twr_frame_geometry_check_names_the_mismatching_field)
 {
-    using namespace gr::uwb::twr;
+    using namespace openuwb::twr;
     const FrameProfile p = default_profile();
 
     FrameProfileGeometry g;
@@ -2561,7 +2559,7 @@ BOOST_AUTO_TEST_CASE(uwb_twr_frame_geometry_check_names_the_mismatching_field)
 
 BOOST_AUTO_TEST_CASE(uwb_twr_frame_session_id_local_to_wire)
 {
-    using namespace gr::uwb::twr;
+    using namespace openuwb::twr;
 
     // The wire field is two bytes, and that is the whole story.
     BOOST_CHECK_EQUAL(kSessionIdWireBits, 16u);

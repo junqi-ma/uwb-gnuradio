@@ -36,8 +36,7 @@
 #include <string>
 #include <vector>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace echo {
 
 // Fixed upper bound on TX channels (§5.1).  All hot-path arrays are
@@ -747,7 +746,6 @@ multitx_jam_ptr(const MultiTxWindowBank& bank, int64_t delta,
 }
 
 } // namespace echo
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb
 
 #endif /* INCLUDED_GNURADIO_UWB_UWB_ECHO_MULTITX_H */

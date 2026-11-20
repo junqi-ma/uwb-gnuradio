@@ -3,7 +3,7 @@
 #pragma once
 #include <gnuradio/uwb/uwb_fullpacket_sic_core.h>
 #include <array>
-namespace gr::uwb::experiment::segment_diag {
+namespace openuwb::experiment::segment_diag {
 struct Result : sic::FullPacketResult {
     std::array<double,3> phase_us{}, path_us{}, cfo_us{};
     double common_us=0;

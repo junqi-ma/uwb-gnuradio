@@ -47,10 +47,9 @@
 #include <thread>
 #include <vector>
 
-using namespace gr::uwb;
+using namespace openuwb;
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace live {
 
 static volatile std::sig_atomic_t interrupted = 0;
@@ -577,7 +576,7 @@ struct WindowSubmissionTracker {
     }
 };
 
-using gr::uwb::live::Acquisition;
+using openuwb::live::Acquisition;
 
 int run_live_rx(const LiveRxConfig& o)
 {
@@ -1144,5 +1143,4 @@ int run_live_rx(const LiveRxConfig& o)
 }
 
 } // namespace live
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

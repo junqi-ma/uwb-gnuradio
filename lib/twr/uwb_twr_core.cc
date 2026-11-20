@@ -18,8 +18,7 @@
 #include <limits>
 #include <string>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace twr {
 
 namespace {
@@ -1607,5 +1606,4 @@ std::string EndpointCore::to_string() const
 }
 
 } // namespace twr
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

@@ -50,7 +50,7 @@
 #define BOOST_TEST_MODULE qa_uwb_resampler_avx512
 #include <boost/test/unit_test.hpp>
 
-#include <gnuradio/uwb/uwb_simd_config.h>
+#include <openuwb/support/simd_config.h>
 #include <gnuradio/uwb/uwb_simd.h>
 #include <gnuradio/uwb/uwb_rational_resampler_core.h>
 
@@ -66,8 +66,8 @@
 #include <string>
 #include <vector>
 
-using gr::uwb::core::RationalResampler32_65Core;
-using gr::uwb::core::RationalResampler65_48Core;
+using openuwb::core::RationalResampler32_65Core;
+using openuwb::core::RationalResampler65_48Core;
 using gr_complex = std::complex<float>;
 using sc16 = std::complex<int16_t>;
 
@@ -166,14 +166,14 @@ bool avx512_ready(const char* what)
     BOOST_TEST_MESSAGE("SKIP " << what << ": no AVX-512 backend in this build"
                                << " (UWB_SIMD=" << UWB_SIMD_NAME
                                << ", required ISA="
-                               << gr::uwb::core::simd::required_isa() << ")");
+                               << openuwb::core::simd::required_isa() << ")");
     return false;
 #else
-    if (!gr::uwb::core::simd::runtime_supported()) {
+    if (!openuwb::core::simd::runtime_supported()) {
         BOOST_TEST_MESSAGE("SKIP " << what
                                    << ": this CPU/OS cannot execute the "
                                       "compiled backend (required ISA="
-                                   << gr::uwb::core::simd::required_isa()
+                                   << openuwb::core::simd::required_isa()
                                    << ")");
         return false;
     }
@@ -741,16 +741,16 @@ BOOST_AUTO_TEST_CASE(test_avx512_backend_report)
                                    << " level=" << UWB_SIMD_LEVEL
                                    << " requested=" << UWB_SIMD_REQUESTED
                                    << " required_isa="
-                                   << gr::uwb::core::simd::required_isa()
+                                   << openuwb::core::simd::required_isa()
                                    << " backend="
-                                   << gr::uwb::core::simd::backend_name()
+                                   << openuwb::core::simd::backend_name()
                                    << " runtime_supported="
-                                   << gr::uwb::core::simd::runtime_supported());
+                                   << openuwb::core::simd::runtime_supported());
     if (!avx512_ready("backend report"))
         return;
-    BOOST_CHECK_EQUAL(std::string(gr::uwb::core::simd::backend_name()),
+    BOOST_CHECK_EQUAL(std::string(openuwb::core::simd::backend_name()),
                       "avx512");
-    BOOST_CHECK(gr::uwb::core::simd::runtime_supported());
+    BOOST_CHECK(openuwb::core::simd::runtime_supported());
 }
 
 /**

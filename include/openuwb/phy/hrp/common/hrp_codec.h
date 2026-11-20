@@ -4,7 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <vector>
-namespace gr::uwb::codec {
+namespace openuwb::codec {
 // Bit 0 is the next chip; bit 14 is the newest bit of the 15-bit LFSR.
 // Initial states are the IEEE HRP BPRF sequences for preamble codes 9–12.
 inline uint16_t bprf_spreading_seed(size_t code_index)
@@ -251,4 +251,4 @@ inline void rs_syms_to_bits(const int* syms, int nsym, int8_t* bits)
         b[5] = static_cast<int8_t>(s & 1);
     }
 }
-} // namespace gr::uwb::codec
+} // namespace openuwb::codec

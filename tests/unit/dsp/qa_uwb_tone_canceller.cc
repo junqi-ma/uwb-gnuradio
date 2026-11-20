@@ -18,11 +18,11 @@
 #include <string>
 #include <vector>
 
-using gr::uwb::core::correlate_cis;
-using gr::uwb::core::estimate_tone;
-using gr::uwb::core::RationalResampler65_48Core;
-using gr::uwb::core::subtract_tone;
-using gr::uwb::core::subtract_tone_sc16;
+using openuwb::core::correlate_cis;
+using openuwb::core::estimate_tone;
+using openuwb::core::RationalResampler65_48Core;
+using openuwb::core::subtract_tone;
+using openuwb::core::subtract_tone_sc16;
 
 namespace {
 

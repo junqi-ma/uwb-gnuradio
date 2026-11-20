@@ -24,8 +24,7 @@
 #include <limits>
 #include <vector>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace radar {
 
 enum class CirStatus : uint8_t { Ok = 0, CirFailed = 1, InvalidInput = 2 };
@@ -392,5 +391,4 @@ inline bool estimate_radar_cir_repetition(
 }
 
 } // namespace radar
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

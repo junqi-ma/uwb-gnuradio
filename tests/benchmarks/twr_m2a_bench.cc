@@ -60,8 +60,8 @@
 #define UWB_TESTDATA_DIR "testdata"
 #endif
 
-namespace twr = gr::uwb::twr;
-namespace mod = gr::uwb::mod;
+namespace twr = openuwb::twr;
+namespace mod = openuwb::mod;
 using gr_complex = std::complex<float>;
 
 // ===========================================================================
@@ -542,7 +542,7 @@ StageObservation observe_stage(const std::vector<gr_complex>& buf,
     set_counting(true);
     reset_counts();
     for (size_t i = 0; i < iters; ++i) {
-        gr::uwb::demod::DemodResult res;
+        openuwb::demod::DemodResult res;
         twr::M2aStageTrace tr;
         twr::m2a_demod_work(buf.data(), buf.size(), cfg, res, tr, why);
     }
@@ -556,7 +556,7 @@ StageObservation observe_stage(const std::vector<gr_complex>& buf,
     std::vector<double> us;
     us.reserve(iters);
     for (size_t i = 0; i < iters; ++i) {
-        gr::uwb::demod::DemodResult res;
+        openuwb::demod::DemodResult res;
         twr::M2aStageTrace tr;
         auto a = clock::now();
         twr::m2a_demod_work(buf.data(), buf.size(), cfg, res, tr, why);

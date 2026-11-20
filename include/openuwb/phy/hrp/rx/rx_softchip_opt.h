@@ -50,8 +50,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace demod {
 namespace rxopt {
 
@@ -345,5 +344,4 @@ inline void rescale_prefix(std::vector<float>& chips,
 
 } // namespace rxopt
 } // namespace demod
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

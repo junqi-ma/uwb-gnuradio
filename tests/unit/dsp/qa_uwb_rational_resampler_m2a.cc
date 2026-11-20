@@ -41,10 +41,10 @@
 #include <string>
 #include <vector>
 
-using gr::uwb::core::RationalResampler48_65Core;
-using gr::uwb::core::RationalResampler32_65Core;
-using gr::uwb::core::RationalResampler65_48Core;
-using gr::uwb::core::RationalResampler65_32Core;
+using openuwb::core::RationalResampler48_65Core;
+using openuwb::core::RationalResampler32_65Core;
+using openuwb::core::RationalResampler65_48Core;
+using openuwb::core::RationalResampler65_32Core;
 using gr_complex = std::complex<float>;
 
 namespace {

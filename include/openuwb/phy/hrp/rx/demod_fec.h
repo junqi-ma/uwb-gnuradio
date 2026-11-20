@@ -10,7 +10,7 @@
 #include <utility>
 #include <openuwb/phy/hrp/common/hrp_codec.h>
 
-namespace gr::uwb::demod::core {
+namespace openuwb::demod::core {
 // ---------------------------------------------------------------------------
 // R3 helpers: BPRF spreading LFSR, CL-3 Viterbi, and SECDED parity.
 // All verified against the MATLAB golden reference (phr_ref2.mat / decode_uwb).
@@ -109,13 +109,13 @@ private:
 // Returns the +/-1 spreading stream over [start_bit, start_bit+nbits).
 // The PHR field uses offset 0; the payload field is offset by the number of
 // PHR active chips (21 symbols x 64 chips/burst = 1344).
-using gr::uwb::codec::bprf_spreading;
+using openuwb::codec::bprf_spreading;
 
 inline void cl3_trellis_tables(int o0[4][2], int o1[4][2], int nxt[4][2])
 {
     for (int st = 0; st < 4; ++st) {
         for (int u = 0; u < 2; ++u) {
-            const auto step = gr::uwb::codec::cl3_transition(st, u);
+            const auto step = openuwb::codec::cl3_transition(st, u);
             o0[st][u] = step.g0;
             o1[st][u] = step.g1;
             nxt[st][u] = step.next_state;
@@ -276,7 +276,7 @@ inline void vitdec_cl3(const int8_t* rx, size_t N, std::vector<int8_t>& out)
 
 // SECDED encode: 13 systematic bits -> 19-bit codeword (13 data + 6 parity).
 // Parity matrix rows from lrwpan.internal.hrpSECDED (verified against golden).
-using gr::uwb::codec::hrp_secded;
+using openuwb::codec::hrp_secded;
 
 // ---------------------------------------------------------------------------
 // Shared BPM-BPSK BPRF demod kernel (used by both the PHR and payload fields).
@@ -402,7 +402,7 @@ inline void vitdec_cl3_soft(const float* llr0, const float* llr1, size_t N,
 
 // IEEE 802.15.4 CRC-16 (reflected polynomial 0x8408, init 0).  FCS algorithm
 // used by DW1000 / QM35 frames (matches uwbdecoder.ieee802154CRC16).
-using gr::uwb::codec::crc16_802154;
+using openuwb::codec::crc16_802154;
 
 // ---------------------------------------------------------------------------
 // IEEE 802.15.4a RS(63,55) over GF(2^6) — matches lrwpan.internal.hrpRS.
@@ -414,22 +414,22 @@ using gr::uwb::codec::crc16_802154;
 // ---------------------------------------------------------------------------
 
 // GF(2^6) multiply (poly 0x61).
-using gr::uwb::codec::rs_gf_mul;
+using openuwb::codec::rs_gf_mul;
 
 // GF(2^6) power a^n (n may be negative via modular reduction mod 63).
-using gr::uwb::codec::rs_gf_pow;
+using openuwb::codec::rs_gf_pow;
 
-using gr::uwb::codec::rs_gf_inv;
+using openuwb::codec::rs_gf_inv;
 
 // Precomputed alpha^i / alpha^{-j} kernel lookups (GF(2^6), alpha = 2).
-using gr::uwb::codec::rs_gf_alpha_inv_pow;
-using gr::uwb::codec::rs_gf_alpha_pow;
+using openuwb::codec::rs_gf_alpha_inv_pow;
+using openuwb::codec::rs_gf_alpha_pow;
 
 // Pack 378 MSB-first bits -> 63 GF(2^6) symbols.
-using gr::uwb::codec::rs_bits_to_syms;
+using openuwb::codec::rs_bits_to_syms;
 
 // Unpack nsym symbols -> 6*nsym MSB-first bits.
-using gr::uwb::codec::rs_syms_to_bits;
+using openuwb::codec::rs_syms_to_bits;
 
 // Syndromes S_i = r(alpha^i), i=1..8.  Low-first: r(x) = sum_j r[j] x^j.
 // Horner: s = (((r62 * ai) ^ r61) * ai ^ ...) ^ r0, one table multiply per
@@ -1877,4 +1877,4 @@ inline bool decode_phr_biorth_soft(const float* m0p,
 } // namespace detail
 
 
-} // namespace gr::uwb::demod::core
+} // namespace openuwb::demod::core

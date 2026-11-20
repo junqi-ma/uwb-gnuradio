@@ -1,21 +1,18 @@
 # Copyright 2011,2012 Free Software Foundation, Inc.
 #
-# This file is part of gr-uwb
-#
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
 
 ########################################################################
-# Install public header files
-########################################################################
-########################################################################
-# Phase 2 layout.
+# Install public header files.
 #
-# The implementation headers live in include/openuwb/<domain>/, and the files
-# in this directory are thin forwarding headers kept for source compatibility
-# (TODO(openuwb-compat-removal); Phase 3/4 remove them).  Install both trees so
-# an isolated consumer compiles against the prefix alone, whichever spelling it
-# uses.
+# Phase 3: `include/openuwb/` is the implementation tree and
+# `include/gnuradio/uwb/` is the compatibility tree (thin forwarding headers,
+# the gr::uwb namespace alias, and the generated SIMD backend header).  Both
+# are installed so an isolated consumer compiles against the prefix alone.
+#
+# TODO(openuwb-compat-removal): stop installing the gnuradio/uwb tree once
+# downstream includes have moved to <openuwb/...>.
 ########################################################################
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/
     DESTINATION include/gnuradio/uwb
@@ -31,6 +28,13 @@ install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../openuwb/
 # into the build tree.  Install that generated copy, not the .in template, so
 # an installed consumer sees the same backend the library was built with.
 install(FILES
-    ${PROJECT_BINARY_DIR}/include/gnuradio/uwb/uwb_simd_config.h
+    ${PROJECT_BINARY_DIR}/include/openuwb/support/simd_config.h
+    DESTINATION include/openuwb/support
+)
+# TODO(openuwb-compat-removal): legacy location of the generated header, for
+# consumers that include <gnuradio/uwb/uwb_simd_config.h> directly.
+install(FILES
+    ${PROJECT_BINARY_DIR}/include/openuwb/support/simd_config.h
     DESTINATION include/gnuradio/uwb
+    RENAME uwb_simd_config.h
 )

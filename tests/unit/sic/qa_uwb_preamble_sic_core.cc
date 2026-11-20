@@ -54,7 +54,7 @@ namespace {
 
 using cplx = std::complex<float>;
 using dcp = std::complex<double>;
-namespace sic = gr::uwb::sic;
+namespace sic = openuwb::sic;
 
 using sic::SicConfig;
 using sic::SicMode;

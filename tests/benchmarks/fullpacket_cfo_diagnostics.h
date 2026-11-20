@@ -11,7 +11,7 @@
 #include <limits>
 #include <vector>
 
-namespace gr { namespace uwb { namespace experiment { namespace cfo_diag {
+namespace openuwb { namespace experiment { namespace cfo_diag {
 using cf = std::complex<float>;
 using cd = std::complex<double>;
 
@@ -192,4 +192,4 @@ inline bool run(const Input& input, Variant variant, Scratch& scratch, Timings& 
     }
     return finish(false);
 }
-}}}}
+}}}

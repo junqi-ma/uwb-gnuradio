@@ -17,8 +17,8 @@
 
 namespace {
 
-using namespace gr::uwb;
-using namespace gr::uwb::demod;
+using namespace openuwb;
+using namespace openuwb::demod;
 using cf = std::complex<float>;
 using cd = std::complex<double>;
 
@@ -1057,7 +1057,7 @@ bool compare_fused_cfo(const FusedCfoInput& in,
     }
 
     std::vector<cf> derotated(in.rx.size());
-    gr::uwb::demod::rxopt::derotate_range_scalar(
+    openuwb::demod::rxopt::derotate_range_scalar(
         derotated.data(), rx_ptr, in.rx.size(), 0, in.rx.size(), w);
 
     rxfusion::Metrics reference;

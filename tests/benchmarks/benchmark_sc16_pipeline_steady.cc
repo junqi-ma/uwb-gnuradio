@@ -53,7 +53,7 @@
 #include <unistd.h>
 #include <vector>
 
-using namespace gr::uwb::pipeline;
+using namespace openuwb::pipeline;
 
 namespace {
 
@@ -525,11 +525,11 @@ int main(int argc, char* argv[])
         } else if (a == "--sic-policy") {
             const std::string v = need(i);
             if (v == "preamble") {
-                cfg.sic_cfg.policy = gr::uwb::sic::SicPolicy::PreambleOnly;
+                cfg.sic_cfg.policy = openuwb::sic::SicPolicy::PreambleOnly;
             } else if (v == "fullpacket") {
-                cfg.sic_cfg.policy = gr::uwb::sic::SicPolicy::FullPacket;
+                cfg.sic_cfg.policy = openuwb::sic::SicPolicy::FullPacket;
             } else if (v == "auto") {
-                cfg.sic_cfg.policy = gr::uwb::sic::SicPolicy::AutoFallback;
+                cfg.sic_cfg.policy = openuwb::sic::SicPolicy::AutoFallback;
             } else {
                 std::cerr << "Error: bad --sic-policy\n";
                 return 1;
@@ -537,11 +537,11 @@ int main(int argc, char* argv[])
         } else if (a == "--sic-backend") {
             const std::string v = need(i);
             if (v == "ipatov") {
-                cfg.sic_cfg.backend = gr::uwb::sic::SicEstimatorBackend::Ipatov;
+                cfg.sic_cfg.backend = openuwb::sic::SicEstimatorBackend::Ipatov;
             } else if (v == "discrete") {
-                cfg.sic_cfg.backend = gr::uwb::sic::SicEstimatorBackend::DiscreteCir;
+                cfg.sic_cfg.backend = openuwb::sic::SicEstimatorBackend::DiscreteCir;
             } else if (v == "fractional") {
-                cfg.sic_cfg.backend = gr::uwb::sic::SicEstimatorBackend::PathFractional;
+                cfg.sic_cfg.backend = openuwb::sic::SicEstimatorBackend::PathFractional;
             } else {
                 std::cerr << "Error: bad --sic-backend\n";
                 return 1;

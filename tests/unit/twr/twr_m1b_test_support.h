@@ -65,8 +65,7 @@
 #include <utility>
 #include <vector>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace twr {
 namespace m1b_test {
 
@@ -774,7 +773,6 @@ private:
 
 } // namespace m1b_test
 } // namespace twr
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb
 
 #endif /* INCLUDED_GNURADIO_UWB_TWR_M1B_TEST_SUPPORT_H */

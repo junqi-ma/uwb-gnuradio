@@ -125,7 +125,7 @@
 #include <string>
 #include <vector>
 
-namespace gr::uwb::twr {
+namespace openuwb::twr {
 
 // ---------------------------------------------------------------------------
 // Frozen layout constants
@@ -164,7 +164,7 @@ inline constexpr size_t kMaxFrameBytes =
 // at the top of this file.  Only the modulation layer appends it.
 inline constexpr size_t kFrameFcsBytes = 2;
 
-// PHY limit for one PSDU, mirroring gr::uwb::radar_meta::kMaxPsduBytes
+// PHY limit for one PSDU, mirroring openuwb::radar_meta::kMaxPsduBytes
 // (uwb_radar_pdu_meta.h).  Duplicated rather than included because this
 // header must stay GNU-Radio-free; qa_uwb_twr_frame.cc static_asserts that
 // the two constants still agree, so the mirror cannot silently rot.
@@ -851,7 +851,7 @@ struct FrameProfileGeometry {
     size_t timestamp_bytes(const FrameProfile& p) const
     {
         // Qualified: an unqualified call would find this member and recurse.
-        return ::gr::uwb::twr::timestamp_bytes(p);
+        return ::openuwb::twr::timestamp_bytes(p);
     }
 
     // No trailing address/profile trailer in frame v1.  It is a method rather
@@ -1737,6 +1737,6 @@ inline bool hex_to_bytes(const std::string& hex, std::vector<uint8_t>& out)
     return true;
 }
 
-} // namespace gr::uwb::twr
+} // namespace openuwb::twr
 
 #endif /* INCLUDED_GNURADIO_UWB_UWB_TWR_FRAME_H */

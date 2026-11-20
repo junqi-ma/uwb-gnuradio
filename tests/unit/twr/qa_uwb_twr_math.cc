@@ -51,34 +51,34 @@ namespace test_tools {
 namespace tt_detail {
 
 template <>
-struct print_log_value<gr::uwb::twr::TofStatus> {
-    void operator()(std::ostream& os, gr::uwb::twr::TofStatus const& s) const
+struct print_log_value<openuwb::twr::TofStatus> {
+    void operator()(std::ostream& os, openuwb::twr::TofStatus const& s) const
     {
-        os << gr::uwb::twr::tof_status_to_string(s);
+        os << openuwb::twr::tof_status_to_string(s);
     }
 };
 
 template <>
-struct print_log_value<gr::uwb::twr::ClockRatioSource> {
-    void operator()(std::ostream& os, gr::uwb::twr::ClockRatioSource const& s) const
+struct print_log_value<openuwb::twr::ClockRatioSource> {
+    void operator()(std::ostream& os, openuwb::twr::ClockRatioSource const& s) const
     {
-        os << gr::uwb::twr::clock_ratio_source_to_string(s);
+        os << openuwb::twr::clock_ratio_source_to_string(s);
     }
 };
 
 template <>
-struct print_log_value<gr::uwb::twr::ComputedAt> {
-    void operator()(std::ostream& os, gr::uwb::twr::ComputedAt const& c) const
+struct print_log_value<openuwb::twr::ComputedAt> {
+    void operator()(std::ostream& os, openuwb::twr::ComputedAt const& c) const
     {
-        os << gr::uwb::twr::computed_at_to_string(c);
+        os << openuwb::twr::computed_at_to_string(c);
     }
 };
 
 template <>
-struct print_log_value<gr::uwb::twr::ExchangeStatus> {
-    void operator()(std::ostream& os, gr::uwb::twr::ExchangeStatus const& s) const
+struct print_log_value<openuwb::twr::ExchangeStatus> {
+    void operator()(std::ostream& os, openuwb::twr::ExchangeStatus const& s) const
     {
-        os << gr::uwb::twr::exchange_status_to_string(s);
+        os << openuwb::twr::exchange_status_to_string(s);
     }
 };
 
@@ -90,9 +90,9 @@ BOOST_AUTO_TEST_SUITE(twr_math)
 
 namespace {
 
-using namespace gr::uwb::twr;
-using gr::uwb::twr::json::Type;
-using gr::uwb::twr::json::Value;
+using namespace openuwb::twr;
+using openuwb::twr::json::Type;
+using openuwb::twr::json::Value;
 
 // ---------------------------------------------------------------------------
 // Structural detectors (COM-2 / COM-3).  Every negative claim is paired with

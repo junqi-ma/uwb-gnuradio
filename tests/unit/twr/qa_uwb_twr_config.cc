@@ -54,11 +54,11 @@
 #include <string>
 #include <vector>
 
-namespace twr = gr::uwb::twr;
-namespace radar_meta = gr::uwb::radar_meta;
-namespace uhd_cfg = gr::uwb::uhd;
+namespace twr = openuwb::twr;
+namespace radar_meta = openuwb::radar_meta;
+namespace uhd_cfg = openuwb::uhd;
 
-using namespace gr::uwb::twr;
+using namespace openuwb::twr;
 
 BOOST_AUTO_TEST_SUITE(twr_config)
 

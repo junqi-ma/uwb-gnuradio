@@ -1,7 +1,7 @@
 #pragma once
 #include <openuwb/sic/preamble_sic_core.h>
 #include <openuwb/phy/hrp/tx/hrp_mod_core.h>
-namespace gr { namespace uwb { namespace sic {
+namespace openuwb { namespace sic {
 struct FullPacketScratch {
     mod::HrpModScratch modulator;
     std::vector<std::complex<float>> waveform, model;
@@ -41,4 +41,4 @@ UWB_API FullPacketResult fullpacket_cancel(
  const SicModel& frozen, const std::complex<float>* reference_sync, size_t sync_n,
  int64_t roi_lo, int64_t roi_hi, FullPacketScratch& scratch,
  std::complex<float>* out, std::complex<float>* ihat);
-}}}
+}}

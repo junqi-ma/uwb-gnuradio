@@ -2,7 +2,7 @@
 #pragma once
 #include <openuwb/phy/hrp/rx/demod_sync.h>
 
-namespace gr::uwb::demod::core {
+namespace openuwb::demod::core {
 // ---------------------------------------------------------------------------
 // Stage 1 — seeded timing (R1).
 // Uses the detector-supplied absolute seed_start (or, if -1, scans the whole
@@ -66,8 +66,8 @@ inline bool stage_timing(const std::complex<float>* rx,
     float dense_Et = 0.0f;
     if (!sparse_tmpl && !shaped_tmpl) {
         scratch.work.assign(template_wf.begin(), template_wf.end());
-        gr::uwb::core::uwb_l2_normalize(scratch.work);
-        dense_Et = gr::uwb::core::uwb_template_energy(scratch.work);
+        openuwb::core::uwb_l2_normalize(scratch.work);
+        dense_Et = openuwb::core::uwb_template_energy(scratch.work);
         rxopt::ensure_real_sync_template(scratch.work,
                                          scratch.real_sync_template);
     }
@@ -1291,4 +1291,4 @@ inline bool stage_timing(const std::complex<float>* rx,
     return true;
 }
 
-} // namespace gr::uwb::demod::core
+} // namespace openuwb::demod::core

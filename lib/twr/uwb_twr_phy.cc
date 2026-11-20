@@ -12,11 +12,11 @@
  * is the ONE production pipeline; it never re-implements a core.  Each stage
  * calls the repository's existing header-only core:
  *
- *   hrp_mod      : gr::uwb::mod::modulate_one (+ append_ieee_fcs exactly once)
- *   tx_resample  : gr::uwb::core::RationalResampler48_65Core / <32,65>
- *   rx_resample  : gr::uwb::core::RationalResampler65_48Core / <65,32>
- *   demod        : gr::uwb::demod::core::demodulate_one
- *   codec        : gr::uwb::twr::encode_into / mac_payload_from_psdu / decode
+ *   hrp_mod      : openuwb::mod::modulate_one (+ append_ieee_fcs exactly once)
+ *   tx_resample  : openuwb::core::RationalResampler48_65Core / <32,65>
+ *   rx_resample  : openuwb::core::RationalResampler65_48Core / <65,32>
+ *   demod        : openuwb::demod::core::demodulate_one
+ *   codec        : openuwb::twr::encode_into / mac_payload_from_psdu / decode
  *
  * Numeric contract: docs/twr/M2-A_G0接口与数字坐标.md (G0) §3 (causal upfirdn,
  * N==0 -> 0, Lout = ceil(((N-1)*L+T)/M), reset between bursts), §5 (integer
@@ -73,8 +73,7 @@
 #include <string>
 #include <vector>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace twr {
 
 // The ONE FCS append site in this file (defined below, after the anonymous
@@ -1468,5 +1467,4 @@ bool m2a_native_roundtrip(const Frame& frame,
 }
 
 } // namespace twr
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

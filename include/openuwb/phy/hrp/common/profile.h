@@ -27,8 +27,7 @@
 #include <string>
 #include <vector>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace demod {
 
 enum class CirSoftChipMode : uint8_t {
@@ -507,5 +506,4 @@ inline std::vector<int8_t> BuildSampledCode(const int8_t* code, size_t code_len)
 }
 
 } // namespace demod
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

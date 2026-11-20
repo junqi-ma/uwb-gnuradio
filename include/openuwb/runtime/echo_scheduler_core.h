@@ -47,8 +47,7 @@
 #include <limits>
 #include <string>
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace echo {
 
 // Hard cap shared by the scheduler core and backends so burst fragment
@@ -309,7 +308,6 @@ inline bool plan_fragments(uint64_t total,
 }
 
 } // namespace echo
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb
 
 #endif /* INCLUDED_GNURADIO_UWB_UWB_ECHO_SCHEDULER_CORE_H */

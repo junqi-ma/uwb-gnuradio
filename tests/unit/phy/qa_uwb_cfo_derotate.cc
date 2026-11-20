@@ -49,7 +49,7 @@
 namespace {
 
 using gr_complex = std::complex<float>;
-using gr::uwb::demod::rxopt::kCfoDerotateBlock;
+using openuwb::demod::rxopt::kCfoDerotateBlock;
 
 constexpr double kFs = 998400000.0; // QM35825 work-grid sample rate
 
@@ -92,7 +92,7 @@ void derotate_range_two_pass_legacy(gr_complex* dst,
                                     size_t hi,
                                     double w)
 {
-    using namespace gr::uwb::demod::rxopt;
+    using namespace openuwb::demod::rxopt;
     if (n == 0 || src == nullptr || dst == nullptr)
         return;
     hi = std::min(hi, n);
@@ -179,7 +179,7 @@ BOOST_AUTO_TEST_CASE(test_cfo_derotate_error_contract_vs_legacy_two_pass)
         const double w = cfo_to_w(cfo);
         std::fill(got.begin(), got.end(), gr_complex(0.0f, 0.0f));
         std::fill(old.begin(), old.end(), gr_complex(0.0f, 0.0f));
-        gr::uwb::demod::rxopt::derotate_range_block(got.data(), src.data(), n, 0,
+        openuwb::demod::rxopt::derotate_range_block(got.data(), src.data(), n, 0,
                                                     n, w);
         derotate_range_two_pass_legacy(old.data(), src.data(), n, 0, n, w);
         const DiffStats st = diff_stats(got, old, 0, n);
@@ -203,10 +203,10 @@ BOOST_AUTO_TEST_CASE(test_cfo_derotate_absolute_accuracy_vs_double_reference)
 
     for (double cfo : { 0.0, 2000.0, 20000.0, -200000.0 }) {
         const double w = cfo_to_w(cfo);
-        gr::uwb::demod::rxopt::derotate_range_block(got.data(), src.data(), n, 0,
+        openuwb::demod::rxopt::derotate_range_block(got.data(), src.data(), n, 0,
                                                     n, w);
         derotate_range_two_pass_legacy(old.data(), src.data(), n, 0, n, w);
-        gr::uwb::demod::rxopt::derotate_range_reference(ref.data(), src.data(),
+        openuwb::demod::rxopt::derotate_range_reference(ref.data(), src.data(),
                                                         n, 0, n, w);
         const DiffStats st_new = diff_stats(got, ref, 0, n);
         const DiffStats st_old = diff_stats(old, ref, 0, n);
@@ -232,7 +232,7 @@ BOOST_AUTO_TEST_CASE(test_cfo_derotate_phase_origin_independent_of_lo)
     std::vector<gr_complex> part(n, gr_complex(-999.0f, -999.0f));
 
     const double w = cfo_to_w(20000.0);
-    gr::uwb::demod::rxopt::derotate_range_block(full.data(), src.data(), n, 0, n,
+    openuwb::demod::rxopt::derotate_range_block(full.data(), src.data(), n, 0, n,
                                                 w);
 
     // lo inside the first block, on a block boundary, and mid-block in a later
@@ -246,7 +246,7 @@ BOOST_AUTO_TEST_CASE(test_cfo_derotate_phase_origin_independent_of_lo)
                                    { 0, 1024 } };
     for (const auto& iv : intervals) {
         std::fill(part.begin(), part.end(), gr_complex(-999.0f, -999.0f));
-        gr::uwb::demod::rxopt::derotate_range_block(part.data(), src.data(), n,
+        openuwb::demod::rxopt::derotate_range_block(part.data(), src.data(), n,
                                                     iv.lo, iv.hi, w);
         // Outside the requested range nothing may be written.
         for (size_t i = 0; i < iv.lo; ++i)
@@ -272,7 +272,7 @@ BOOST_AUTO_TEST_CASE(test_cfo_derotate_phase_origin_independent_of_lo)
 
     // And the phase origin is really sample 0: sample lo must not be src[lo].
     std::vector<gr_complex> lo_only(n, gr_complex(-999.0f, -999.0f));
-    gr::uwb::demod::rxopt::derotate_range_block(lo_only.data(), src.data(), n,
+    openuwb::demod::rxopt::derotate_range_block(lo_only.data(), src.data(), n,
                                                 4096, 4097, w);
     BOOST_CHECK_GT(std::abs(lo_only[4096] - src[4096]), 1e-3f);
     const double phase = -w * 4096.0;
@@ -296,9 +296,9 @@ BOOST_AUTO_TEST_CASE(test_cfo_derotate_range_guards)
     {
         std::vector<gr_complex> d(n, sentinel);
         std::vector<gr_complex> ref(n, sentinel);
-        gr::uwb::demod::rxopt::derotate_range_block(d.data(), src.data(), n,
+        openuwb::demod::rxopt::derotate_range_block(d.data(), src.data(), n,
                                                     1024, n + 5000, w);
-        gr::uwb::demod::rxopt::derotate_range_reference(ref.data(), src.data(),
+        openuwb::demod::rxopt::derotate_range_reference(ref.data(), src.data(),
                                                         n, 1024, n, w);
         for (size_t i = 0; i < 1024; ++i)
             BOOST_CHECK_EQUAL(d[i], sentinel);
@@ -309,7 +309,7 @@ BOOST_AUTO_TEST_CASE(test_cfo_derotate_range_guards)
     for (auto iv : { std::pair<size_t, size_t>{ 2000, 2000 },
                      std::pair<size_t, size_t>{ 3000, 2000 } }) {
         std::vector<gr_complex> d(n, sentinel);
-        gr::uwb::demod::rxopt::derotate_range_block(d.data(), src.data(), n,
+        openuwb::demod::rxopt::derotate_range_block(d.data(), src.data(), n,
                                                     iv.first, iv.second, w);
         for (size_t i = 0; i < n; ++i)
             BOOST_CHECK_EQUAL(d[i], sentinel);
@@ -317,11 +317,11 @@ BOOST_AUTO_TEST_CASE(test_cfo_derotate_range_guards)
     // n = 0 and null pointers are no-ops (must not crash).
     {
         std::vector<gr_complex> d(4, sentinel);
-        gr::uwb::demod::rxopt::derotate_range_block(d.data(), src.data(), 0, 0,
+        openuwb::demod::rxopt::derotate_range_block(d.data(), src.data(), 0, 0,
                                                     0, w);
-        gr::uwb::demod::rxopt::derotate_range_block(nullptr, src.data(), n, 0, 8,
+        openuwb::demod::rxopt::derotate_range_block(nullptr, src.data(), n, 0, 8,
                                                     w);
-        gr::uwb::demod::rxopt::derotate_range_block(d.data(), nullptr, n, 0, 8,
+        openuwb::demod::rxopt::derotate_range_block(d.data(), nullptr, n, 0, 8,
                                                     w);
         for (size_t i = 0; i < d.size(); ++i)
             BOOST_CHECK_EQUAL(d[i], sentinel);
@@ -336,7 +336,7 @@ BOOST_AUTO_TEST_CASE(test_cfo_derotate_zero_cfo_is_identity)
     const size_t n = 5000;
     const std::vector<gr_complex> src = make_signal(n, 5u);
     std::vector<gr_complex> d(n, gr_complex(-999.0f, -999.0f));
-    gr::uwb::demod::rxopt::derotate_range_block(d.data(), src.data(), n, 0, n,
+    openuwb::demod::rxopt::derotate_range_block(d.data(), src.data(), n, 0, n,
                                                 0.0);
     for (size_t i = 0; i < n; ++i)
         BOOST_CHECK_EQUAL(d[i], src[i]);
@@ -366,10 +366,10 @@ BOOST_AUTO_TEST_CASE(test_cfo_derotate_block_boundaries)
         std::vector<gr_complex> got(n);
         std::vector<gr_complex> old(n);
         std::vector<gr_complex> ref(n);
-        gr::uwb::demod::rxopt::derotate_range_block(got.data(), src.data(), n, 0,
+        openuwb::demod::rxopt::derotate_range_block(got.data(), src.data(), n, 0,
                                                     n, w);
         derotate_range_two_pass_legacy(old.data(), src.data(), n, 0, n, w);
-        gr::uwb::demod::rxopt::derotate_range_reference(ref.data(), src.data(),
+        openuwb::demod::rxopt::derotate_range_reference(ref.data(), src.data(),
                                                         n, 0, n, w);
         const DiffStats st_old = diff_stats(got, old, 0, n);
         const DiffStats st_ref = diff_stats(got, ref, 0, n);
@@ -394,9 +394,9 @@ BOOST_AUTO_TEST_CASE(test_cfo_derotate_legacy_recurrence_unchanged)
         const double w = cfo_to_w(cfo);
         std::vector<gr_complex> got(n);
         std::vector<gr_complex> ref(n);
-        gr::uwb::demod::rxopt::derotate_range_recurrence(got.data(), src.data(),
+        openuwb::demod::rxopt::derotate_range_recurrence(got.data(), src.data(),
                                                          n, 0, n, w);
-        gr::uwb::demod::rxopt::derotate_range_reference(ref.data(), src.data(),
+        openuwb::demod::rxopt::derotate_range_reference(ref.data(), src.data(),
                                                         n, 0, n, w);
         const DiffStats st = diff_stats(got, ref, 0, n);
         BOOST_CHECK_LE(st.max_abs, kMaxAbsVsDoubleRef);

@@ -70,8 +70,7 @@
 #define UWB_RX_CFO_HAVE_AVX2 0
 #endif
 
-namespace gr {
-namespace uwb {
+namespace openuwb {
 namespace demod {
 namespace rxopt {
 
@@ -381,5 +380,4 @@ inline std::pair<size_t, size_t> compute_sfd_search_range(
 
 } // namespace rxopt
 } // namespace demod
-} // namespace uwb
-} // namespace gr
+} // namespace openuwb

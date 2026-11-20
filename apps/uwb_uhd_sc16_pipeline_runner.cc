@@ -39,7 +39,7 @@ using std::isnan;
 #include <utility>
 #include <vector>
 
-using namespace gr::uwb::pipeline;
+using namespace openuwb::pipeline;
 
 #ifndef UWB_TESTDATA_DIR
 #define UWB_TESTDATA_DIR "testdata"
@@ -683,11 +683,11 @@ int main(int argc, char* argv[])
             }
             const std::string v = argv[++i];
             if (v == "preamble") {
-                cfg.sic_cfg.policy = gr::uwb::sic::SicPolicy::PreambleOnly;
+                cfg.sic_cfg.policy = openuwb::sic::SicPolicy::PreambleOnly;
             } else if (v == "fullpacket") {
-                cfg.sic_cfg.policy = gr::uwb::sic::SicPolicy::FullPacket;
+                cfg.sic_cfg.policy = openuwb::sic::SicPolicy::FullPacket;
             } else if (v == "auto") {
-                cfg.sic_cfg.policy = gr::uwb::sic::SicPolicy::AutoFallback;
+                cfg.sic_cfg.policy = openuwb::sic::SicPolicy::AutoFallback;
             } else {
                 std::cerr << "Error: Invalid --sic-policy '" << v
                           << "'. Expected preamble|fullpacket|auto.\n";
@@ -702,11 +702,11 @@ int main(int argc, char* argv[])
             }
             const std::string v = argv[++i];
             if (v == "ipatov") {
-                cfg.sic_cfg.backend = gr::uwb::sic::SicEstimatorBackend::Ipatov;
+                cfg.sic_cfg.backend = openuwb::sic::SicEstimatorBackend::Ipatov;
             } else if (v == "discrete") {
-                cfg.sic_cfg.backend = gr::uwb::sic::SicEstimatorBackend::DiscreteCir;
+                cfg.sic_cfg.backend = openuwb::sic::SicEstimatorBackend::DiscreteCir;
             } else if (v == "fractional") {
-                cfg.sic_cfg.backend = gr::uwb::sic::SicEstimatorBackend::PathFractional;
+                cfg.sic_cfg.backend = openuwb::sic::SicEstimatorBackend::PathFractional;
             } else {
                 std::cerr << "Error: Invalid --sic-backend '" << v
                           << "'. Expected ipatov|discrete|fractional.\n";
@@ -938,15 +938,15 @@ int main(int argc, char* argv[])
 
     const char* sic_policy_str = "auto";
     switch (cfg.sic_cfg.policy) {
-    case gr::uwb::sic::SicPolicy::PreambleOnly: sic_policy_str = "preamble"; break;
-    case gr::uwb::sic::SicPolicy::FullPacket:   sic_policy_str = "fullpacket"; break;
-    case gr::uwb::sic::SicPolicy::AutoFallback: sic_policy_str = "auto"; break;
+    case openuwb::sic::SicPolicy::PreambleOnly: sic_policy_str = "preamble"; break;
+    case openuwb::sic::SicPolicy::FullPacket:   sic_policy_str = "fullpacket"; break;
+    case openuwb::sic::SicPolicy::AutoFallback: sic_policy_str = "auto"; break;
     }
     const char* sic_backend_str = "ipatov";
     switch (cfg.sic_cfg.backend) {
-    case gr::uwb::sic::SicEstimatorBackend::Ipatov:         sic_backend_str = "ipatov"; break;
-    case gr::uwb::sic::SicEstimatorBackend::DiscreteCir:    sic_backend_str = "discrete"; break;
-    case gr::uwb::sic::SicEstimatorBackend::PathFractional: sic_backend_str = "fractional"; break;
+    case openuwb::sic::SicEstimatorBackend::Ipatov:         sic_backend_str = "ipatov"; break;
+    case openuwb::sic::SicEstimatorBackend::DiscreteCir:    sic_backend_str = "discrete"; break;
+    case openuwb::sic::SicEstimatorBackend::PathFractional: sic_backend_str = "fractional"; break;
     }
 
     std::cout << "Starting UHD SC16 Pipeline...\n"

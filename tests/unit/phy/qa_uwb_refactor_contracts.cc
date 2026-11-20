@@ -13,7 +13,7 @@
 #include <mutex>
 #include <string>
 
-using namespace gr::uwb;
+using namespace openuwb;
 
 BOOST_AUTO_TEST_CASE(shared_codec_known_crc_and_field_inverse)
 {

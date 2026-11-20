@@ -21,7 +21,7 @@
 #include <vector>
 
 
-namespace gr::uwb::demod::core {
+namespace openuwb::demod::core {
 // ---------------------------------------------------------------------------
 // Worker scratch: one per worker thread.  Pre-allocated at construction and
 // reused across jobs to avoid per-packet allocation in the hot path.
@@ -110,7 +110,7 @@ struct DemodScratch {
             }
             if (mode_changed) {
                 sfd_mode = cur;
-                sfd_seq = gr::uwb::demod::GetSfdSequence(new_sfd_mode);
+                sfd_seq = openuwb::demod::GetSfdSequence(new_sfd_mode);
             }
             if (code_changed || mode_changed || ns_sfd_sparse.empty()) {
                 ns_sfd_sparse.clear();
@@ -315,4 +315,4 @@ struct DemodScratch {
 };
 
 
-} // namespace gr::uwb::demod::core
+} // namespace openuwb::demod::core
