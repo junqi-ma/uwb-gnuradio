@@ -3470,3 +3470,800 @@ BOOST_AUTO_TEST_CASE(test_demod_core_soft_trace_viterbi_matches_plain)
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// FEC-OPT (perf/payload-fec-opt): bit-exactness of the table-driven GF(2^6)
+// RS(63,55) decoder and the unrolled 4-state CL-3 Viterbi.
+//
+// The reference implementation below is an independent copy of the code that
+// ran before this change (bit-serial GF multiply, alpha-power syndrome loop,
+// `for (st) for (u)` ACS).  The optimised headers are always compared against
+// this copy -- never against themselves.
+// ---------------------------------------------------------------------------
+namespace fec_opt_ref {
+
+// --- Original GF(2^6) arithmetic (poly 0x61, alpha = 2) -------------------
+int gf_mul(int a, int b)
+{
+    int p = 0;
+    a &= 0x3f;
+    b &= 0x3f;
+    for (int i = 0; i < 6; ++i) {
+        if (b & 1)
+            p ^= a;
+        const bool carry = (a & 0x20) != 0;
+        a = (a << 1) & 0x3f;
+        if (carry)
+            a ^= 0x21;
+        b >>= 1;
+    }
+    return p & 0x3f;
+}
+
+int gf_pow(int a, int n)
+{
+    int r = 1;
+    a &= 0x3f;
+    n %= 63;
+    if (n < 0)
+        n += 63;
+    while (n) {
+        if (n & 1)
+            r = gf_mul(r, a);
+        a = gf_mul(a, a);
+        n >>= 1;
+    }
+    return r;
+}
+
+int gf_inv(int a)
+{
+    return a ? gf_pow(a, 62) : 0;
+}
+
+// --- Original RS decoder --------------------------------------------------
+void bits_to_syms(const int8_t* bits, int count, int* symbols)
+{
+    for (int i = 0; i < count; ++i) {
+        int s = 0;
+        for (int b = 0; b < 6; ++b)
+            s = (s << 1) | (bits[i * 6 + b] & 1);
+        symbols[i] = s;
+    }
+}
+
+void syms_to_bits(const int* syms, int nsym, int8_t* bits)
+{
+    for (int i = 0; i < nsym; ++i)
+        for (int b = 0; b < 6; ++b)
+            bits[i * 6 + b] = static_cast<int8_t>((syms[i] >> (5 - b)) & 1);
+}
+
+void syndromes(const int* r63, int* S8)
+{
+    for (int i = 1; i <= 8; ++i) {
+        const int ai = gf_pow(2, i);
+        int s = 0;
+        int ap = 1;
+        for (int j = 0; j < 63; ++j) {
+            s ^= gf_mul(r63[j], ap);
+            ap = gf_mul(ap, ai);
+        }
+        S8[i - 1] = s;
+    }
+}
+
+int bm_len(const int* S, int count, int* Lambda)
+{
+    int C[9] = { 1, 0, 0, 0, 0, 0, 0, 0, 0 };
+    int B[9] = { 1, 0, 0, 0, 0, 0, 0, 0, 0 };
+    int L = 0;
+    int m = 1;
+    int b = 1;
+    for (int n = 0; n < count; ++n) {
+        int delta = S[n];
+        for (int i = 1; i <= L; ++i)
+            delta ^= gf_mul(C[i], S[n - i]);
+        if (delta == 0) {
+            ++m;
+        } else {
+            int T[9];
+            for (int i = 0; i < 9; ++i)
+                T[i] = C[i];
+            const int scale = gf_mul(delta, gf_inv(b));
+            for (int i = 0; i < 9 - m; ++i)
+                C[i + m] ^= gf_mul(scale, B[i]);
+            if (2 * L <= n) {
+                L = n + 1 - L;
+                for (int i = 0; i < 9; ++i)
+                    B[i] = T[i];
+                b = delta;
+                m = 1;
+            } else {
+                ++m;
+            }
+        }
+    }
+    for (int i = 0; i < 9; ++i)
+        Lambda[i] = C[i];
+    return L;
+}
+
+int chien(const int* Lambda, int L, int* err_pos)
+{
+    int nerr = 0;
+    for (int j = 0; j < 63; ++j) {
+        const int xinv = gf_pow(2, (63 - j) % 63);
+        int v = 0;
+        int xp = 1;
+        for (int i = 0; i <= L; ++i) {
+            v ^= gf_mul(Lambda[i], xp);
+            xp = gf_mul(xp, xinv);
+        }
+        if (v == 0) {
+            if (nerr < 4)
+                err_pos[nerr] = j;
+            ++nerr;
+        }
+    }
+    return nerr;
+}
+
+void forney(const int* S8, const int* Lambda, int L, const int* err_pos,
+            int nerr, int* err_val)
+{
+    int Omega[8] = {};
+    for (int i = 0; i < 8; ++i) {
+        int o = 0;
+        for (int j = 0; j <= L && j <= i; ++j)
+            o ^= gf_mul(Lambda[j], S8[i - j]);
+        Omega[i] = o;
+    }
+    for (int k = 0; k < nerr; ++k) {
+        const int j = err_pos[k];
+        const int Xinv = gf_pow(2, (63 - j) % 63);
+        int num = 0;
+        int xp = 1;
+        for (int i = 0; i < 8; ++i) {
+            num ^= gf_mul(Omega[i], xp);
+            xp = gf_mul(xp, Xinv);
+        }
+        int den = 0;
+        xp = 1;
+        for (int i = 1; i <= L; i += 2) {
+            den ^= gf_mul(Lambda[i], xp);
+            xp = gf_mul(xp, gf_mul(Xinv, Xinv));
+        }
+        err_val[k] = den ? gf_mul(num, gf_inv(den)) : 0;
+    }
+}
+
+bool zero_syndromes(const int* S)
+{
+    for (int i = 0; i < 8; ++i)
+        if (S[i] != 0)
+            return false;
+    return true;
+}
+
+bool decode_block(const int8_t* coded378, int8_t* data330)
+{
+    int r[63];
+    bits_to_syms(coded378, 63, r);
+    int S[8];
+    syndromes(r, S);
+    if (!zero_syndromes(S)) {
+        int Lambda[9] = {};
+        const int L = bm_len(S, 8, Lambda);
+        if (L <= 0 || L > 4)
+            return false;
+        int err_pos[4] = {};
+        const int nerr = chien(Lambda, L, err_pos);
+        if (nerr != L)
+            return false;
+        int corrections[8] = {};
+        forney(S, Lambda, L, err_pos, nerr, corrections);
+        for (int i = 0; i < nerr; ++i)
+            r[err_pos[i]] ^= corrections[i];
+        int check[8];
+        syndromes(r, check);
+        if (!zero_syndromes(check))
+            return false;
+    }
+    syms_to_bits(r, 55, data330);
+    return true;
+}
+
+void pack_psdu_bytes(const std::vector<int8_t>& bits, std::vector<uint8_t>& bytes)
+{
+    bytes.resize(bits.size() / 8);
+    for (size_t i = 0; i < bytes.size(); ++i) {
+        uint8_t byte = 0;
+        for (int bit = 0; bit < 8; ++bit)
+            byte |= static_cast<uint8_t>(bits[8 * i + bit]) << bit;
+        bytes[i] = byte;
+    }
+}
+
+// --- Original CL-3 Viterbi ------------------------------------------------
+struct Cl3Transition {
+    int g0;
+    int g1;
+    int next_state;
+};
+
+Cl3Transition cl3_transition(int state, int input)
+{
+    const int s1 = state >> 1;
+    const int s0 = state & 1;
+    return { s1, input ^ s0, (input << 1) | s1 };
+}
+
+float soft_metric(float path, int o0, int o1, float llr0, float llr1)
+{
+    const float c0 = (2.0f * static_cast<float>(o0) - 1.0f) * llr0;
+    const float c1 = (2.0f * static_cast<float>(o1) - 1.0f) * llr1;
+    return path + c0 + c1;
+}
+
+template <typename Metric, typename ExtendPath>
+void vit_truncated(size_t N, Metric inf, ExtendPath extend,
+                   std::vector<int8_t>& out)
+{
+    int o0[4][2], o1[4][2], nxt[4][2];
+    for (int st = 0; st < 4; ++st) {
+        for (int u = 0; u < 2; ++u) {
+            const auto step = cl3_transition(st, u);
+            o0[st][u] = step.g0;
+            o1[st][u] = step.g1;
+            nxt[st][u] = step.next_state;
+        }
+    }
+    Metric surf[4] = { Metric{0}, inf, inf, inf };
+    std::vector<int8_t> back(N * 4);
+    for (size_t t = 0; t < N; ++t) {
+        Metric ns[4] = { inf, inf, inf, inf };
+        for (int st = 0; st < 4; ++st) {
+            for (int u = 0; u < 2; ++u) {
+                const Metric m = extend(t, surf[st], o0[st][u], o1[st][u]);
+                const int nst = nxt[st][u];
+                if (m < ns[nst]) {
+                    ns[nst] = m;
+                    back[t * 4 + nst] = static_cast<int8_t>((u << 2) | st);
+                }
+            }
+        }
+        for (int i = 0; i < 4; ++i)
+            surf[i] = ns[i];
+    }
+    int best = 0;
+    for (int i = 1; i < 4; ++i)
+        if (surf[i] < surf[best])
+            best = i;
+    out.resize(N);
+    int cur = best;
+    for (size_t t = N; t-- > 0;) {
+        const int v = back[t * 4 + cur];
+        out[t] = static_cast<int8_t>(v >> 2);
+        cur = v & 3;
+    }
+}
+
+void vit_hard(const int8_t* rx, size_t N, std::vector<int8_t>& out)
+{
+    vit_truncated(N, 1000000, [&](size_t t, int path, int g0, int g1) {
+        const int distance = (rx[2 * t] ^ g0) + (rx[2 * t + 1] ^ g1);
+        return path + distance;
+    }, out);
+}
+
+// Count the ACS comparisons where a candidate metric exactly equals the
+// running best (and both are finite): those are the steps where the strict
+// `if (m < ns[nst])` tie rule decides the survivor, so the equivalence test
+// below is only meaningful if this counter is non-zero.
+template <typename Metric, typename ExtendPath>
+size_t count_ties(size_t N, Metric inf, ExtendPath extend)
+{
+    int o0[4][2], o1[4][2], nxt[4][2];
+    for (int st = 0; st < 4; ++st) {
+        for (int u = 0; u < 2; ++u) {
+            const auto step = cl3_transition(st, u);
+            o0[st][u] = step.g0;
+            o1[st][u] = step.g1;
+            nxt[st][u] = step.next_state;
+        }
+    }
+    Metric surf[4] = { Metric{0}, inf, inf, inf };
+    size_t ties = 0;
+    for (size_t t = 0; t < N; ++t) {
+        Metric ns[4] = { inf, inf, inf, inf };
+        for (int st = 0; st < 4; ++st) {
+            for (int u = 0; u < 2; ++u) {
+                const Metric m = extend(t, surf[st], o0[st][u], o1[st][u]);
+                const int nst = nxt[st][u];
+                if (m < ns[nst]) {
+                    ns[nst] = m;
+                } else if (m == ns[nst] && m != inf) {
+                    ++ties;
+                }
+            }
+        }
+        for (int i = 0; i < 4; ++i)
+            surf[i] = ns[i];
+    }
+    return ties;
+}
+
+size_t count_hard_ties(const int8_t* rx, size_t N)
+{
+    return count_ties(N, 1000000, [&](size_t t, int path, int g0, int g1) {
+        const int distance = (rx[2 * t] ^ g0) + (rx[2 * t + 1] ^ g1);
+        return path + distance;
+    });
+}
+
+void vit_soft(const float* l0, const float* l1, size_t N,
+              std::vector<int8_t>& out)
+{
+    vit_truncated(N, 1e30f, [&](size_t t, float path, int g0, int g1) {
+        return soft_metric(path, g0, g1, l0[t], l1[t]);
+    }, out);
+}
+
+struct Trace {
+    std::vector<int8_t> bits;
+    std::vector<int8_t> states;
+    std::vector<float> margins;
+    std::vector<uint8_t> lose_u;
+};
+
+void vit_soft_trace(const float* llr0, const float* llr1, size_t N, Trace& tr)
+{
+    int o0[4][2], o1[4][2], nxt[4][2];
+    for (int st = 0; st < 4; ++st) {
+        for (int u = 0; u < 2; ++u) {
+            const auto step = cl3_transition(st, u);
+            o0[st][u] = step.g0;
+            o1[st][u] = step.g1;
+            nxt[st][u] = step.next_state;
+        }
+    }
+    const float INF = 1e30f;
+    float surf[4] = { 0.0f, INF, INF, INF };
+    std::vector<int8_t> back(N * 4);
+    std::vector<float> diff(N * 4, INF);
+    std::vector<uint8_t> alt(N * 4, 0);
+    for (size_t t = 0; t < N; ++t) {
+        float ns[4] = { INF, INF, INF, INF };
+        float ns2[4] = { INF, INF, INF, INF };
+        uint8_t nalt[4] = { 0, 0, 0, 0 };
+        for (int st = 0; st < 4; ++st) {
+            for (int u = 0; u < 2; ++u) {
+                const float m = soft_metric(surf[st], o0[st][u], o1[st][u],
+                                            llr0[t], llr1[t]);
+                const int nst = nxt[st][u];
+                const uint8_t code = static_cast<uint8_t>((u << 2) | st);
+                if (m < ns[nst]) {
+                    ns2[nst] = ns[nst];
+                    nalt[nst] = static_cast<uint8_t>(back[t * 4 + nst]);
+                    ns[nst] = m;
+                    back[t * 4 + nst] = static_cast<int8_t>(code);
+                } else if (m < ns2[nst]) {
+                    ns2[nst] = m;
+                    nalt[nst] = code;
+                }
+            }
+        }
+        for (int i = 0; i < 4; ++i) {
+            surf[i] = ns[i];
+            diff[t * 4 + i] = ns2[i] - ns[i];
+            alt[t * 4 + i] = nalt[i];
+        }
+    }
+    int best = 0;
+    for (int i = 1; i < 4; ++i)
+        if (surf[i] < surf[best])
+            best = i;
+    tr.bits.resize(N);
+    tr.states.resize(N + 1);
+    tr.margins.resize(N);
+    tr.lose_u.resize(N);
+    int cur = best;
+    tr.states[N] = static_cast<int8_t>(cur);
+    for (size_t t = N; t-- > 0;) {
+        const int v = back[t * 4 + cur];
+        tr.bits[t] = static_cast<int8_t>(v >> 2);
+        tr.margins[t] = diff[t * 4 + cur];
+        tr.lose_u[t] = static_cast<uint8_t>(alt[t * 4 + cur] >> 2);
+        cur = v & 3;
+        tr.states[t] = static_cast<int8_t>(cur);
+    }
+}
+
+// --- Systematic RS(63,55) test encoder ------------------------------------
+// Solves A p = b over GF(2^6) for the 8 parity symbols so that
+// r(x) = sum_{j<55} d_j x^j + sum_k p_k x^{55+k} has roots alpha^1..alpha^8.
+bool encode_systematic(const int* data55, int* out63)
+{
+    for (int j = 0; j < 55; ++j)
+        out63[j] = data55[j] & 0x3f;
+    int A[8][8];
+    int b[8];
+    for (int i = 1; i <= 8; ++i) {
+        int s = 0;
+        for (int j = 0; j < 55; ++j)
+            s ^= gf_mul(out63[j], gf_pow(2, i * j));
+        b[i - 1] = s;
+        for (int k = 0; k < 8; ++k)
+            A[i - 1][k] = gf_pow(2, i * (55 + k));
+    }
+    for (int c = 0; c < 8; ++c) {
+        int piv = -1;
+        for (int r = c; r < 8; ++r)
+            if (A[r][c]) {
+                piv = r;
+                break;
+            }
+        if (piv < 0)
+            return false;
+        if (piv != c) {
+            for (int k = 0; k < 8; ++k)
+                std::swap(A[c][k], A[piv][k]);
+            std::swap(b[c], b[piv]);
+        }
+        const int invp = gf_inv(A[c][c]);
+        for (int k = c; k < 8; ++k)
+            A[c][k] = gf_mul(A[c][k], invp);
+        b[c] = gf_mul(b[c], invp);
+        for (int r = 0; r < 8; ++r) {
+            if (r == c)
+                continue;
+            const int f = A[r][c];
+            if (!f)
+                continue;
+            for (int k = c; k < 8; ++k)
+                A[r][k] ^= gf_mul(f, A[c][k]);
+            b[r] ^= gf_mul(f, b[c]);
+        }
+    }
+    for (int k = 0; k < 8; ++k)
+        out63[55 + k] = b[k];
+    return true;
+}
+
+} // namespace fec_opt_ref
+
+BOOST_AUTO_TEST_CASE(test_fec_opt_gf64_tables_match_bitserial_reference)
+{
+    using namespace gr::uwb::codec;
+    // 64 x 64 exhaustive multiply.
+    for (int a = 0; a < 64; ++a) {
+        for (int b = 0; b < 64; ++b) {
+            const int want = fec_opt_ref::gf_mul(a, b);
+            BOOST_REQUIRE_EQUAL(rs_gf_mul(a, b), want);
+            // Input masking must keep the old `a &= 0x3f` / `b &= 0x3f`.
+            BOOST_REQUIRE_EQUAL(rs_gf_mul(a | 0x40, b), want);
+            BOOST_REQUIRE_EQUAL(rs_gf_mul(a, b | 0x80), want);
+            BOOST_REQUIRE_EQUAL(rs_gf_mul(a | 0xc0, b | 0xc0), want);
+        }
+    }
+    // Powers, including the negative / >62 reduction paths.
+    const int exponents[] = { -64, -1, 0, 1, 61, 62, 63, 64, 126 };
+    for (int a = 0; a < 64; ++a)
+        for (int n : exponents)
+            BOOST_REQUIRE_EQUAL(rs_gf_pow(a, n), fec_opt_ref::gf_pow(a, n));
+    // Inverses (inv(0) == 0).
+    for (int a = 0; a < 64; ++a) {
+        BOOST_REQUIRE_EQUAL(rs_gf_inv(a), fec_opt_ref::gf_inv(a));
+        BOOST_REQUIRE_EQUAL(rs_gf_inv(a | 0x40), fec_opt_ref::gf_inv(a));
+    }
+    BOOST_REQUIRE_EQUAL(rs_gf_inv(0), 0);
+    // The alpha power lookups must equal pow(2, k) for the whole cycle.
+    for (int k = -63; k <= 126; ++k) {
+        BOOST_REQUIRE_EQUAL(rs_gf_alpha_pow(k), fec_opt_ref::gf_pow(2, k));
+        BOOST_REQUIRE_EQUAL(rs_gf_alpha_inv_pow(k), fec_opt_ref::gf_pow(2, -k));
+    }
+    // Broadcast primitive check: 2 generates the whole multiplicative group.
+    int seen[64] = {};
+    for (int k = 0; k < 63; ++k)
+        ++seen[rs_gf_alpha_pow(k)];
+    for (int v = 1; v < 64; ++v)
+        BOOST_REQUIRE_EQUAL(seen[v], 1);
+    BOOST_REQUIRE_EQUAL(seen[0], 0);
+}
+
+BOOST_AUTO_TEST_CASE(test_fec_opt_bit_packing_matches_reference)
+{
+    using namespace gr::uwb::codec;
+    std::mt19937 rng(20261120u);
+    std::uniform_int_distribution<int> bit(0, 1);
+    for (int rep = 0; rep < 8; ++rep) {
+        const int nsym = 63;
+        std::vector<int8_t> bits(static_cast<size_t>(nsym) * 6);
+        for (auto& b : bits)
+            b = static_cast<int8_t>(bit(rng));
+        std::vector<int> syms_new(nsym), syms_ref(nsym);
+        rs_bits_to_syms(bits.data(), nsym, syms_new.data());
+        fec_opt_ref::bits_to_syms(bits.data(), nsym, syms_ref.data());
+        BOOST_REQUIRE(syms_new == syms_ref);
+
+        std::vector<int8_t> from_new(static_cast<size_t>(nsym) * 6, 0);
+        std::vector<int8_t> from_ref(static_cast<size_t>(nsym) * 6, 0);
+        rs_syms_to_bits(syms_ref.data(), nsym, from_new.data());
+        fec_opt_ref::syms_to_bits(syms_ref.data(), nsym, from_ref.data());
+        BOOST_REQUIRE(from_new == from_ref);
+        BOOST_REQUIRE(from_new == bits);
+
+        // LSB-first byte packing.
+        std::vector<int8_t> psdu(8 * 37);
+        for (auto& b : psdu)
+            b = static_cast<int8_t>(bit(rng));
+        std::vector<uint8_t> new_bytes, ref_bytes;
+        gr::uwb::demod::core::detail::pack_psdu_bytes(psdu, new_bytes);
+        fec_opt_ref::pack_psdu_bytes(psdu, ref_bytes);
+        BOOST_REQUIRE(new_bytes == ref_bytes);
+        BOOST_REQUIRE_EQUAL(new_bytes.size(), 37u);
+
+        // Non-binary inputs must truncate exactly like the reference (each
+        // shifted term keeps only its low 8 bits).
+        for (auto& b : psdu)
+            b = static_cast<int8_t>(static_cast<int>(rng() % 8) - 2);
+        gr::uwb::demod::core::detail::pack_psdu_bytes(psdu, new_bytes);
+        fec_opt_ref::pack_psdu_bytes(psdu, ref_bytes);
+        BOOST_REQUIRE(new_bytes == ref_bytes);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(test_fec_opt_rs_decode_block_matches_reference)
+{
+    using namespace gr::uwb::demod::core::detail;
+    std::mt19937 rng(20261121u);
+    std::uniform_int_distribution<int> sym(0, 63);
+    std::uniform_int_distribution<int> pos(0, 62);
+    std::uniform_int_distribution<int> errval(1, 63);
+
+    size_t uncorrectable = 0;
+    size_t miscorrected = 0;
+    for (int trial = 0; trial < 240; ++trial) {
+        int data55[55], cw[63];
+        for (int j = 0; j < 55; ++j)
+            data55[j] = sym(rng);
+        BOOST_REQUIRE(fec_opt_ref::encode_systematic(data55, cw));
+        int check[8];
+        fec_opt_ref::syndromes(cw, check);
+        BOOST_REQUIRE(fec_opt_ref::zero_syndromes(check));
+
+        int8_t coded[378];
+        fec_opt_ref::syms_to_bits(cw, 63, coded);
+
+        const int nerr = trial % 6; // 0..5 injected symbol errors
+        bool used[63] = {};
+        for (int e = 0; e < nerr; ++e) {
+            int p = pos(rng);
+            while (used[p])
+                p = (p + 1) % 63;
+            used[p] = true;
+            const int v = errval(rng); // nonzero GF(2^6) error value
+            for (int b = 0; b < 6; ++b)
+                if ((v >> b) & 1)
+                    coded[p * 6 + 5 - b] ^= 1;
+        }
+
+        int8_t new_data[330] = {};
+        int8_t ref_data[330] = {};
+        const bool new_ok = rs_decode_block(coded, new_data);
+        const bool ref_ok = fec_opt_ref::decode_block(coded, ref_data);
+        BOOST_REQUIRE_EQUAL(new_ok, ref_ok);
+        BOOST_REQUIRE(std::equal(new_data, new_data + 330, ref_data));
+        if (nerr <= 4) {
+            BOOST_REQUIRE(new_ok);
+            int8_t expect[330];
+            fec_opt_ref::syms_to_bits(data55, 55, expect);
+            BOOST_REQUIRE(std::equal(new_data, new_data + 330, expect));
+        } else {
+            if (new_ok)
+                ++miscorrected;
+            else
+                ++uncorrectable;
+        }
+    }
+    // Five symbol errors exceed t = 4.  RS(63,55) has d_min = 9, so a 5-error
+    // word can (rarely) land exactly 4 symbols from a *different* codeword and
+    // be "miscorrected"; the invariant that must hold is that the optimised
+    // decoder agrees with the reference on every single trial (checked above).
+    BOOST_TEST_MESSAGE("RS 5-error trials: uncorrectable="
+                       << uncorrectable << " miscorrected=" << miscorrected);
+    BOOST_REQUIRE_EQUAL(uncorrectable + miscorrected, 40u);
+    BOOST_REQUIRE_GE(uncorrectable, 39u);
+}
+
+BOOST_AUTO_TEST_CASE(test_fec_opt_viterbi_hard_matches_reference)
+{
+    using namespace gr::uwb::demod::core::detail;
+    std::mt19937 rng(20261122u);
+    std::uniform_int_distribution<int> bit(0, 1);
+    const size_t lengths[] = { 1, 2, 3, 7, 64, 1229, 2048, 2049 };
+    size_t total_ties = 0;
+    for (size_t n : lengths) {
+        for (int pattern = 0; pattern < 5; ++pattern) {
+            std::vector<int8_t> rx(2 * n);
+            for (size_t i = 0; i < n; ++i) {
+                int a = bit(rng) & 1;
+                int b = bit(rng) & 1;
+                if (pattern == 1) { // all-zero input: metric ties everywhere
+                    a = 0;
+                    b = 0;
+                } else if (pattern == 2) { // all-one input
+                    a = 1;
+                    b = 1;
+                } else if (pattern == 3) { // alternating hard ties
+                    a = static_cast<int>(i & 1);
+                    b = static_cast<int>((i >> 1) & 1);
+                } else if (pattern == 4) { // repeated 2-symbol tie motif
+                    a = 0;
+                    b = static_cast<int>(i & 1);
+                }
+                rx[2 * i] = static_cast<int8_t>(a);
+                rx[2 * i + 1] = static_cast<int8_t>(b);
+            }
+            total_ties += fec_opt_ref::count_hard_ties(rx.data(), n);
+            std::vector<int8_t> got, want;
+            vitdec_cl3(rx.data(), n, got);
+            fec_opt_ref::vit_hard(rx.data(), n, want);
+            BOOST_REQUIRE_EQUAL(got.size(), n);
+            BOOST_REQUIRE_EQUAL(want.size(), n);
+            BOOST_REQUIRE(std::equal(got.begin(), got.end(), want.begin()));
+        }
+    }
+    // The equivalence above only covers tie-breaking if exact ties occur.
+    BOOST_TEST_MESSAGE("hard CL-3 ACS exact ties exercised: " << total_ties);
+    BOOST_REQUIRE_GT(total_ties, 0u);
+}
+
+BOOST_AUTO_TEST_CASE(test_fec_opt_viterbi_soft_matches_reference)
+{
+    using namespace gr::uwb::demod::core::detail;
+    std::mt19937 rng(20261123u);
+    std::normal_distribution<float> nd(0.0f, 2.0f);
+    const size_t lengths[] = { 1, 2, 3, 7, 64, 1229, 2048, 2049 };
+    size_t total_ties = 0;
+    for (size_t n : lengths) {
+        for (int pattern = 0; pattern < 6; ++pattern) {
+            std::vector<float> l0(n), l1(n);
+            for (size_t i = 0; i < n; ++i) {
+                switch (pattern) {
+                case 1: // all-zero LLRs: every edge weight is an exact tie
+                    l0[i] = 0.0f;
+                    l1[i] = 0.0f;
+                    break;
+                case 2: // identical constant LLRs
+                    l0[i] = 0.5f;
+                    l1[i] = 0.5f;
+                    break;
+                case 3: // constant-magnitude sign ties
+                    l0[i] = (i & 1) ? 1.0f : -1.0f;
+                    l1[i] = (i & 2) ? 1.0f : -1.0f;
+                    break;
+                case 4: // large magnitudes
+                    l0[i] = (nd(rng) > 0.0f) ? 1.0e6f : -1.0e6f;
+                    l1[i] = (nd(rng) > 0.0f) ? 1.0e6f : -1.0e6f;
+                    break;
+                case 5: // tiny magnitudes (near-tie decisions)
+                    l0[i] = 1.0e-8f * nd(rng);
+                    l1[i] = 1.0e-8f * nd(rng);
+                    break;
+                default:
+                    l0[i] = nd(rng);
+                    l1[i] = nd(rng);
+                    break;
+                }
+            }
+            total_ties += fec_opt_ref::count_ties(
+                n, 1e30f, [&](size_t t, float path, int g0, int g1) {
+                    return fec_opt_ref::soft_metric(path, g0, g1, l0[t], l1[t]);
+                });
+            std::vector<int8_t> got, want;
+            vitdec_cl3_soft(l0.data(), l1.data(), n, got);
+            fec_opt_ref::vit_soft(l0.data(), l1.data(), n, want);
+            BOOST_REQUIRE_EQUAL(got.size(), n);
+            BOOST_REQUIRE_EQUAL(want.size(), n);
+            BOOST_REQUIRE(std::equal(got.begin(), got.end(), want.begin()));
+        }
+    }
+    // All-zero / constant LLRs force exact metric ties on every step, so the
+    // strict-comparison tie rule is definitely exercised.
+    BOOST_TEST_MESSAGE("soft CL-3 ACS exact ties exercised: " << total_ties);
+    BOOST_REQUIRE_GT(total_ties, 100u);
+}
+
+BOOST_AUTO_TEST_CASE(test_fec_opt_viterbi_soft_trace_matches_reference)
+{
+    using namespace gr::uwb::demod::core::detail;
+    std::mt19937 rng(20261124u);
+    std::normal_distribution<float> nd(0.0f, 1.5f);
+    const size_t lengths[] = { 1, 2, 3, 7, 64, 257, 1229, 2048, 2049 };
+    for (size_t n : lengths) {
+        for (int pattern = 0; pattern < 3; ++pattern) {
+            std::vector<float> l0(n), l1(n);
+            for (size_t i = 0; i < n; ++i) {
+                if (pattern == 1) {
+                    l0[i] = 0.0f;
+                    l1[i] = 0.0f;
+                } else if (pattern == 2) {
+                    l0[i] = (i & 1) ? 2.0f : -2.0f;
+                    l1[i] = (i & 2) ? 2.0f : -2.0f;
+                } else {
+                    l0[i] = nd(rng);
+                    l1[i] = nd(rng);
+                }
+            }
+            Cl3TrellisTrace got;
+            fec_opt_ref::Trace want;
+            vitdec_cl3_soft_trace(l0.data(), l1.data(), n, got);
+            fec_opt_ref::vit_soft_trace(l0.data(), l1.data(), n, want);
+            BOOST_REQUIRE_EQUAL(got.bits.size(), n);
+            BOOST_REQUIRE_EQUAL(got.states.size(), n + 1);
+            BOOST_REQUIRE_EQUAL(got.margins.size(), n);
+            BOOST_REQUIRE_EQUAL(got.lose_u.size(), n);
+            BOOST_REQUIRE(std::equal(got.bits.begin(), got.bits.end(), want.bits.begin()));
+            BOOST_REQUIRE(std::equal(got.states.begin(), got.states.end(), want.states.begin()));
+            BOOST_REQUIRE(std::equal(got.lose_u.begin(), got.lose_u.end(), want.lose_u.begin()));
+            for (size_t i = 0; i < n; ++i)
+                BOOST_REQUIRE_EQUAL(got.margins[i], want.margins[i]);
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(test_fec_opt_rs_kernels_match_reference)
+{
+    // Direct bit-exactness of the individually rewritten RS kernels, including
+    // the degrees the errors-and-erasures rescue path reaches (Forney with
+    // L = Le + v up to 8), which rs_decode_block alone never exercises.
+    using namespace gr::uwb::demod::core::detail;
+    std::mt19937 rng(20261125u);
+    std::uniform_int_distribution<int> sym(0, 63);
+    std::uniform_int_distribution<int> pos(0, 62);
+    std::uniform_int_distribution<int> degree(0, 8);
+    std::uniform_int_distribution<int> count(0, 4);
+
+    for (int trial = 0; trial < 2000; ++trial) {
+        int r63[63];
+        for (int j = 0; j < 63; ++j)
+            r63[j] = sym(rng);
+        int S_new[8], S_ref[8];
+        rs_syndromes(r63, S_new);
+        fec_opt_ref::syndromes(r63, S_ref);
+        for (int i = 0; i < 8; ++i)
+            BOOST_REQUIRE_EQUAL(S_new[i], S_ref[i]);
+
+        int L_new[9] = {}, L_ref[9] = {};
+        const int deg_new = rs_berlekamp_massey(S_new, L_new);
+        const int deg_ref = fec_opt_ref::bm_len(S_ref, 8, L_ref);
+        BOOST_REQUIRE_EQUAL(deg_new, deg_ref);
+        for (int i = 0; i < 9; ++i)
+            BOOST_REQUIRE_EQUAL(L_new[i], L_ref[i]);
+
+        // Fuzz the locator/Forney inputs too (any 0..8 degree, any roots).
+        const int L = degree(rng);
+        int Lambda[9] = {};
+        Lambda[0] = 1;
+        for (int i = 1; i <= L; ++i)
+            Lambda[i] = sym(rng);
+        int p_new[4] = {}, p_ref[4] = {};
+        const int n_new = rs_chien_search(Lambda, L, p_new);
+        const int n_ref = fec_opt_ref::chien(Lambda, L, p_ref);
+        BOOST_REQUIRE_EQUAL(n_new, n_ref);
+        for (int i = 0; i < 4; ++i)
+            BOOST_REQUIRE_EQUAL(p_new[i], p_ref[i]);
+
+        int pos_in[4];
+        const int nerr = count(rng);
+        for (int i = 0; i < nerr; ++i)
+            pos_in[i] = pos(rng);
+        int v_new[8] = {}, v_ref[8] = {};
+        rs_forney(S_new, Lambda, L, pos_in, nerr, v_new);
+        fec_opt_ref::forney(S_ref, Lambda, L, pos_in, nerr, v_ref);
+        for (int i = 0; i < 8; ++i)
+            BOOST_REQUIRE_EQUAL(v_new[i], v_ref[i]);
+    }
+}
