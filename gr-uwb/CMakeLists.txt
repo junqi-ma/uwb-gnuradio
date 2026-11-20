@@ -140,6 +140,10 @@ add_custom_target(uninstall
 add_subdirectory(include/gnuradio/uwb)
 add_subdirectory(lib)
 add_subdirectory(apps)
+# Phase 1: the unit QA, benchmarks and integration harness live in tests/.
+# Registered last so it can reference the app targets it drives
+# (twr_fake_demo, twr_native_phy_demo, uwb_uhd_sc16_pipeline_runner).
+add_subdirectory(tests)
 
 include(CMakePackageConfigHelpers)
 configure_package_config_file(

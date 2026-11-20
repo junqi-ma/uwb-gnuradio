@@ -59,8 +59,8 @@ import tempfile
 
 SCHEMA = "twr-m1b-demo/1"
 
-_HERE = os.path.dirname(os.path.abspath(__file__))          # gr-uwb/apps
-_GR_UWB = os.path.dirname(_HERE)                             # gr-uwb
+_HERE = os.path.dirname(os.path.abspath(__file__))          # gr-uwb/tests/integration
+_GR_UWB = os.path.dirname(os.path.dirname(_HERE))           # gr-uwb
 _REPO = os.path.dirname(_GR_UWB)                             # repository root
 
 # --------------------------------------------------------------------------

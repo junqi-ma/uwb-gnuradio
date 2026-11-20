@@ -38,8 +38,8 @@ import tempfile
 import unittest
 from fractions import Fraction as F
 
-_HERE = os.path.dirname(os.path.abspath(__file__))          # gr-uwb/apps
-_GR_UWB = os.path.dirname(_HERE)                             # gr-uwb
+_HERE = os.path.dirname(os.path.abspath(__file__))          # gr-uwb/tests/integration
+_GR_UWB = os.path.dirname(os.path.dirname(_HERE))           # gr-uwb
 _REPO = os.path.dirname(_GR_UWB)                             # repository root
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
@@ -70,7 +70,7 @@ def _locate_or_build():
         gxx, "-std=c++17", "-Wall", "-Wextra",
         "-I", os.path.join(_GR_UWB, "include"),
         "-o", out,
-        os.path.join(_HERE, "twr_fake_demo.cc"),
+        os.path.join(_GR_UWB, "apps", "twr_fake_demo.cc"),
         os.path.join(_GR_UWB, "lib", "uwb_twr_core.cc"),
         os.path.join(_GR_UWB, "lib", "uwb_twr_fake_link.cc"),
     ]
@@ -520,7 +520,7 @@ class TestDemo(DemoCase):
             self.assertNotIn(forbidden, lowered,
                              "%s links %s:\n%s" % (_BINARY, forbidden, proc.stdout))
         # And the SOURCE must not pull a GNU Radio block/UHD header.
-        with open(os.path.join(_HERE, "twr_fake_demo.cc"), "r",
+        with open(os.path.join(_GR_UWB, "apps", "twr_fake_demo.cc"), "r",
                   encoding="utf-8") as handle:
             source = handle.read()
         for forbidden in ("gnuradio/block", "gnuradio/uhd", "uhd/usrp",

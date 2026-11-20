@@ -23,7 +23,7 @@
  */
 #include <boost/test/unit_test.hpp>
 
-#include "../apps/fullpacket_rx_pipeline.h"
+#include "../../../apps/fullpacket_rx_pipeline.h"
 #include <gnuradio/uwb/uwb_hrp_mod_core.h>
 #include <gnuradio/uwb/uwb_rx_fused_cmf.h>
 

@@ -54,8 +54,8 @@ import unittest
 # --------------------------------------------------------------------------
 # Import the module under test from the source checkout, with no C++ library.
 # --------------------------------------------------------------------------
-_HERE = os.path.dirname(os.path.abspath(__file__))             # gr-uwb/apps
-_GR_UWB = os.path.dirname(_HERE)                                # gr-uwb
+_HERE = os.path.dirname(os.path.abspath(__file__))             # gr-uwb/tests/integration
+_GR_UWB = os.path.dirname(os.path.dirname(_HERE))              # gr-uwb
 _PYTHON_DIR = os.path.join(_GR_UWB, "python")                   # gr-uwb/python
 _REPO_ROOT = os.path.dirname(_GR_UWB)                           # repository root
 if _PYTHON_DIR not in sys.path:
