@@ -55,10 +55,10 @@ def find_build_dir(explicit: Path | None) -> Path:
     if explicit is not None:
         return explicit
     for cand in (
-        "gr-uwb/build-baseline-a",
-        "gr-uwb/build-refactor-b",
-        "gr-uwb/build-native-only",
-        "gr-uwb/build-native",
+        "build/baseline-a",
+        "build/refactor-b",
+        "build/native-only",
+        "build/native",
     ):
         p = REPO / cand
         if (p / "include").exists():
@@ -122,7 +122,7 @@ def generate_fixtures(fixtures_dir: Path, build_dir: Path, force: bool = False) 
                 "c++",
                 "-std=c++17",
                 "-O2",
-                "-I" + str(REPO / "gr-uwb/include"),
+                "-I" + str(REPO / "include"),
                 "-I" + str(build_dir / "include"),
                 str(src_path),
                 "-lvolk",

@@ -2,7 +2,7 @@
 """NumPy reference for the S0 preamble-only SIC math core (spec witness).
 
 This module mirrors the FROZEN contract in ``docs/sic/S0_sic_core_api.md`` so the
-C++ core (``gr-uwb/.../uwb_preamble_sic_core.{h,cc}``) can be cross-checked
+C++ core (``include/openuwb/sic/preamble_sic_core.h`` + ``lib/sic/uwb_preamble_sic_core.cc``) can be cross-checked
 against it.  It is deliberately *simple and readable*, not clever, and it has no
 repository imports (``numpy`` only, tested with numpy 1.21.5).
 

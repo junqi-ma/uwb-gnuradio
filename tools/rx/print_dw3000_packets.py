@@ -27,10 +27,10 @@ def independent_crc(data: bytes) -> int:
 
 
 def decoder() -> Path:
-    build = ROOT / 'gr-uwb/build-offline-decoder'
+    build = ROOT / 'build/offline-decoder'
     env = os.environ.copy()
     env.pop('LD_LIBRARY_PATH', None)
-    subprocess.run(['cmake', '-S', str(ROOT / 'gr-uwb'), '-B', str(build),
+    subprocess.run(['cmake', '-S', str(ROOT), '-B', str(build),
                     '-DCMAKE_BUILD_TYPE=Release', '-DUWB_BUILD_EXPERIMENTS=OFF', '-DENABLE_UHD_BACKEND=OFF'],
                    env=env, check=True, stdout=sys.stderr)
     subprocess.run(['cmake', '--build', str(build), '--target',

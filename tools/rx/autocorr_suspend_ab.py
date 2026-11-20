@@ -42,7 +42,7 @@ SCHEMA = "uwb-autocorr-suspend-abba/1"
 # Phase 3: prefer the configured preset build.  The old spelling stays as the
 # last-resort error target.
 # TODO(openuwb-compat-removal): require the official binary.
-DEFAULT_BINARY = str(find_app("openuwb_rx", required=False) or "uwb_dw3000_live")
+DEFAULT_BINARY = str(find_app("openuwb_rx", required=False) or "openuwb_rx")
 DEFAULT_OUT = "docs/performance/data_autocorr_suspend_20261120/abba.json"
 DEFAULT_ROUNDS = 4
 DEFAULT_WORKERS = 2
@@ -398,9 +398,9 @@ def build_cache_note(binary: str) -> Dict[str, Any]:
         "cache_file": cache if os.path.exists(cache) else None,
         "cmake_entries": {},
         "reproduction": (
-            "cmake -S gr-uwb -B gr-uwb/build-native-only "
+            "cmake --preset native-avx2 "
             "-DCMAKE_BUILD_TYPE=Release -DENABLE_UHD_BACKEND=ON && "
-            "cmake --build gr-uwb/build-native-only -j4; "
+            "cmake --build --preset native-avx2 -j4; "
             "every run used env -u LD_LIBRARY_PATH"),
     }
     if not note["cache_file"]:

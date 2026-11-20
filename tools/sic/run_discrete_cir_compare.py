@@ -43,17 +43,18 @@ DEFAULT_CELLS = {"functional": REPRESENTATIVE,
 REJECT_REASONS = {"queue_full", "source_late", "cancelled", "not_submitted"}
 SCHEMA = "sic-discrete-cir-experiment/1"
 FIXED_SOURCES = (
-    "gr-uwb/apps/benchmark_fullpacket_compare.cc",
-    "gr-uwb/include/gnuradio/uwb/fullpacket_rx_pipeline.h",
-    "gr-uwb/include/gnuradio/uwb/uwb_fullpacket_sic_core.h",
-    "gr-uwb/lib/uwb_fullpacket_sic_core.cc",
-    "gr-uwb/include/gnuradio/uwb/uwb_discrete_cir_sic.h",
-    "gr-uwb/lib/uwb_preamble_sic_core.cc",
-    "gr-uwb/include/gnuradio/uwb/uwb_hrp_mod_core.h",
-    "gr-uwb/include/gnuradio/uwb/uwb_demod_core.h",
+    "tests/benchmarks/benchmark_fullpacket_compare.cc",
+    "include/openuwb/runtime/fullpacket_rx_pipeline.h",
+    "include/openuwb/sic/fullpacket_sic_core.h",
+    "lib/sic/uwb_fullpacket_sic_core.cc",
+    "include/openuwb/sic/discrete_cir_sic.h",
+    "lib/sic/uwb_preamble_sic_core.cc",
+    "include/openuwb/phy/hrp/tx/hrp_mod_core.h",
+    "include/openuwb/phy/hrp/rx/demod_core.h",
 )
-DISCOVERED_SOURCES = ("gr-uwb/lib/*discrete*.cc",
-                      "gr-uwb/include/gnuradio/uwb/*discrete*.h")
+DISCOVERED_SOURCES = ("lib/*/*discrete*.cc", "lib/*discrete*.cc",
+                      "include/openuwb/*/*discrete*.h",
+                      "include/openuwb/*/*/*discrete*.h")
 DISCLAIMER = ("finite-sample functional gate on the declared source windows; "
               "not a proof of a general decode rate. MATLAB, native, hardware "
               "and real-time throughput are not certified by this experiment.")
@@ -203,10 +204,10 @@ def source_inventory():
         except ValueError:
             relative = str(path)
         hashes[relative] = sha256(path)
-    required = {"gr-uwb/apps/benchmark_fullpacket_compare.cc",
-                "gr-uwb/include/gnuradio/uwb/fullpacket_rx_pipeline.h",
-                "gr-uwb/include/gnuradio/uwb/uwb_discrete_cir_sic.h",
-                "gr-uwb/include/gnuradio/uwb/uwb_fullpacket_sic_core.h",
+    required = {"tests/benchmarks/benchmark_fullpacket_compare.cc",
+                "include/openuwb/runtime/fullpacket_rx_pipeline.h",
+                "include/openuwb/sic/discrete_cir_sic.h",
+                "include/openuwb/sic/fullpacket_sic_core.h",
                 "tools/sic/verify_discrete_cir_compare.py"}
     for relative in required:
         if relative not in hashes:
@@ -890,7 +891,7 @@ def check_quality_summary(path, gate_cells, binary_sha, prov, library_hashes):
     # script edits do not change the measured binary.
     def measurement_sources(sources):
         return {name: digest for name, digest in (sources or {}).items()
-                if name.startswith("gr-uwb/")}
+                if name.startswith(("lib/", "include/", "apps/", "tests/"))}
     same_head = recorded.get("git_head") == prov["git_head"]
     same_sources = (measurement_sources(recorded.get("sources")) ==
                     measurement_sources(prov.get("sources")))

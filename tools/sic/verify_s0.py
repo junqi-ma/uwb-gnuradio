@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """INDEPENDENT verifier for the S0 preamble-collision / preamble-only-SIC artifacts.
 
-    python3 tools/sic/verify_s0.py --results gr-uwb/build-sic/sic-results
+    python3 tools/sic/verify_s0.py --results build/sic/sic-results
     python3 tools/sic/verify_s0.py --self-test
 
 WHAT IT CHECKS, AND HOW IT IS INDEPENDENT

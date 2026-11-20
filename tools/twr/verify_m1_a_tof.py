@@ -30,7 +30,7 @@ import tempfile
 from fractions import Fraction as F
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-INC = os.path.join(REPO, "gr-uwb", "include")
+INC = os.path.join(REPO, "include")
 ORACLE = os.path.join(REPO, "testdata", "twr", "tof_oracle_vectors.json")
 
 results: list[tuple[str, str, str]] = []

@@ -27,7 +27,7 @@ kernels are supposed to be bit-identical, not merely close.
 
 Usage:
     python3 tools/perf/run_demod_sic_abba.py \
-        --bench gr-uwb/build-avx512-demod-sic/apps/bench_unified_timing \
+        --bench build/avx512-demod-sic/apps/bench_unified_timing \
         --out docs/performance/data_demod_sic_avx512_20261116/abba
 
 The script takes an exclusive flock on /tmp/uwb-demod-sic-bench.lock so two

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run uwb_dw3000_live on a replay fixture and parse the summary lines.
+"""Run openuwb_rx on a replay fixture and parse the summary lines.
 
 Used for the low-SNR evaluation matrix.  Prints one JSON object per run.
 """
@@ -46,7 +46,7 @@ def run(binary, fixture, extra, timeout=600):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--binary", default=str(Path(__file__).resolve().parents[3] / "gr-uwb/build-native/apps/uwb_dw3000_live"))
+    ap.add_argument("--binary", default=str(Path(__file__).resolve().parents[3] / "build/native/apps/openuwb_rx"))
     ap.add_argument("--fixture", required=True)
     ap.add_argument("--sync", default="acquire")
     ap.add_argument("--extra", default="")

@@ -13,7 +13,7 @@ import sys
 import numpy as np
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-RES = os.path.join(ROOT, "gr-uwb", "build-sic-accum", "results", "s2a")
+RES = os.path.join(ROOT, "build", "sic-accum", "results", "s2a")
 
 
 def load_budget(name):

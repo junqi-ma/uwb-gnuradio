@@ -31,7 +31,7 @@ def percentiles(values):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument('--build', type=Path, default=Path('gr-uwb/build-sc16-r1r2'))
+    ap.add_argument('--build', type=Path, default=Path('build/sc16-r1r2'))
     ap.add_argument('--out', type=Path, required=True)
     ap.add_argument('--measure', type=int, default=512)
     ap.add_argument('--warmup', type=int, default=128)

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Independent verifier for S2-A (accumulation-after-SIC CIR evaluation).
 
-It does NOT import the evaluation driver (``gr-uwb/apps/uwb_sim_sic_accum.py``)
+It does NOT import the evaluation driver (``apps/uwb_sim_sic_accum.py``)
 or ``tools/sic/accum_metrics.py``: the small amount of algebra it needs is
 re-implemented here (sparse matched filter, accumulation, residual/coherence /
 target metrics) so the check is not a self-consistency replay of the same code.

@@ -14,7 +14,7 @@ Contract
   §8 ("重采样 IQ 位级检查必须直接进行，11 个 WindowResult 字段相等不能替代
   IQ 检查").
 
-Input schema (version 1, produced by ``gr-uwb/apps/pipeline_result_json.h``)::
+Input schema (version 1, produced by ``apps/pipeline_result_json.h``)::
 
     {"schema": "uwb-pipeline-results", "schema_version": 1,
      "meta": {...},

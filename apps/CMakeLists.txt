@@ -29,8 +29,17 @@ function(openuwb_compat_symlink target legacy_name)
                 $<TARGET_FILE_DIR:${target}>/${legacy_name}
         VERBATIM
         COMMENT "compat symlink ${legacy_name} -> $<TARGET_FILE_NAME:${target}>")
-    # Same name in the install prefix, for scripts that still call it.
-    install(CODE "execute_process(COMMAND \"${CMAKE_COMMAND}\" -E create_symlink \"${legacy_name}\" \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}/${legacy_name}\")")
+endfunction()
+
+# Installed compat name, only for the binaries that are actually installed.
+function(openuwb_compat_install_symlink target_name legacy_name)
+    if(NOT CMAKE_HOST_UNIX)
+        return()
+    endif()
+    install(CODE "
+        set(_dest \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}/${legacy_name}\")
+        execute_process(COMMAND \"${CMAKE_COMMAND}\" -E remove -f \"\${_dest}\")
+        execute_process(COMMAND \"${CMAKE_COMMAND}\" -E create_symlink \"${target_name}\" \"\${_dest}\")")
 endfunction()
 
 ########################################################################
@@ -190,3 +199,6 @@ endif()
 ########################################################################
 install(TARGETS openuwb_pipeline_runner openuwb_capture openuwb_rx
     DESTINATION ${CMAKE_INSTALL_BINDIR})
+openuwb_compat_install_symlink(openuwb_pipeline_runner uwb_uhd_sc16_pipeline_runner)
+openuwb_compat_install_symlink(openuwb_capture uwb_uhd_sc16_capture)
+openuwb_compat_install_symlink(openuwb_rx uwb_dw3000_live)

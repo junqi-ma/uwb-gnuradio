@@ -21,7 +21,7 @@ kernels are supposed to be bit-identical, not merely close.
 
 Usage:
     python3 tools/perf/run_avx512_abba.py \
-        --bench gr-uwb/build-avx512/apps/benchmark_sc16_burst_core \
+        --bench build/avx512/apps/benchmark_sc16_burst_core \
         --out docs/performance/data_avx512_20261116/abba
 
 The script takes an exclusive flock on /tmp/uwb-avx512-bench.lock so two

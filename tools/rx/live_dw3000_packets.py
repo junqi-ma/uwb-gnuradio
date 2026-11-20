@@ -8,11 +8,10 @@ import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from _common.paths import build_dir  # noqa: E402
-
 # Phase 3: build into the standard preset tree instead of a private directory.
 # OPENUWB_BUILD_DIR still wins, so an existing preset build is reused as-is.
+# (tools/_common/paths.py is for read-only discovery; this wrapper creates the
+# tree, so it names the default explicitly.)
 BUILD = Path(os.environ.get('OPENUWB_BUILD_DIR') or (ROOT / 'build' / 'native-avx2'))
 
 

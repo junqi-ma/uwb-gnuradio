@@ -34,8 +34,8 @@ done
 if [ -z "$PREFIX" ]; then
     echo "SKIP: no install prefix supplied (--prefix)."
     echo "      Install the native build and re-run, e.g."
-    echo "        cmake -S gr-uwb -B build-native -DENABLE_UHD_BACKEND=OFF"
-    echo "        cmake --build build-native && cmake --install build-native --prefix <prefix>"
+    echo "        cmake --preset native-avx2"
+    echo "        cmake --build --preset native-avx2 && cmake --install build/native-avx2 --prefix <prefix>"
     echo "        $0 --prefix <prefix>"
     exit 77
 fi
@@ -58,9 +58,19 @@ for h in uwb_rational_resampler_core.h uwb_uhd_sc16_pipeline.h \
         exit 1
     fi
 done
-for l in libuwb_native.a libuwb_core.a; do
+for l in libuwb_native.a libuwb_core.a libopenuwb_support.a libopenuwb_twr_core.a; do
     if [ ! -f "$LIBDIR/$l" ]; then
         echo "FAIL: installed archive missing: $LIBDIR/$l" >&2
+        exit 1
+    fi
+done
+# Phase 3: the primary header tree must be installed too, not only the legacy
+# forwarding headers.  The primary consumer below includes only <openuwb/...>.
+for h in openuwb/twr/twr_config.h openuwb/phy/hrp/rx/demod_pipeline.h \
+         openuwb/runtime/uhd_sc16_pipeline.h openuwb/support/simd.h \
+         openuwb/support/simd_config.h; do
+    if [ ! -f "$INCDIR/$h" ]; then
+        echo "FAIL: installed primary header missing: $INCDIR/$h" >&2
         exit 1
     fi
 done
@@ -74,12 +84,33 @@ if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists volk 2>/dev/null
     VOLK_INC=$(pkg-config --cflags volk)
 fi
 
-# Build the consumer through the INSTALLED package config, exactly like an
-# external consumer would: find_package(uwb CONFIG REQUIRED) must close the
-# whole dependency closure (Threads/Volk and, for a UHD build, UHD::UHD --
-# including the UHD::UHD fallback when the UHD package does not define the
-# target).  No hand-picked -l flags, no source/build tree on the path.
-cat > "$WORK/CMakeLists.txt" <<EOF
+# Two independent consumers, one per package name, exactly like an external
+# project would use them.  Keeping them in separate CMake projects means a
+# green run proves each entry point closes its own dependency closure, and the
+# legacy package cannot silently rely on the primary one having been found
+# first (or vice versa).
+#
+# PRIMARY: find_package(OpenUWB CONFIG REQUIRED), openuwb::* targets, only
+# <openuwb/...> includes.
+mkdir -p "$WORK/primary"
+cat > "$WORK/primary/CMakeLists.txt" <<EOF
+cmake_minimum_required(VERSION 3.16)
+project(openuwb_package_consumer_check CXX)
+find_package(OpenUWB CONFIG REQUIRED)
+add_executable(openuwb_package_consumer "$ROOT/openuwb_package_consumer.cc")
+target_link_libraries(openuwb_package_consumer PRIVATE
+    openuwb::twr_core openuwb::runtime openuwb::uwb_core)
+EOF
+
+echo "configuring primary consumer via find_package(OpenUWB CONFIG) against prefix only: $PREFIX"
+cmake -S "$WORK/primary" -B "$WORK/primary/build" -DCMAKE_PREFIX_PATH="$PREFIX" \
+    -DCMAKE_BUILD_TYPE=Release >/dev/null
+cmake --build "$WORK/primary/build" >/dev/null
+
+# LEGACY: find_package(uwb CONFIG REQUIRED), uwb::* targets and the
+# <gnuradio/uwb/...> forwarding headers.
+mkdir -p "$WORK/compat"
+cat > "$WORK/compat/CMakeLists.txt" <<EOF
 cmake_minimum_required(VERSION 3.16)
 project(uwb_native_consumer_check CXX)
 find_package(uwb CONFIG REQUIRED)
@@ -91,38 +122,44 @@ add_executable(uwb_twr_core_consumer "$ROOT/twr_core_consumer.cc")
 target_link_libraries(uwb_twr_core_consumer PRIVATE uwb::uwb_twr_core)
 EOF
 
-echo "configuring consumer via find_package(uwb CONFIG) against prefix only: $PREFIX"
-cmake -S "$WORK" -B "$WORK/build" -DCMAKE_PREFIX_PATH="$PREFIX" \
+echo "configuring legacy consumer via find_package(uwb CONFIG) against prefix only: $PREFIX"
+cmake -S "$WORK/compat" -B "$WORK/compat/build" -DCMAKE_PREFIX_PATH="$PREFIX" \
     -DCMAKE_BUILD_TYPE=Release >/dev/null
-cmake --build "$WORK/build" >/dev/null
+cmake --build "$WORK/compat/build" >/dev/null
 
-BIN="$WORK/build/uwb_native_consumer"
-echo "running native consumer"
+PRIMARY_BIN="$WORK/primary/build/openuwb_package_consumer"
+BIN="$WORK/compat/build/uwb_native_consumer"
+echo "running primary consumer"
+"$PRIMARY_BIN"
+echo "running legacy consumers"
 "$BIN"
-"$WORK/build/uwb_twr_config_consumer"
-"$WORK/build/uwb_twr_core_consumer"
+"$WORK/compat/build/uwb_twr_config_consumer"
+"$WORK/compat/build/uwb_twr_core_consumer"
 
-# Dependency proof: no GNU Radio / PMT in the direct NEEDED set ...
-if command -v readelf >/dev/null 2>&1; then
-    NEEDED=$(readelf -d "$BIN" | sed -n 's/.*NEEDED.*\[\(.*\)\]/\1/p')
-else
-    NEEDED=$(ldd "$BIN" | awk '{print $3}' | grep -v '^$')
-fi
-echo "NEEDED entries: $NEEDED"
-if echo "$NEEDED" | grep -Eq 'gnuradio|pmt'; then
-    echo "FAIL: consumer binary depends on GNU Radio/PMT:" >&2
-    echo "$NEEDED" | grep -E 'gnuradio|pmt' >&2
-    exit 1
-fi
-# ... and none transitively either (uwb_native/uwb_core are static archives,
-# so there is nothing to recurse into, but check ldd anyway).
-if command -v ldd >/dev/null 2>&1; then
-    if ldd "$BIN" | grep -Eq 'gnuradio|pmt'; then
-        echo "FAIL: transitive dependency on GNU Radio/PMT" >&2
-        ldd "$BIN" >&2
+# Dependency proof, for BOTH packages: no GNU Radio / PMT in the direct
+# NEEDED set, and none transitively.
+for _bin in "$PRIMARY_BIN" "$BIN"; do
+    if command -v readelf >/dev/null 2>&1; then
+        NEEDED=$(readelf -d "$_bin" | sed -n 's/.*NEEDED.*\[\(.*\)\]/\1/p')
+    else
+        NEEDED=$(ldd "$_bin" | awk '{print $3}' | grep -v '^$')
+    fi
+    echo "NEEDED entries ($_bin): $NEEDED"
+    if echo "$NEEDED" | grep -Eq 'gnuradio|pmt'; then
+        echo "FAIL: consumer binary depends on GNU Radio/PMT: $_bin" >&2
+        echo "$NEEDED" | grep -E 'gnuradio|pmt' >&2
         exit 1
     fi
-fi
+    # uwb_native/uwb_core are static archives, so there is nothing to recurse
+    # into, but check ldd anyway.
+    if command -v ldd >/dev/null 2>&1; then
+        if ldd "$_bin" | grep -Eq 'gnuradio|pmt'; then
+            echo "FAIL: transitive dependency on GNU Radio/PMT: $_bin" >&2
+            ldd "$_bin" >&2
+            exit 1
+        fi
+    fi
+done
 
 # Header-independence proof: preprocessing the consumer must not pull in any
 # GNU Radio / PMT header even though the machine has them installed.
@@ -142,4 +179,4 @@ if command -v "$CXX" >/dev/null 2>&1; then
     fi
 fi
 
-echo "NATIVE INSTALL CONSUMER: ALL OK (prefix=$PREFIX, no GNU Radio)"
+echo "NATIVE INSTALL CONSUMER: ALL OK (prefix=$PREFIX, OpenUWB + uwb compat, no GNU Radio)"

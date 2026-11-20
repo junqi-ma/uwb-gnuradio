@@ -100,13 +100,13 @@ def provenance(binary, build, env, rx_pipeline, reconstruction):
     except OSError:
         pass
     sources = [ROOT / p for p in (
-        "gr-uwb/apps/benchmark_fullpacket_compare.cc",
-        "gr-uwb/include/gnuradio/uwb/fullpacket_rx_pipeline.h",
-        "gr-uwb/include/gnuradio/uwb/uwb_fullpacket_sic_core.h",
-        "gr-uwb/lib/uwb_fullpacket_sic_core.cc",
-        "gr-uwb/lib/uwb_preamble_sic_core.cc",
-        "gr-uwb/include/gnuradio/uwb/uwb_hrp_mod_core.h",
-        "gr-uwb/include/gnuradio/uwb/uwb_demod_core.h")]
+        "tests/benchmarks/benchmark_fullpacket_compare.cc",
+        "include/openuwb/runtime/fullpacket_rx_pipeline.h",
+        "include/openuwb/sic/fullpacket_sic_core.h",
+        "lib/sic/uwb_fullpacket_sic_core.cc",
+        "lib/sic/uwb_preamble_sic_core.cc",
+        "include/openuwb/phy/hrp/tx/hrp_mod_core.h",
+        "include/openuwb/phy/hrp/rx/demod_core.h")]
     sources.extend([VERIFIER, Path(__file__).resolve()])
     return dict(schema="fullpacket-experiment-provenance/1",
                 created_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),

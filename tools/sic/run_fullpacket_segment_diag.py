@@ -32,13 +32,13 @@ def main():
     env.update(OPENBLAS_NUM_THREADS='1', OMP_NUM_THREADS='1')
     ldd, libraries = library_binding(binary, build, env)
     flags = build / 'apps/CMakeFiles/benchmark_fullpacket_segment_diag.dir/flags.make'
-    sources = ['gr-uwb/apps/benchmark_fullpacket_segment_diag.cc',
-               'gr-uwb/apps/fullpacket_segment_diagnostics.h',
-               'gr-uwb/apps/fullpacket_segment_diagnostics.cc',
-               'gr-uwb/lib/uwb_fullpacket_sic_core.cc',
-               'gr-uwb/include/gnuradio/uwb/uwb_fullpacket_sic_core.h',
-               'gr-uwb/include/gnuradio/uwb/uwb_hrp_mod_core.h',
-               'gr-uwb/include/gnuradio/uwb/uwb_demod_core.h',
+    sources = ['tests/benchmarks/benchmark_fullpacket_segment_diag.cc',
+               'tests/benchmarks/fullpacket_segment_diagnostics.h',
+               'tests/benchmarks/fullpacket_segment_diagnostics.cc',
+               'lib/sic/uwb_fullpacket_sic_core.cc',
+               'include/openuwb/sic/fullpacket_sic_core.h',
+               'include/openuwb/phy/hrp/tx/hrp_mod_core.h',
+               'include/openuwb/phy/hrp/rx/demod_core.h',
                'tools/sic/run_fullpacket_segment_diag.py']
     status = git_output('status', '--porcelain=v1', '--untracked-files=normal')
     if status:

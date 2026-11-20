@@ -11,7 +11,7 @@ CAN:  run the production SC16 pipeline end to end with each tap set, compare
 
 CANNOT: measure SIC suppression, PSDU/FCS or packet error rate.  The
       repository's SIC scenario fixtures are generated on the 998.4 MS/s
-      *work* grid (gr-uwb/apps/sic_preamble_sim.py), so using them would
+      *work* grid (apps/sic_preamble_sim.py), so using them would
       bypass the very resampler under test -- which the task book forbids.
       The native-grid fixture is a repeated code-9 packet, not a mixed
       interference scenario. Detection requires its 140982-sample period and
@@ -21,7 +21,7 @@ CANNOT: measure SIC suppression, PSDU/FCS or packet error rate.  The
 Usage
 -----
     python3 tools/performance/run_equiripple_g3.py \
-        --binary gr-uwb/build-sc16-equiripple/apps/uwb_uhd_sc16_pipeline_runner \
+        --binary build/sc16-equiripple/apps/openuwb_pipeline_runner \
         --out docs/performance/data_65_48_equiripple_g3
 """
 import argparse

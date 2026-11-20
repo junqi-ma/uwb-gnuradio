@@ -179,7 +179,7 @@ def load_run(run_dir):
 def _repo_root_from_run(run_dir):
     cur = os.path.abspath(run_dir)
     for _ in range(12):
-        if os.path.exists(os.path.join(cur, "gr-uwb", "apps",
+        if os.path.exists(os.path.join(cur, "apps",
                                        "uwb_sim_sic_payload.py")):
             return cur
         parent = os.path.dirname(cur)
@@ -275,7 +275,7 @@ def check_manifest(run, run_dir, trusted_root, trusted_build=None):
     # ------------------------------------------------------------------
     tr = os.path.realpath(trusted_root)
     allowed_build = os.path.realpath(
-        trusted_build or os.path.join(tr, "gr-uwb", "build-sic-payload"))
+        trusted_build or os.path.join(tr, "build", "sic-payload"))
     rbuild = os.path.realpath(build_dir) if build_dir else None
     if rbuild is not None and rbuild == allowed_build \
             and os.path.isdir(rbuild):
@@ -323,12 +323,12 @@ def check_manifest(run, run_dir, trusted_root, trusted_build=None):
     missing = [k for k in need if not src.get(k)]
     (ok if not missing else fail)("manifest_source_hashes_present",
                                   "missing %s" % missing)
-    pairs = {"driver": "gr-uwb/apps/uwb_sim_sic_payload.py",
-             "generator": "gr-uwb/apps/sic_payload_sim.py",
+    pairs = {"driver": "apps/uwb_sim_sic_payload.py",
+             "generator": "apps/sic_payload_sim.py",
              "metrics": "tools/sic/payload_metrics.py",
-             "core_header": "gr-uwb/include/gnuradio/uwb/uwb_preamble_sic_core.h",
-             "core_src": "gr-uwb/lib/uwb_preamble_sic_core.cc",
-             "adapter_src": "gr-uwb/lib/uwb_preamble_sic.cc"}
+             "core_header": "include/openuwb/sic/preamble_sic_core.h",
+             "core_src": "lib/sic/uwb_preamble_sic_core.cc",
+             "adapter_src": "lib/uwb_preamble_sic.cc"}
     checked = 0
     mis = []
     for k, rel in pairs.items():
@@ -781,14 +781,14 @@ def verify_run(run_dir, verbose=False, trusted_root=None, trusted_build=None):
 # ---------------------------------------------------------------------------
 def _mk_good(root, n=12):
     os.makedirs(os.path.join(root, "recon"), exist_ok=True)
-    os.makedirs(os.path.join(root, "gr-uwb", "build-sic-payload", "lib"),
+    os.makedirs(os.path.join(root, "build", "sic-payload", "lib"),
                 exist_ok=True)
-    libpath = os.path.join(root, "gr-uwb", "build-sic-payload", "lib",
+    libpath = os.path.join(root, "build", "sic-payload", "lib",
                            "libgnuradio-uwb.so")
     with open(libpath, "wb") as fh:
         fh.write(b"\x7fELF fake")
     libsha = _sha256(libpath)
-    bind_path = os.path.join(root, "gr-uwb", "build-sic-payload", "python",
+    bind_path = os.path.join(root, "build", "sic-payload", "python",
                              "uwb", "bindings", "uwb_python.cpython-310.so")
     os.makedirs(os.path.dirname(bind_path), exist_ok=True)
     with open(bind_path, "wb") as fh:
@@ -890,7 +890,7 @@ def _mk_good(root, n=12):
         "provenance": {
             "git": {"head": "deadbeef", "status_sha256": "0" * 64},
             "loaded_library": libpath, "loaded_library_sha256": libsha,
-            "build_dir": os.path.join(root, "gr-uwb", "build-sic-payload"),
+            "build_dir": os.path.join(root, "build", "sic-payload"),
             "source_sha256": src,
             "bindings": {"path": bind_path, "sha256": bind_sha}},
         "fcs_contract": {"appended_once_by": "generator",
@@ -1023,7 +1023,7 @@ def mutations(base):
         # B-N01: change BOTH build_dir and loaded_library to an external build
         # WITH the correct sha256 of the external file.  The trusted-root
         # binding must still reject it (it cannot whitelist itself).
-        ext_build = os.path.join(d, "external", "gr-uwb", "build-sic-payload")
+        ext_build = os.path.join(d, "external", "build", "sic-payload")
         ext_lib = os.path.join(ext_build, "lib", "libgnuradio-uwb.so")
         os.makedirs(os.path.dirname(ext_lib), exist_ok=True)
         with open(ext_lib, "wb") as fh:

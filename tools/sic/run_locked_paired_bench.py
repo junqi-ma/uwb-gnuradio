@@ -5,11 +5,17 @@ import re
 import shutil
 import subprocess
 import sys
+from pathlib import Path
+
 import numpy as np
 
 LOCK_PATH = "/tmp/uwb-sic-benchmark.lock"
-OLD_BUILD = "/home/junqima/workspace/uwb-gnuradio/.worktrees/sic-unified/gr-uwb/build-sic-unified-round2"
-NEW_BUILD = "/home/junqima/workspace/uwb-gnuradio/.worktrees/sic-unified/gr-uwb/build-sic-unified-round3"
+# Phase 3: no machine-specific absolute paths.  Point these at the two build
+# trees being compared (normally two presets or two worktrees).
+# TODO(openuwb-compat-removal): require explicit paths on the command line.
+_REPO = Path(__file__).resolve().parents[2]
+OLD_BUILD = os.environ.get("OPENUWB_OLD_BUILD", str(_REPO / "build" / "sic-unified-round2"))
+NEW_BUILD = os.environ.get("OPENUWB_NEW_BUILD", str(_REPO / "build" / "sic-unified-round3"))
 
 def run_bench(build_dir, dump_dir=None):
     exe = os.path.join(build_dir, "apps/bench_unified_timing")

@@ -14,7 +14,7 @@ What matters for the bottleneck question is the *service time* per window.
 Usage
 -----
     python3 tools/performance/analyze_sc16_cost_split.py \
-        --binary gr-uwb/build-sc16-r1r2/apps/uwb_uhd_sc16_pipeline_runner \
+        --binary build/sc16-r1r2/apps/openuwb_pipeline_runner \
         --out docs/performance/data_sc16_cost_split
 """
 import argparse

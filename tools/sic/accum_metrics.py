@@ -62,7 +62,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 import numpy as np
 
 # ---------------------------------------------------------------------------
-# Frozen geometry / domain constants (mirror gr-uwb/apps/sic_preamble_sim.py)
+# Frozen geometry / domain constants (mirror apps/sic_preamble_sim.py)
 # ---------------------------------------------------------------------------
 SCHEMA_VERSION = 2
 
@@ -157,7 +157,7 @@ def recovery_design_matrix(taps: np.ndarray, *, samples_per_symbol: int = SPS,
     """M x 127 convolution design matrix for one shaped SYNC symbol.
 
     Independent re-implementation of
-    ``gr-uwb/apps/sic_preamble_sim.py::recovery_design_matrix`` (used so the
+    ``apps/sic_preamble_sim.py::recovery_design_matrix`` (used so the
     verifier does not import app code).
     """
     A = np.zeros((int(samples_per_symbol), int(code_len)), dtype=np.float64)

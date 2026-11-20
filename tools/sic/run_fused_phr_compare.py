@@ -916,11 +916,11 @@ def window_dirs(case: Path) -> list[Path]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--build",
-                        default="gr-uwb/build-sic-fullpacket-fused-phr")
+                        default="build/sic-fullpacket-fused-phr")
     parser.add_argument("--runner",
                         default="apps/benchmark_fullpacket_compare_fast_rx")
     parser.add_argument("--inputs",
-                        default="gr-uwb/build-sic-fullpacket/results/inputs16")
+                        default="build/sic-fullpacket/results/inputs16")
     parser.add_argument("--out", required=True)
     parser.add_argument("--mode", choices=["functional", "timing", "both"],
                         default="both")
@@ -1028,16 +1028,16 @@ def main() -> int:
         "full_wait_policy": "whole_public_context",
         "sources": {str(path.relative_to(ROOT)): sha256(path)
                     for path in [
-                        ROOT / "gr-uwb/apps/benchmark_fullpacket_compare.cc",
-                        ROOT / "gr-uwb/include/gnuradio/uwb/fullpacket_rx_pipeline.h",
-                        ROOT / "gr-uwb/include/gnuradio/uwb/uwb_demod_core.h",
-                        ROOT / "gr-uwb/include/gnuradio/uwb/uwb_demod_result.h",
-                        ROOT / "gr-uwb/include/gnuradio/uwb/uwb_phy_profile.h",
-                        ROOT / "gr-uwb/include/gnuradio/uwb/uwb_rx_fused_cmf.h",
-                        ROOT / "gr-uwb/include/gnuradio/uwb/uwb_rx_fused_phr.h",
-                        ROOT / "gr-uwb/lib/qa_uwb_rx_fused_cmf.cc",
-                        ROOT / "gr-uwb/lib/qa_uwb_rx_fused_phr.cc",
-                        ROOT / "gr-uwb/include/gnuradio/uwb/uwb_rx_softchip_opt.h",
+                        ROOT / "tests/benchmarks/benchmark_fullpacket_compare.cc",
+                        ROOT / "include/openuwb/runtime/fullpacket_rx_pipeline.h",
+                        ROOT / "include/openuwb/phy/hrp/rx/demod_core.h",
+                        ROOT / "include/openuwb/phy/hrp/rx/demod_result.h",
+                        ROOT / "include/openuwb/phy/hrp/common/profile.h",
+                        ROOT / "include/openuwb/phy/hrp/rx/rx_fused_cmf.h",
+                        ROOT / "include/openuwb/uwb_rx_fused_phr.h",
+                        ROOT / "tests/unit/phy/qa_uwb_rx_fused_cmf.cc",
+                        ROOT / "tests/unit/phy/qa_uwb_rx_fused_phr.cc",
+                        ROOT / "include/openuwb/phy/hrp/rx/rx_softchip_opt.h",
                         Path(__file__).resolve(),
                     ] if path.is_file()},
     }

@@ -11,11 +11,11 @@ def build(root):
     work = Path('/tmp/uwb_window_diag')
     private = work/'include/gnuradio/uwb'
     private.mkdir(parents=True, exist_ok=True)
-    source_dir = root/'gr-uwb/include/gnuradio/uwb'
+    source_dir = root/'include/openuwb'
     files = {name: (source_dir/name).read_text() for name in
              ('uwb_demod_timing.h', 'uwb_demod_cfo.h', 'uwb_demod_sfd.h',
               'uwb_demod_phr.h')}
-    files['uwb_demod_pipeline.cc'] = (root/'gr-uwb/lib/uwb_demod_pipeline.cc').read_text()
+    files['uwb_demod_pipeline.cc'] = (root/'lib/phy/hrp/uwb_demod_pipeline.cc').read_text()
     patches = [
         ('    out = TimingResult{};', '    ++window_diag::timing_call;\n    out = TimingResult{};'),
         ('        if (bm < min_metric)', '        window_diag::local(want, radius, bm, bp, min_metric);\n        if (bm < min_metric)'),
@@ -34,8 +34,8 @@ def build(root):
         (private/name).write_text(text)
     # The diagnostic entry has a distinct symbol, so the core archive cannot
     # accidentally replace the instrumented implementation at link time.
-    build_dir = root/'gr-uwb/build-window-diag'
-    subprocess.run(['cmake', '-S', str(root/'gr-uwb'), '-B', str(build_dir),
+    build_dir = root/'build/window-diag'
+    subprocess.run(['cmake', '-S', str(root), '-B', str(build_dir),
                     '-DCMAKE_BUILD_TYPE=Release', '-DUWB_BUILD_EXPERIMENTS=OFF', '-DENABLE_UHD_BACKEND=OFF',
                     '-DUWB_SIMD=AVX2'], check=True)
     subprocess.run(['cmake', '--build', str(build_dir), '--target', 'uwb_core', '-j4'],
@@ -44,7 +44,7 @@ def build(root):
                '-Ddemodulate_one=window_diagnostic_demodulate_one',
                '-include', str(root/'tools/rx/window_diag_state.h'),
                '-Wno-deprecated-declarations', '-I'+str(work/'include'),
-               '-I'+str(root/'gr-uwb/include'), '-I'+str(build_dir/'include'),
+               '-I'+str(root/'include'), '-I'+str(build_dir/'include'),
                str(root/'tools/rx/diagnose_failure_window.cc'),
                str(private/'uwb_demod_pipeline.cc'),
                str(build_dir/'lib/libuwb_core.a'), '-lvolk', '-ldl', '-lm', '-pthread',

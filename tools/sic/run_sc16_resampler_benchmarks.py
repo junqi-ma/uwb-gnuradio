@@ -12,7 +12,7 @@ import subprocess
 import json
 
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
-RUNNER_BIN = os.path.join(BASE_DIR, "gr-uwb/build-sc16-pipeline/apps/uwb_uhd_sc16_pipeline_runner")
+RUNNER_BIN = os.path.join(BASE_DIR, "build/sc16-pipeline/apps/openuwb_pipeline_runner")
 TESTDATA_BIN = os.path.join(BASE_DIR, "testdata/uhd_sc16/sim_preamble_sc16_737m28_rate.bin")
 
 # Baseline values from plan
@@ -165,7 +165,7 @@ def main():
     report_lines = []
     report_lines.append("# UHD SC16 65/48 重采样优化前后性能对比报告\n")
     report_lines.append("## 1. 测试环境与基准配置")
-    report_lines.append("- **测试程序**: `gr-uwb/build-sc16-pipeline/apps/uwb_uhd_sc16_pipeline_runner`")
+    report_lines.append("- **测试程序**: `build/sc16-pipeline/apps/openuwb_pipeline_runner`")
     report_lines.append(f"- **测试数据集**: `testdata/uhd_sc16/sim_preamble_sc16_737m28_rate.bin` (737.28 MHz SC16)")
     report_lines.append("- **文件锁**: `/tmp/uwb-sic-benchmark.lock` (独占排他锁)")
     report_lines.append("- **采样率转换**: 737.28 MHz Native $\\to$ 998.40 MHz Work ($L=65, M=48$)\n")

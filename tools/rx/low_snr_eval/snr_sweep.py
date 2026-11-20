@@ -10,8 +10,8 @@ changes.
 
 Examples:
   python3 tools/rx/low_snr_eval/snr_sweep.py --fixtures /tmp/uwb-bpm-snr-sweep \
-      --generate --build-dir gr-uwb/build-resamp-avx2 \
-      --decoder gr-uwb/build-resamp-avx2/apps/uwb_dw3000_decode \
+      --generate --build-dir build/resamp-avx2 \
+      --decoder build/resamp-avx2/apps/uwb_dw3000_decode \
       --levels 0,4 --snr -11,-12,-13,-14,-15
 """
 from __future__ import annotations

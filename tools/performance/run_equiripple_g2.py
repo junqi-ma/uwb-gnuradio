@@ -9,7 +9,7 @@ polyphase arm split, history length, flush, and the output-length contract.
 Usage
 -----
     python3 tools/performance/run_equiripple_g2.py \
-        --binary gr-uwb/build-sc16-equiripple/apps/benchmark_sc16_burst_core \
+        --binary build/sc16-equiripple/apps/benchmark_sc16_burst_core \
         --out docs/performance/data_65_48_equiripple_g2
 """
 import argparse

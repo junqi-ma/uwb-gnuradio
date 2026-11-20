@@ -11,7 +11,7 @@ import statistics
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[2]
-BINARY = ROOT / 'gr-uwb/build-cfo-tail-fix/apps/uwb_dw3000_live'
+BINARY = ROOT / 'build/cfo-tail-fix/apps/openuwb_rx'
 
 
 def fields(line):
