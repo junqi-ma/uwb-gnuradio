@@ -4267,3 +4267,899 @@ BOOST_AUTO_TEST_CASE(test_fec_opt_rs_kernels_match_reference)
             BOOST_REQUIRE_EQUAL(v_new[i], v_ref[i]);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Wave 1 / JOINT-ML-VITERBI QA.
+//
+// Everything below compares the new joint bi-orthogonal ML kernels against
+// independent references written in this anonymous namespace: a nested
+// `for (st) for (u)` DP (the pre-unrolling loop shape), a brute-force
+// enumeration of every input sequence for the tiny exact-ML case, and a local
+// CL-3 encoder built from gr::uwb::codec::cl3_transition.  The new production
+// code is never used as its own oracle.
+// ---------------------------------------------------------------------------
+namespace {
+
+using gr::uwb::codec::Cl3Transition;
+using gr::uwb::codec::cl3_transition;
+using gr::uwb::codec::crc16_802154;
+using gr::uwb::codec::hrp_secded;
+using gr::uwb::codec::rs_bits_to_syms;
+using gr::uwb::codec::rs_syms_to_bits;
+
+// Joint ML branch metric, written straight from the task definition.
+float qa_branch(float m0, float m1, int o0, int o1)
+{
+    return (o0 == 0) ? (o1 ? m0 : -m0) : (o1 ? m1 : -m1);
+}
+
+void qa_cl3_encode(const std::vector<int8_t>& u, std::vector<int8_t>& g0,
+                   std::vector<int8_t>& g1)
+{
+    g0.assign(u.size(), int8_t(0));
+    g1.assign(u.size(), int8_t(0));
+    int state = 0;
+    for (size_t t = 0; t < u.size(); ++t) {
+        const Cl3Transition step = cl3_transition(state, u[t] & 1);
+        g0[t] = static_cast<int8_t>(step.g0);
+        g1[t] = static_cast<int8_t>(step.g1);
+        state = step.next_state;
+    }
+}
+
+// BPM-BPSK constellation: (g0,g1) -> (m0,m1) at amplitude A.
+void qa_map_bpm(const std::vector<int8_t>& g0, const std::vector<int8_t>& g1,
+                float A, std::vector<float>& m0, std::vector<float>& m1)
+{
+    m0.assign(g0.size(), 0.0f);
+    m1.assign(g0.size(), 0.0f);
+    for (size_t t = 0; t < g0.size(); ++t) {
+        const float s = g1[t] ? -A : A;
+        if (g0[t] == 0)
+            m0[t] = s;
+        else
+            m1[t] = s;
+    }
+}
+
+// Split-LLR convention of decide_bpm_soft(): positive favours bit 0.
+void qa_split_llrs(const std::vector<float>& m0, const std::vector<float>& m1,
+                   std::vector<float>& l0, std::vector<float>& l1)
+{
+    l0.resize(m0.size());
+    l1.resize(m0.size());
+    for (size_t t = 0; t < m0.size(); ++t) {
+        l0[t] = std::abs(m0[t]) - std::abs(m1[t]);
+        l1[t] = std::max(m0[t], m1[t]) - std::max(-m0[t], -m1[t]);
+    }
+}
+
+float qa_path_metric(const std::vector<int8_t>& bits,
+                     const std::vector<float>& m0,
+                     const std::vector<float>& m1)
+{
+    int state = 0;
+    float metric = 0.0f;
+    for (size_t t = 0; t < bits.size(); ++t) {
+        const Cl3Transition step = cl3_transition(state, bits[t] & 1);
+        metric += qa_branch(m0[t], m1[t], step.g0, step.g1);
+        state = step.next_state;
+    }
+    return metric;
+}
+
+// Independent nested-loop DP with traceback and final metric.
+struct QaPath {
+    std::vector<int8_t> bits;
+    float metric = 0.0f;
+};
+
+QaPath qa_ref_dp(const std::vector<float>& m0, const std::vector<float>& m1,
+                 bool terminated)
+{
+    const float INF = 1e30f;
+    const size_t N = m0.size();
+    float surf[4] = { 0.0f, INF, INF, INF };
+    std::vector<int8_t> back(N * 4, int8_t(0));
+    for (size_t t = 0; t < N; ++t) {
+        float ns[4] = { INF, INF, INF, INF };
+        for (int st = 0; st < 4; ++st) {
+            for (int u = 0; u < 2; ++u) {
+                const Cl3Transition step = cl3_transition(st, u);
+                const float m = surf[st] + qa_branch(m0[t], m1[t], step.g0,
+                                                     step.g1);
+                if (m < ns[step.next_state]) {
+                    ns[step.next_state] = m;
+                    back[t * 4 + step.next_state] =
+                        static_cast<int8_t>((u << 2) | st);
+                }
+            }
+        }
+        for (int i = 0; i < 4; ++i)
+            surf[i] = ns[i];
+    }
+    int best = 0;
+    if (!terminated) {
+        for (int i = 1; i < 4; ++i)
+            if (surf[i] < surf[best])
+                best = i;
+    }
+    QaPath p;
+    p.bits.resize(N);
+    p.metric = surf[best];
+    int cur = best;
+    for (size_t t = N; t-- > 0;) {
+        const int v = back[t * 4 + cur];
+        p.bits[t] = static_cast<int8_t>(v >> 2);
+        cur = v & 3;
+    }
+    return p;
+}
+
+// Split-LLR Viterbi, again from a nested loop (production vitdec_cl3_soft() is
+// intentionally not called here).
+std::vector<int8_t> qa_ref_split(const std::vector<float>& m0,
+                                 const std::vector<float>& m1)
+{
+    std::vector<float> l0, l1;
+    qa_split_llrs(m0, m1, l0, l1);
+    const float INF = 1e30f;
+    const size_t N = m0.size();
+    float surf[4] = { 0.0f, INF, INF, INF };
+    std::vector<int8_t> back(N * 4, int8_t(0));
+    for (size_t t = 0; t < N; ++t) {
+        float ns[4] = { INF, INF, INF, INF };
+        for (int st = 0; st < 4; ++st) {
+            for (int u = 0; u < 2; ++u) {
+                const Cl3Transition step = cl3_transition(st, u);
+                const float c0 = (2.0f * step.g0 - 1.0f) * l0[t];
+                const float c1 = (2.0f * step.g1 - 1.0f) * l1[t];
+                const float m = surf[st] + c0 + c1;
+                if (m < ns[step.next_state]) {
+                    ns[step.next_state] = m;
+                    back[t * 4 + step.next_state] =
+                        static_cast<int8_t>((u << 2) | st);
+                }
+            }
+        }
+        for (int i = 0; i < 4; ++i)
+            surf[i] = ns[i];
+    }
+    int best = 0;
+    for (int i = 1; i < 4; ++i)
+        if (surf[i] < surf[best])
+            best = i;
+    std::vector<int8_t> out(N);
+    int cur = best;
+    for (size_t t = N; t-- > 0;) {
+        const int v = back[t * 4 + cur];
+        out[t] = static_cast<int8_t>(v >> 2);
+        cur = v & 3;
+    }
+    return out;
+}
+
+// Exhaustive ML over all 2^N input sequences (small N only).
+bool qa_brute_ml(const std::vector<float>& m0, const std::vector<float>& m1,
+                 QaPath& out, size_t& min_count)
+{
+    const size_t N = m0.size();
+    if (N > 20)
+        return false;
+    const float INF = 1e30f;
+    float best = INF;
+    std::vector<int8_t> bits(N, int8_t(0));
+    std::vector<int8_t> best_bits;
+    min_count = 0;
+    const uint32_t total = static_cast<uint32_t>(1u) << N;
+    for (uint32_t mask = 0; mask < total; ++mask) {
+        for (size_t t = 0; t < N; ++t)
+            bits[t] = static_cast<int8_t>((mask >> t) & 1u);
+        const float v = qa_path_metric(bits, m0, m1);
+        if (v < best - 1e-6f) {
+            best = v;
+            best_bits = bits;
+            min_count = 1;
+        } else if (std::abs(v - best) <= 1e-6f) {
+            ++min_count;
+        }
+    }
+    out.bits = best_bits;
+    out.metric = best;
+    return !best_bits.empty();
+}
+
+// Exact tie counter over the nested-loop ACS (does not change survivors).
+size_t qa_count_biorth_ties(const std::vector<float>& m0,
+                            const std::vector<float>& m1)
+{
+    const float INF = 1e30f;
+    float surf[4] = { 0.0f, INF, INF, INF };
+    size_t ties = 0;
+    for (size_t t = 0; t < m0.size(); ++t) {
+        float ns[4] = { INF, INF, INF, INF };
+        for (int st = 0; st < 4; ++st) {
+            for (int u = 0; u < 2; ++u) {
+                const Cl3Transition step = cl3_transition(st, u);
+                const float m = surf[st] + qa_branch(m0[t], m1[t], step.g0,
+                                                     step.g1);
+                if (m < ns[step.next_state]) {
+                    ns[step.next_state] = m;
+                } else if (m == ns[step.next_state] && m != INF) {
+                    ++ties;
+                }
+            }
+        }
+        for (int i = 0; i < 4; ++i)
+            surf[i] = ns[i];
+    }
+    return ties;
+}
+
+// Independent nested-loop tracing ML Viterbi.
+struct QaTrace {
+    std::vector<int8_t> bits;
+    std::vector<int8_t> states;
+    std::vector<float> margins;
+    std::vector<uint8_t> lose_u;
+};
+
+QaTrace qa_ref_trace(const std::vector<float>& m0, const std::vector<float>& m1,
+                     bool terminated)
+{
+    const float INF = 1e30f;
+    const size_t N = m0.size();
+    float surf[4] = { 0.0f, INF, INF, INF };
+    std::vector<int8_t> back(N * 4, int8_t(0));
+    std::vector<float> diff(N * 4, INF);
+    std::vector<uint8_t> alt(N * 4, 0);
+    for (size_t t = 0; t < N; ++t) {
+        float ns[4] = { INF, INF, INF, INF };
+        float ns2[4] = { INF, INF, INF, INF };
+        uint8_t nalt[4] = { 0, 0, 0, 0 };
+        for (int st = 0; st < 4; ++st) {
+            for (int u = 0; u < 2; ++u) {
+                const Cl3Transition step = cl3_transition(st, u);
+                const float m = surf[st] + qa_branch(m0[t], m1[t], step.g0,
+                                                     step.g1);
+                const int nst = step.next_state;
+                const uint8_t code = static_cast<uint8_t>((u << 2) | st);
+                if (m < ns[nst]) {
+                    ns2[nst] = ns[nst];
+                    nalt[nst] = static_cast<uint8_t>(back[t * 4 + nst]);
+                    ns[nst] = m;
+                    back[t * 4 + nst] = static_cast<int8_t>(code);
+                } else if (m < ns2[nst]) {
+                    ns2[nst] = m;
+                    nalt[nst] = code;
+                }
+            }
+        }
+        for (int i = 0; i < 4; ++i) {
+            surf[i] = ns[i];
+            diff[t * 4 + i] = ns2[i] - ns[i];
+            alt[t * 4 + i] = nalt[i];
+        }
+    }
+    int best = 0;
+    if (!terminated) {
+        for (int i = 1; i < 4; ++i)
+            if (surf[i] < surf[best])
+                best = i;
+    }
+    QaTrace tr;
+    tr.bits.resize(N);
+    tr.states.resize(N + 1);
+    tr.margins.resize(N);
+    tr.lose_u.resize(N);
+    int cur = best;
+    tr.states[N] = static_cast<int8_t>(cur);
+    for (size_t t = N; t-- > 0;) {
+        const int v = back[t * 4 + cur];
+        tr.bits[t] = static_cast<int8_t>(v >> 2);
+        tr.margins[t] = diff[t * 4 + cur];
+        tr.lose_u[t] = static_cast<uint8_t>(alt[t * 4 + cur] >> 2);
+        cur = v & 3;
+        tr.states[t] = static_cast<int8_t>(cur);
+    }
+    return tr;
+}
+
+// ---- Synthetic end-to-end payload frames ---------------------------------
+struct QaFrame {
+    size_t psdu_bits = 0;
+    size_t payload_symbols = 0;
+    std::vector<uint8_t> bytes;    // expected PSDU (with FCS)
+    std::vector<int8_t> u;         // joint trellis info bits
+    std::vector<float> m0, m1;     // noiseless joint metrics
+};
+
+// Systematic RS(63,55) encode of one shortened block: data bits + 48 parity
+// bits, matching expand_rs_codeword()'s leading-zero padding convention.
+bool qa_rs_encode_block(const std::vector<int8_t>& data,
+                        std::vector<int8_t>& coded)
+{
+    if (data.empty() || data.size() > 330)
+        return false;
+    int8_t data330[330] = {};
+    const size_t pad = 330 - data.size();
+    for (size_t i = 0; i < data.size(); ++i)
+        data330[pad + i] = data[i] & 1;
+    int syms55[55];
+    rs_bits_to_syms(data330, 55, syms55);
+    int cw63[63];
+    if (!fec_opt_ref::encode_systematic(syms55, cw63))
+        return false;
+    int8_t par48[48];
+    rs_syms_to_bits(cw63 + 55, 8, par48);
+    coded = data;
+    coded.insert(coded.end(), par48, par48 + 48);
+    return true;
+}
+
+bool qa_build_frame(size_t psdu_bytes, uint32_t seed, QaFrame& f)
+{
+    if (psdu_bytes < 3)
+        return false;
+    std::mt19937 rng(seed);
+    std::vector<uint8_t> bytes(psdu_bytes);
+    for (size_t i = 0; i + 2 < psdu_bytes; ++i)
+        bytes[i] = static_cast<uint8_t>(rng() & 0xffu);
+    const uint16_t fcs = crc16_802154(bytes.data(), psdu_bytes - 2);
+    bytes[psdu_bytes - 2] = static_cast<uint8_t>(fcs & 0xffu);
+    bytes[psdu_bytes - 1] = static_cast<uint8_t>(fcs >> 8);
+
+    std::vector<int8_t> psdu_bits(psdu_bytes * 8);
+    for (size_t i = 0; i < psdu_bytes; ++i)
+        for (int k = 0; k < 8; ++k)
+            psdu_bits[8 * i + k] = static_cast<int8_t>((bytes[i] >> k) & 1u);
+
+    std::vector<int8_t> rs_cw;
+    size_t off = 0;
+    while (off < psdu_bits.size()) {
+        const size_t n = std::min<size_t>(330, psdu_bits.size() - off);
+        std::vector<int8_t> block(psdu_bits.begin() + off,
+                                  psdu_bits.begin() + off + n);
+        std::vector<int8_t> coded;
+        if (!qa_rs_encode_block(block, coded))
+            return false;
+        rs_cw.insert(rs_cw.end(), coded.begin(), coded.end());
+        off += n;
+    }
+
+    f.psdu_bits = psdu_bits.size();
+    f.payload_symbols = rs_cw.size();
+    f.bytes = bytes;
+    // The first 19 trellis bits are the systematic PHR bits.  The payload
+    // decoder discards them, so any fixed pattern works for this frame.
+    f.u.assign(19, int8_t(0));
+    f.u.insert(f.u.end(), rs_cw.begin(), rs_cw.end());
+    f.u.push_back(0);
+    f.u.push_back(0);
+
+    std::vector<int8_t> g0, g1;
+    qa_cl3_encode(f.u, g0, g1);
+    qa_map_bpm(g0, g1, 1.0f, f.m0, f.m1);
+    return true;
+}
+
+void qa_add_noise(std::vector<float>& m0, std::vector<float>& m1, float sigma,
+                  std::mt19937& rng)
+{
+    std::normal_distribution<float> nd(0.0f, sigma);
+    for (size_t i = 0; i < m0.size(); ++i) {
+        m0[i] += nd(rng);
+        m1[i] += nd(rng);
+    }
+}
+
+} // namespace
+
+BOOST_AUTO_TEST_CASE(test_w1_joint_ml_exact_counterexample)
+{
+    using namespace gr::uwb::demod::core::detail;
+
+    // The documented coupling: a +1.0 half and a -0.8 half make (1,1) the true
+    // runner-up (cost -0.8), while the split LLRs score (1,1) as the worst
+    // branch (+0.4).
+    const std::vector<float> m0 = { 1.0f, 0.6f };
+    const std::vector<float> m1 = { -0.8f, 0.9f };
+
+    std::vector<int8_t> biorth;
+    vitdec_cl3_biorth(m0.data(), m1.data(), m0.size(), biorth);
+    BOOST_REQUIRE_EQUAL(biorth.size(), m0.size());
+
+    // Exhaustive ML over all 2^2 = 4 input sequences.
+    QaPath brute;
+    size_t min_count = 0;
+    BOOST_REQUIRE(qa_brute_ml(m0, m1, brute, min_count));
+    BOOST_REQUIRE_EQUAL(min_count, size_t(1)); // unique ML path
+    BOOST_CHECK_EQUAL_COLLECTIONS(biorth.begin(), biorth.end(),
+                                  brute.bits.begin(), brute.bits.end());
+    BOOST_CHECK_SMALL(qa_path_metric(biorth, m0, m1) - brute.metric, 1e-6f);
+
+    // The split path must genuinely lose on this sequence.
+    const std::vector<int8_t> split = qa_ref_split(m0, m1);
+    const float split_metric = qa_path_metric(split, m0, m1);
+    BOOST_CHECK(split != biorth);
+    BOOST_CHECK_GT(split_metric, brute.metric + 1e-6f);
+    BOOST_TEST_MESSAGE("joint-ML counterexample: biorth metric "
+                       << brute.metric << ", split path metric " << split_metric
+                       << ", split bits [" << int(split[0]) << int(split[1])
+                       << "], tied ML paths " << min_count);
+
+    // Trace format: bits/states/margins/lose_u must match the independent
+    // nested-loop reference exactly, including the strict `<` tie order.
+    Cl3TrellisTrace tr;
+    vitdec_cl3_biorth_trace(m0.data(), m1.data(), m0.size(), tr);
+    const QaTrace ref = qa_ref_trace(m0, m1, false);
+    BOOST_REQUIRE_EQUAL(tr.bits.size(), m0.size());
+    BOOST_REQUIRE_EQUAL(tr.states.size(), m0.size() + 1);
+    BOOST_CHECK(std::equal(tr.bits.begin(), tr.bits.end(), ref.bits.begin()));
+    BOOST_CHECK(std::equal(tr.states.begin(), tr.states.end(),
+                           ref.states.begin()));
+    BOOST_CHECK(std::equal(tr.lose_u.begin(), tr.lose_u.end(),
+                           ref.lose_u.begin()));
+    for (size_t t = 0; t < m0.size(); ++t)
+        BOOST_CHECK_EQUAL(tr.margins[t], ref.margins[t]);
+
+    // Deterministic tie stress: zero metrics make every edge cost 0, so all
+    // ACS comparisons tie and only the strict `<` / first-edge rule decides.
+    std::vector<float> z0(6, 0.0f), z1(6, 0.0f);
+    std::vector<int8_t> tie_bits;
+    vitdec_cl3_biorth(z0.data(), z1.data(), z0.size(), tie_bits);
+    const QaPath tie_ref = qa_ref_dp(z0, z1, false);
+    BOOST_CHECK_EQUAL_COLLECTIONS(tie_bits.begin(), tie_bits.end(),
+                                  tie_ref.bits.begin(), tie_ref.bits.end());
+    const size_t tie_count = qa_count_biorth_ties(z0, z1);
+    BOOST_CHECK_GT(tie_count, size_t(0));
+    BOOST_TEST_MESSAGE("joint-ML tie stress: " << tie_count
+                                               << " exact ACS ties");
+}
+
+BOOST_AUTO_TEST_CASE(test_w1_joint_ml_awgn_gain_over_split_llr)
+{
+    using namespace gr::uwb::demod::core::detail;
+
+    // 600 frames x 128 coded bits at sigma = 0.4 places the split-LLR FER in
+    // the requested 20-40% band while the joint ML decoder is far below it.
+    constexpr size_t kFrames = 600;
+    constexpr size_t kBits = 128;
+    constexpr float kSigma = 0.4f;
+    std::mt19937 rng(20261120u);
+    std::normal_distribution<float> nd(0.0f, kSigma);
+    std::mt19937 bit_rng(0x5eed1234u);
+
+    size_t split_fer = 0, biorth_fer = 0;
+    size_t split_err = 0, biorth_err = 0, total_bits = 0, ties = 0;
+    for (size_t f = 0; f < kFrames; ++f) {
+        std::vector<int8_t> u(kBits);
+        for (size_t t = 0; t < kBits; ++t)
+            u[t] = static_cast<int8_t>(bit_rng() & 1u);
+        std::vector<int8_t> g0, g1;
+        qa_cl3_encode(u, g0, g1);
+        std::vector<float> m0, m1;
+        qa_map_bpm(g0, g1, 1.0f, m0, m1);
+        for (size_t t = 0; t < kBits; ++t) {
+            m0[t] += nd(rng);
+            m1[t] += nd(rng);
+        }
+
+        std::vector<float> l0, l1;
+        qa_split_llrs(m0, m1, l0, l1);
+        std::vector<int8_t> split_bits;
+        vitdec_cl3_soft(l0.data(), l1.data(), kBits, split_bits);
+        std::vector<int8_t> biorth_bits;
+        vitdec_cl3_biorth(m0.data(), m1.data(), kBits, biorth_bits);
+        BOOST_REQUIRE_EQUAL(split_bits.size(), kBits);
+        BOOST_REQUIRE_EQUAL(biorth_bits.size(), kBits);
+
+        size_t se = 0, be = 0;
+        for (size_t t = 0; t < kBits; ++t) {
+            se += (split_bits[t] != u[t]);
+            be += (biorth_bits[t] != u[t]);
+        }
+        split_err += se;
+        biorth_err += be;
+        split_fer += (se != 0);
+        biorth_fer += (be != 0);
+        total_bits += kBits;
+        ties += qa_count_biorth_ties(m0, m1);
+    }
+
+    const double split_fer_pct = 100.0 * split_fer / kFrames;
+    const double biorth_fer_pct = 100.0 * biorth_fer / kFrames;
+    const double split_ber = static_cast<double>(split_err) / total_bits;
+    const double biorth_ber = static_cast<double>(biorth_err) / total_bits;
+    BOOST_TEST_MESSAGE("AWGN joint-ML gain (" << kFrames << " frames x "
+                       << kBits << " bits, sigma=" << kSigma
+                       << "): split FER=" << split_fer_pct
+                       << "% BER=" << split_ber << "; biorth FER="
+                       << biorth_fer_pct << "% BER=" << biorth_ber
+                       << "; exact biorth ACS ties=" << ties);
+
+    // The test is only informative if the split baseline sits in the target
+    // band; then both BER and FER must be strictly lower for joint ML.
+    BOOST_REQUIRE_GE(split_fer_pct, 20.0);
+    BOOST_REQUIRE_LE(split_fer_pct, 40.0);
+    BOOST_CHECK_LT(biorth_err, split_err);
+    BOOST_CHECK_LT(biorth_fer, split_fer);
+    BOOST_CHECK_LT(biorth_err * 4, split_err);
+    BOOST_CHECK_LT(biorth_fer * 4, split_fer);
+}
+
+BOOST_AUTO_TEST_CASE(test_w1_joint_ml_terminated_tail_beats_truncated)
+{
+    using namespace gr::uwb::demod::core::detail;
+
+    // 400 frames with the standard two zero tail bits.  Only the last eight
+    // symbols carry noise, so the endpoint decision is what matters.
+    constexpr size_t kFrames = 400;
+    constexpr size_t kBits = 64;
+    constexpr float kTailSigma = 1.0f;
+    std::mt19937 rng(20261121u);
+    std::normal_distribution<float> nd(0.0f, kTailSigma);
+    std::mt19937 bit_rng(0x7151245u);
+
+    size_t term_tail_err = 0, trunc_tail_err = 0;
+    size_t clean_mismatch = 0, term_frame_err = 0, trunc_frame_err = 0;
+    for (size_t f = 0; f < kFrames; ++f) {
+        std::vector<int8_t> u(kBits, int8_t(0));
+        for (size_t t = 0; t + 2 < kBits; ++t)
+            u[t] = static_cast<int8_t>(bit_rng() & 1u);
+        std::vector<int8_t> g0, g1;
+        qa_cl3_encode(u, g0, g1);
+        std::vector<float> clean0, clean1;
+        qa_map_bpm(g0, g1, 1.0f, clean0, clean1);
+
+        // Noiseless: terminated and truncated must agree bit for bit.
+        std::vector<int8_t> clean_t, clean_u2;
+        vitdec_cl3_biorth(clean0.data(), clean1.data(), kBits, clean_t, true);
+        vitdec_cl3_biorth(clean0.data(), clean1.data(), kBits, clean_u2, false);
+        if (clean_t != clean_u2 || clean_t != u)
+            ++clean_mismatch;
+
+        std::vector<float> m0 = clean0, m1 = clean1;
+        for (size_t t = kBits - 8; t < kBits; ++t) {
+            m0[t] += nd(rng);
+            m1[t] += nd(rng);
+        }
+        std::vector<int8_t> term, trunc;
+        vitdec_cl3_biorth(m0.data(), m1.data(), kBits, term, true);
+        vitdec_cl3_biorth(m0.data(), m1.data(), kBits, trunc, false);
+        for (size_t t = kBits - 16; t < kBits; ++t) {
+            term_tail_err += (term[t] != u[t]);
+            trunc_tail_err += (trunc[t] != u[t]);
+        }
+        term_frame_err += (term != u);
+        trunc_frame_err += (trunc != u);
+    }
+
+    BOOST_TEST_MESSAGE("tail-noise test: last-16 errors terminated="
+                       << term_tail_err << " truncated=" << trunc_tail_err
+                       << "; frame errors terminated=" << term_frame_err
+                       << " truncated=" << trunc_frame_err);
+    BOOST_CHECK_EQUAL(clean_mismatch, size_t(0));
+    BOOST_CHECK_LT(term_tail_err * 4, trunc_tail_err * 3);
+    BOOST_CHECK_LT(term_frame_err, trunc_frame_err);
+}
+
+BOOST_AUTO_TEST_CASE(test_w1_joint_ml_pulse_clipping_recovers_fcs)
+{
+    using namespace gr::uwb::demod::core::detail;
+
+    // Direct clipping contract: median one, 50x spikes clamped to 4x.
+    {
+        std::vector<float> a(32, 1.0f), b(32, 0.0f);
+        a[4] = 50.0f;
+        a[13] = -50.0f;
+        b[22] = 50.0f;
+        clip_biorth_metrics(a.data(), b.data(), a.size(), 4.0f);
+        for (size_t i = 0; i < a.size(); ++i) {
+            BOOST_CHECK_LE(std::abs(a[i]), 4.0f);
+            BOOST_CHECK_LE(std::abs(b[i]), 4.0f);
+        }
+        BOOST_CHECK_CLOSE(a[4], 4.0f, 1e-6);
+        BOOST_CHECK_CLOSE(a[13], -4.0f, 1e-6);
+        BOOST_CHECK_CLOSE(b[22], 4.0f, 1e-6);
+        BOOST_CHECK_CLOSE(a[0], 1.0f, 1e-6);
+    }
+    // median <= 0 and N < 16 skip safely (buffer untouched).
+    {
+        std::vector<float> a(32, 0.0f), b(32, 0.0f);
+        clip_biorth_metrics(a.data(), b.data(), a.size(), 4.0f);
+        for (size_t i = 0; i < a.size(); ++i)
+            BOOST_CHECK_EQUAL(a[i], 0.0f);
+        std::vector<float> c(8, 50.0f), d(8, -50.0f);
+        clip_biorth_metrics(c.data(), d.data(), c.size(), 4.0f);
+        BOOST_CHECK_EQUAL(c[0], 50.0f);
+        BOOST_CHECK_EQUAL(d[7], -50.0f);
+    }
+
+    // 24-byte PSDU (one RS block, 240 coded payload symbols).  Five 50x
+    // pulses on spaced symbols destroy the unclipped path metric ordering;
+    // after clipping the residual errors stay within RS t = 4.
+    size_t clipped_pass = 0, unclipped_fail = 0;
+    constexpr size_t kFrames = 64;
+    for (size_t f = 0; f < kFrames; ++f) {
+        QaFrame frame;
+        BOOST_REQUIRE(qa_build_frame(24, 1000u + static_cast<uint32_t>(f), frame));
+        BOOST_REQUIRE_EQUAL(frame.payload_symbols, size_t(240));
+
+        std::vector<float> m0 = frame.m0, m1 = frame.m1;
+        const size_t pulse_pos[5] = { 60, 100, 140, 180, 220 };
+        for (size_t i = 0; i < 5; ++i) {
+            const float amp = (i % 2 == 0) ? 50.0f : -50.0f;
+            m0[21 + pulse_pos[i]] += amp;
+        }
+
+        PayloadDecodeWorkspace ws;
+        PayloadResult clipped;
+        const bool clipped_ok = decode_payload_biorth_soft(
+            frame.m0.data(), frame.m1.data(), m0.data() + 21, m1.data() + 21,
+            frame.payload_symbols, frame.psdu_bits, clipped, nullptr, &ws,
+            false, true);
+        if (clipped_ok && clipped.fcs_pass && clipped.bytes == frame.bytes)
+            ++clipped_pass;
+
+        PayloadResult plain;
+        decode_payload_biorth_soft(
+            frame.m0.data(), frame.m1.data(), m0.data() + 21, m1.data() + 21,
+            frame.payload_symbols, frame.psdu_bits, plain, nullptr, &ws,
+            false, false);
+        if (!(plain.ok && plain.fcs_pass))
+            ++unclipped_fail;
+    }
+    BOOST_TEST_MESSAGE("pulse clipping: clipped FCS " << clipped_pass << "/"
+                       << kFrames << ", unclipped failures " << unclipped_fail
+                       << "/" << kFrames);
+    BOOST_CHECK_EQUAL(clipped_pass, kFrames);
+}
+
+BOOST_AUTO_TEST_CASE(test_w1_joint_ml_end_to_end_and_boundaries)
+{
+    using namespace gr::uwb::demod::core::detail;
+    using gr::uwb::demod::core::decode_phr_decisions;
+
+    // ---- Payload: biorth must agree with decode_payload_soft() ------------
+    QaFrame frame;
+    BOOST_REQUIRE(qa_build_frame(24, 777u, frame));
+    std::vector<float> phr0(frame.m0.begin(), frame.m0.begin() + 21);
+    std::vector<float> phr1(frame.m1.begin(), frame.m1.begin() + 21);
+    std::vector<float> pay0(frame.m0.begin() + 21, frame.m0.end());
+    std::vector<float> pay1(frame.m1.begin() + 21, frame.m1.end());
+    std::vector<float> l0, l1;
+    qa_split_llrs(pay0, pay1, l0, l1);
+    std::vector<float> l0p, l1p;
+    qa_split_llrs(phr0, phr1, l0p, l1p);
+
+    PayloadResult soft_out, biorth_out, term_out;
+    PayloadDecodeWorkspace ws;
+    BOOST_REQUIRE(decode_payload_soft(l0p, l1p, l0, l1, frame.psdu_bits,
+                                      soft_out, nullptr, &ws));
+    BOOST_REQUIRE(soft_out.fcs_pass);
+    BOOST_CHECK(soft_out.bytes == frame.bytes);
+    BOOST_REQUIRE(decode_payload_biorth_soft(
+        phr0.data(), phr1.data(), pay0.data(), pay1.data(),
+        frame.payload_symbols, frame.psdu_bits, biorth_out, nullptr, &ws));
+    BOOST_CHECK(biorth_out.fcs_pass);
+    BOOST_CHECK(biorth_out.bytes == soft_out.bytes);
+    BOOST_CHECK_EQUAL(biorth_out.received_fcs, soft_out.received_fcs);
+    BOOST_CHECK_EQUAL(biorth_out.calculated_fcs, soft_out.calculated_fcs);
+    BOOST_REQUIRE(decode_payload_biorth_soft(
+        phr0.data(), phr1.data(), pay0.data(), pay1.data(),
+        frame.payload_symbols, frame.psdu_bits, term_out, nullptr, &ws, true));
+    BOOST_CHECK(term_out.fcs_pass);
+    BOOST_CHECK(term_out.bytes == frame.bytes);
+
+    // ---- PHR: biorth vs decode_phr_decisions() on the same 21 symbols -----
+    const std::vector<int8_t> sys13 = { 1, 0, 0, 1, 0, 0, 0, 0,
+                                        0, 0, 0, 0, 1 };
+    std::vector<int8_t> phr19;
+    hrp_secded(sys13, phr19);
+    std::vector<int8_t> phr_u(phr19.begin(), phr19.end());
+    phr_u.push_back(0);
+    phr_u.push_back(0);
+    std::vector<int8_t> pg0, pg1;
+    qa_cl3_encode(phr_u, pg0, pg1);
+    std::vector<float> pm0, pm1;
+    qa_map_bpm(pg0, pg1, 1.0f, pm0, pm1);
+    const std::vector<float> empty_soft;
+    NsSfdResult ns;
+    ns.ok = true;
+    ns.sfd_start_chip = -1;
+    ns.sfd_end_chip = -1;
+    ns.polarity = 1;
+
+    PhrResult want, got;
+    BOOST_REQUIRE(decode_phr_decisions(pg0, pg1, empty_soft, ns, want));
+    BOOST_REQUIRE(decode_phr_biorth_soft(pm0.data(), pm1.data(), empty_soft,
+                                         ns, got));
+    BOOST_CHECK_EQUAL(got.ok, want.ok);
+    BOOST_CHECK_EQUAL(got.psdu_length, want.psdu_length);
+    BOOST_CHECK_EQUAL(got.data_rate_mbps, want.data_rate_mbps);
+    BOOST_CHECK(got.phr_bits == want.phr_bits);
+    BOOST_CHECK_EQUAL(got.psdu_length, uint32_t(32));
+    BOOST_CHECK_EQUAL(got.data_rate_mbps, 6.81f);
+
+    // Light noise: derive the hard decisions exactly like decide_bpm_symbol()
+    // and require both PHR entries to keep agreeing.
+    std::mt19937 rng(20261122u);
+    std::normal_distribution<float> light(0.0f, 0.15f);
+    std::vector<float> nm0 = pm0, nm1 = pm1;
+    for (size_t t = 0; t < nm0.size(); ++t) {
+        nm0[t] += light(rng);
+        nm1[t] += light(rng);
+    }
+    std::vector<int8_t> hg0(21), hg1(21);
+    for (size_t t = 0; t < 21; ++t) {
+        const bool use1 = std::abs(nm1[t]) > std::abs(nm0[t]);
+        hg0[t] = use1 ? 1 : 0;
+        const float v = use1 ? nm1[t] : nm0[t];
+        hg1[t] = (v < 0.0f) ? 1 : 0;
+    }
+    PhrResult hw, hb;
+    BOOST_REQUIRE(decode_phr_decisions(hg0, hg1, empty_soft, ns, hw));
+    BOOST_REQUIRE(decode_phr_biorth_soft(nm0.data(), nm1.data(), empty_soft,
+                                         ns, hb));
+    BOOST_CHECK_EQUAL(hb.ok, hw.ok);
+    BOOST_CHECK_EQUAL(hb.psdu_length, hw.psdu_length);
+    BOOST_CHECK_EQUAL(hb.data_rate_mbps, hw.data_rate_mbps);
+    BOOST_CHECK(hb.phr_bits == hw.phr_bits);
+
+    // ---- Boundary handling: no crashes, safe false on unusable input ------
+    PayloadResult bad;
+    BOOST_CHECK(!decode_payload_biorth_soft(nullptr, phr1.data(), pay0.data(),
+                                            pay1.data(), 240, 192, bad));
+    BOOST_CHECK(!decode_payload_biorth_soft(phr0.data(), nullptr, pay0.data(),
+                                            pay1.data(), 240, 192, bad));
+    BOOST_CHECK(!decode_payload_biorth_soft(phr0.data(), phr1.data(), nullptr,
+                                            pay1.data(), 240, 192, bad));
+    BOOST_CHECK(!decode_payload_biorth_soft(phr0.data(), phr1.data(),
+                                            pay0.data(), pay1.data(), 0, 192,
+                                            bad));
+    // psdu_bits far beyond what 8 payload symbols can carry -> RS fails.
+    BOOST_CHECK(!decode_payload_biorth_soft(phr0.data(), phr1.data(),
+                                            pay0.data(), pay1.data(), 8,
+                                            8 * 400, bad));
+
+    PhrResult bad_phr;
+    BOOST_CHECK(!decode_phr_biorth_soft(nullptr, pm1.data(), empty_soft, ns,
+                                        bad_phr));
+    BOOST_CHECK(!decode_phr_biorth_soft(pm0.data(), nullptr, empty_soft, ns,
+                                        bad_phr));
+}
+
+namespace {
+
+// Independent nested-loop local CL-3 re-solve with the joint ML metric.
+void qa_ref_local_flip(const std::vector<float>& m0,
+                       const std::vector<float>& m1,
+                       size_t lo,
+                       size_t hi,
+                       int start_st,
+                       int end_st,
+                       const size_t* force_t,
+                       const uint8_t* force_u,
+                       size_t n_force,
+                       std::vector<int8_t>& out_bits)
+{
+    const float INF = 1e30f;
+    float surf[4] = { INF, INF, INF, INF };
+    surf[start_st] = 0.0f;
+    std::vector<int8_t> back((hi - lo) * 4, int8_t(0));
+    for (size_t t = lo; t < hi; ++t) {
+        int forced = -1;
+        for (size_t f = 0; f < n_force; ++f)
+            if (force_t[f] == t)
+                forced = static_cast<int>(force_u[f]);
+        float ns[4] = { INF, INF, INF, INF };
+        for (int st = 0; st < 4; ++st) {
+            if (surf[st] > 1e20f)
+                continue;
+            for (int u = 0; u < 2; ++u) {
+                if (forced >= 0 && u != forced)
+                    continue;
+                const Cl3Transition step = cl3_transition(st, u);
+                const float m = surf[st] + qa_branch(m0[t], m1[t], step.g0,
+                                                     step.g1);
+                if (m < ns[step.next_state]) {
+                    ns[step.next_state] = m;
+                    back[(t - lo) * 4 + step.next_state] =
+                        static_cast<int8_t>((u << 2) | st);
+                }
+            }
+        }
+        for (int i = 0; i < 4; ++i)
+            surf[i] = ns[i];
+    }
+    int cur = end_st;
+    if (surf[cur] > 1e20f) {
+        for (int s = 0; s < 4; ++s)
+            if (surf[s] < surf[cur])
+                cur = s;
+    }
+    for (size_t t = hi; t-- > lo;) {
+        const int v = back[(t - lo) * 4 + cur];
+        out_bits[t] = static_cast<int8_t>(v >> 2);
+        cur = v & 3;
+    }
+}
+
+} // namespace
+
+BOOST_AUTO_TEST_CASE(test_w1_joint_ml_local_flip_and_rescue_phase1)
+{
+    using namespace gr::uwb::demod::core::detail;
+
+    QaFrame frame;
+    BOOST_REQUIRE(qa_build_frame(24, 4242u, frame));
+    const size_t total = frame.u.size();
+    // Mild noise so the trace has both usable margins and a real ACS order.
+    std::mt19937 rng(20261123u);
+    std::vector<float> m0 = frame.m0, m1 = frame.m1;
+    qa_add_noise(m0, m1, 0.3f, rng);
+    Cl3TrellisTrace tr;
+    vitdec_cl3_biorth_trace(m0.data(), m1.data(), total, tr);
+    BOOST_REQUIRE_EQUAL(tr.bits.size(), total);
+
+    // local_cl3_trellis_flip_biorth must match the independent nested-loop
+    // re-solve for unforced, single-forced and pair-forced windows.
+    struct Window {
+        size_t lo, hi;
+        size_t ft[2];
+        uint8_t fu[2];
+        size_t n;
+    };
+    const Window wins[3] = {
+        { 30, 70, { 0, 0 }, { 0, 0 }, 0 },
+        { 100, 140, { 118, 0 }, { 1, 0 }, 1 },
+        { 190, 235, { 200, 225 }, { 0, 1 }, 2 },
+    };
+    for (const auto& w : wins) {
+        std::vector<int8_t> got(total, int8_t(7));
+        std::vector<int8_t> ref(total, int8_t(7));
+        local_cl3_trellis_flip_biorth(m0.data(), m1.data(), w.lo, w.hi,
+                                      tr.states[w.lo], tr.states[w.hi],
+                                      w.ft, w.fu, w.n, got);
+        qa_ref_local_flip(m0, m1, w.lo, w.hi, tr.states[w.lo],
+                          tr.states[w.hi], w.ft, w.fu, w.n, ref);
+        for (size_t t = w.lo; t < w.hi; ++t)
+            BOOST_CHECK_EQUAL(int(got[t]), int(ref[t]));
+        for (size_t t = 0; t < total; ++t) {
+            if (t < w.lo || t >= w.hi)
+                BOOST_CHECK_EQUAL(int(got[t]), 7);
+        }
+    }
+
+    // Phase 1 of rescue_payload_biorth: a trace whose codeword has one or two
+    // bit errors inside different RS symbols must be recovered by RS alone.
+    for (size_t nerr : { size_t(1), size_t(2) }) {
+        Cl3TrellisTrace bad = tr;
+        for (size_t k = 0; k < nerr; ++k)
+            bad.bits[19 + 6 * (3 * k + 1) + 1] ^= 1;
+        PayloadResult out;
+        const bool ok = rescue_payload_biorth(m0.data(), m1.data(), total,
+                                              frame.psdu_bits, bad, out);
+        BOOST_REQUIRE(ok);
+        BOOST_CHECK(out.fcs_pass);
+        BOOST_CHECK(out.bytes == frame.bytes);
+        BOOST_CHECK_EQUAL(out.received_fcs, out.calculated_fcs);
+    }
+
+    // Heavily corrupted trace must never be accepted without a CRC match;
+    // failing safely is equally valid (the rescue is allowed to give up).
+    Cl3TrellisTrace garbage = tr;
+    for (size_t t = 19; t + 2 < total; t += 7)
+        garbage.bits[t] ^= 1;
+    PayloadResult bad_out;
+    if (rescue_payload_biorth(m0.data(), m1.data(), total, frame.psdu_bits,
+                              garbage, bad_out)) {
+        BOOST_CHECK(bad_out.fcs_pass);
+        BOOST_CHECK_EQUAL(bad_out.received_fcs, bad_out.calculated_fcs);
+    }
+    // Contract guards mirror rescue_payload_soft().
+    PayloadResult guard;
+    BOOST_CHECK(!rescue_payload_biorth(m0.data(), m1.data(), total, 0, tr, guard));
+    BOOST_CHECK(!rescue_payload_biorth(m0.data(), m1.data(), total, 191, tr, guard));
+}

@@ -1263,6 +1263,617 @@ inline bool decode_payload_soft(const std::vector<float>& llr0p,
     return out.ok;
 }
 
+// ===========================================================================
+// Joint bi-orthogonal ML CL-3 decoding (Wave 1 / JOINT-ML-VITERBI).
+//
+// IEEE 802.15.4 HRP BPM-BPSK maps the two CL-3 coded bits (o0, o1) onto the
+// four bi-orthogonal points (+A,0), (-A,0), (0,+A), (0,-A):
+//
+//   (0,0) -> (+A, 0)     (0,1) -> (-A, 0)
+//   (1,0) -> (0, +A)     (1,1) -> (0, -A)
+//
+// With (m0, m1) the two half-symbol matched-filter outputs, the exact negative
+// log-likelihood (up to a symbol-common constant) is
+//
+//   branch(o0, o1, t) = (o0 == 0) ? (o1 ? +m0[t] : -m0[t])
+//                                 : (o1 ? +m1[t] : -m1[t])
+//
+// and Viterbi minimises the path sum.  This keeps the BPM position and the
+// BPSK polarity coupled.  The legacy split soft metric
+// (llr0 = |m0| - |m1|, llr1 = max(m) - max(-m)) throws that coupling away:
+// for m0 = +1.0, m1 = -0.8 the true runner-up branch (1,1) costs -0.8, but the
+// split LLR turns it into the *worst* branch (+0.4).  Everything below uses
+// this branch metric with the same 4-state 8-edge unrolled kernels, the same
+// edge order and the same strict `<` tie break as the legacy functions.
+// ===========================================================================
+inline float cl3_biorth_branch(float m0, float m1, int o0, int o1)
+{
+    return (o0 == 0) ? (o1 ? m0 : -m0) : (o1 ? m1 : -m1);
+}
+
+// ML counterpart of vitdec_cl3_soft(): same trellis, same edge order, same
+// traceback.  `terminated == true` forces the final state to 0 (the standard
+// appends two zero tail bits after the last RS codeword).
+inline void vitdec_cl3_biorth(const float* m0, const float* m1, size_t N,
+                              std::vector<int8_t>& out,
+                              bool terminated = false)
+{
+    const float INF = 1e30f;
+    float surf[4] = { 0.0f, INF, INF, INF };
+    Cl3BackBuffer storage;
+    int8_t* back = storage.get(N);
+    for (size_t t = 0; t < N; ++t) {
+        const float a0 = m0[t];
+        const float a1 = m1[t];
+        int8_t* bt = back + t * 4;
+        float ns[4] = { INF, INF, INF, INF };
+        // Eight explicit edges in the same (st, u) order as vitdec_cl3_soft():
+        // (0,0) (0,1) (1,0) (1,1) (2,0) (2,1) (3,0) (3,1).  Branch values are
+        // spelled out from cl3_biorth_branch() so the kernel stays branch-free.
+        cl3_acs_update_soft(surf[0] - a0, 0, 0, bt + 0, ns);
+        cl3_acs_update_soft(surf[1] + a0, 0, 1, bt + 0, ns);
+        cl3_acs_update_soft(surf[2] - a1, 1, 2, bt + 1, ns);
+        cl3_acs_update_soft(surf[3] + a1, 1, 3, bt + 1, ns);
+        cl3_acs_update_soft(surf[0] + a0, 2, 4, bt + 2, ns);
+        cl3_acs_update_soft(surf[1] - a0, 2, 5, bt + 2, ns);
+        cl3_acs_update_soft(surf[2] + a1, 3, 6, bt + 3, ns);
+        cl3_acs_update_soft(surf[3] - a1, 3, 7, bt + 3, ns);
+        for (int i = 0; i < 4; ++i)
+            surf[i] = ns[i];
+    }
+    int best = 0;
+    if (!terminated) {
+        for (int i = 1; i < 4; ++i)
+            if (surf[i] < surf[best])
+                best = i;
+    }
+    out.resize(N);
+    int cur = best;
+    for (size_t t = N; t-- > 0;) {
+        const int v = back[t * 4 + cur];
+        out[t] = static_cast<int8_t>(v >> 2);
+        cur = v & 3;
+    }
+}
+
+// Tracing ML Viterbi: bits/states/margins/lose_u have exactly the same shape
+// and semantics as vitdec_cl3_soft_trace().  `margins[t]` is the winning path
+// metric minus the best competing merged edge (`ns2 - ns`, including the
+// INF-INF == 0 behaviour of unreachable states); `lose_u[t]` is the input bit
+// of that competing edge.  The eight edges are emitted in the reference
+// nested-loop (st, u) order with the same strict `<` tie break.
+inline void vitdec_cl3_biorth_trace(const float* m0, const float* m1, size_t N,
+                                    Cl3TrellisTrace& tr,
+                                    bool terminated = false)
+{
+    const float INF = 1e30f;
+    float surf[4] = { 0.0f, INF, INF, INF };
+    Cl3BackBuffer storage;
+    int8_t* back = storage.get(N);
+    std::vector<float> diff(N * 4, INF);
+    std::vector<uint8_t> alt(N * 4, 0);
+    for (size_t t = 0; t < N; ++t) {
+        const float a0 = m0[t];
+        const float a1 = m1[t];
+        int8_t* bt = back + t * 4;
+        float ns[4] = { INF, INF, INF, INF };
+        float ns2[4] = { INF, INF, INF, INF };
+        uint8_t nalt[4] = { 0, 0, 0, 0 };
+        cl3_trace_update(surf[0] - a0, 0, 0, bt + 0, ns, ns2, nalt);
+        cl3_trace_update(surf[0] + a0, 2, 4, bt + 2, ns, ns2, nalt);
+        cl3_trace_update(surf[1] + a0, 0, 1, bt + 0, ns, ns2, nalt);
+        cl3_trace_update(surf[1] - a0, 2, 5, bt + 2, ns, ns2, nalt);
+        cl3_trace_update(surf[2] - a1, 1, 2, bt + 1, ns, ns2, nalt);
+        cl3_trace_update(surf[2] + a1, 3, 6, bt + 3, ns, ns2, nalt);
+        cl3_trace_update(surf[3] + a1, 1, 3, bt + 1, ns, ns2, nalt);
+        cl3_trace_update(surf[3] - a1, 3, 7, bt + 3, ns, ns2, nalt);
+        for (int i = 0; i < 4; ++i) {
+            surf[i] = ns[i];
+            diff[t * 4 + i] = ns2[i] - ns[i];
+            alt[t * 4 + i] = nalt[i];
+        }
+    }
+    int best = 0;
+    if (!terminated) {
+        for (int i = 1; i < 4; ++i)
+            if (surf[i] < surf[best])
+                best = i;
+    }
+    tr.bits.resize(N);
+    tr.states.resize(N + 1);
+    tr.margins.resize(N);
+    tr.lose_u.resize(N);
+    int cur = best;
+    tr.states[N] = static_cast<int8_t>(cur);
+    for (size_t t = N; t-- > 0;) {
+        const int v = back[t * 4 + cur];
+        tr.bits[t] = static_cast<int8_t>(v >> 2);
+        tr.margins[t] = diff[t * 4 + cur];
+        tr.lose_u[t] = static_cast<uint8_t>(alt[t * 4 + cur] >> 2);
+        cur = v & 3;
+        tr.states[t] = static_cast<int8_t>(cur);
+    }
+}
+
+// Bi-orthogonal twin of local_cl3_trellis_flip(): re-solve [lo, hi) between
+// fixed endpoint states while forcing the loser input bit at up to two steps.
+inline void local_cl3_trellis_flip_biorth(const float* m0,
+                                          const float* m1,
+                                          size_t lo,
+                                          size_t hi,
+                                          int start_st,
+                                          int end_st,
+                                          const size_t* force_t,
+                                          const uint8_t* force_u,
+                                          size_t n_force,
+                                          std::vector<int8_t>& out_bits)
+{
+    int o0[4][2], o1[4][2], nxt[4][2];
+    cl3_trellis_tables(o0, o1, nxt);
+    const size_t len = hi - lo;
+    const float INF = 1e30f;
+    float surf[4] = { INF, INF, INF, INF };
+    surf[start_st] = 0.0f;
+    std::vector<int8_t> back(len * 4, 0);
+    for (size_t i = 0; i < len; ++i) {
+        const size_t t = lo + i;
+        int forced = -1;
+        for (size_t f = 0; f < n_force; ++f) {
+            if (force_t[f] == t) {
+                forced = static_cast<int>(force_u[f]);
+                break;
+            }
+        }
+        float ns[4] = { INF, INF, INF, INF };
+        for (int st = 0; st < 4; ++st) {
+            if (surf[st] > 1e20f)
+                continue;
+            for (int u = 0; u < 2; ++u) {
+                if (forced >= 0 && u != forced)
+                    continue;
+                const float m = surf[st] + cl3_biorth_branch(
+                    m0[t], m1[t], o0[st][u], o1[st][u]);
+                const int nst = nxt[st][u];
+                if (m < ns[nst]) {
+                    ns[nst] = m;
+                    back[i * 4 + nst] = static_cast<int8_t>((u << 2) | st);
+                }
+            }
+        }
+        for (int s = 0; s < 4; ++s)
+            surf[s] = ns[s];
+    }
+    int cur = end_st;
+    if (surf[cur] > 1e20f) {
+        for (int s = 0; s < 4; ++s)
+            if (surf[s] < surf[cur])
+                cur = s;
+    }
+    for (size_t i = len; i-- > 0;) {
+        const int v = back[i * 4 + cur];
+        out_bits[lo + i] = static_cast<int8_t>(v >> 2);
+        cur = v & 3;
+    }
+}
+
+// Pulse-interference guard for the bi-orthogonal metrics.  The per-symbol
+// amplitude max(|m0|, |m1|) is summarised by a deterministic strided sample
+// (<= 1024 points, fixed stack array, zero heap allocation) and clamped to
+// +/- clip_factor * median.  Sign patterns are preserved, but a single 50x
+// burst can no longer outvote hundreds of clean symbols in the Viterbi path.
+// `N < 16` or a non-positive median (e.g. an all-zero buffer) skips safely.
+inline void clip_biorth_metrics(float* m0, float* m1, size_t N,
+                                float clip_factor = 4.0f)
+{
+    if (!m0 || !m1 || N < 16 || !(clip_factor > 0.0f))
+        return;
+    constexpr size_t kMaxSamples = 1024;
+    float sample[kMaxSamples];
+    size_t ns = 0;
+    if (N <= kMaxSamples) {
+        for (size_t i = 0; i < N; ++i)
+            sample[i] = std::max(std::abs(m0[i]), std::abs(m1[i]));
+        ns = N;
+    } else {
+        const size_t stride = (N + kMaxSamples - 1) / kMaxSamples;
+        for (size_t i = 0; i < N && ns < kMaxSamples; i += stride)
+            sample[ns++] = std::max(std::abs(m0[i]), std::abs(m1[i]));
+    }
+    if (ns == 0)
+        return;
+    const size_t mid = ns / 2;
+    std::nth_element(sample, sample + mid, sample + ns);
+    const float median = sample[mid];
+    if (!(median > 0.0f))
+        return;
+    const float limit = clip_factor * median;
+    for (size_t i = 0; i < N; ++i) {
+        float a = m0[i];
+        if (a > limit)
+            a = limit;
+        else if (a < -limit)
+            a = -limit;
+        m0[i] = a;
+        float b = m1[i];
+        if (b > limit)
+            b = limit;
+        else if (b < -limit)
+            b = -limit;
+        m1[i] = b;
+    }
+}
+
+// Bi-orthogonal twin of rescue_payload_soft(): identical two-phase logic
+// (Phase 1 RS errors-and-erasures v = 2/4/6, Phase 2 six single + fifteen pair
+// trellis flips), only the local re-decode uses the ML branch metric.  Only a
+// full-frame CRC-16 match is accepted.
+inline bool rescue_payload_biorth(const float* m0,
+                                  const float* m1,
+                                  size_t total,
+                                  size_t psdu_bits,
+                                  const Cl3TrellisTrace& tr,
+                                  PayloadResult& out,
+                                  PayloadSubTimers* sub = nullptr)
+{
+    (void)sub;
+    if (psdu_bits == 0 || (psdu_bits % 8) != 0)
+        return false;
+    if (tr.bits.size() < total)
+        return false;
+    const size_t num_blocks = (psdu_bits + 329) / 330;
+    struct BlockCands {
+        std::vector<std::array<int8_t, 330>> cands;
+    };
+    std::vector<BlockCands> bc(num_blocks);
+    std::vector<size_t> blk_data_start(num_blocks, 0);
+    std::vector<size_t> blk_coded_start(num_blocks, 0);
+    std::vector<size_t> blk_this_data(num_blocks, 0);
+    std::vector<size_t> blk_this_coded(num_blocks, 0);
+    std::vector<uint8_t> need_flips(num_blocks, 0);
+    {
+        size_t coded_off = 0;
+        size_t data_off = 0;
+        for (size_t b = 0; b < num_blocks; ++b) {
+            const size_t this_data = std::min<size_t>(330, psdu_bits - data_off);
+            const size_t this_coded = this_data + 48;
+            if (19 + coded_off + this_coded > total)
+                return false;
+            blk_data_start[b] = 330 - this_data;
+            blk_coded_start[b] = 19 + coded_off;
+            blk_this_data[b] = this_data;
+            blk_this_coded[b] = this_coded;
+            coded_off += this_coded;
+            data_off += this_data;
+        }
+    }
+
+    auto extract_block = [&](size_t b, const std::vector<int8_t>& dec,
+                             int8_t* block378) {
+        expand_rs_codeword(dec.data() + blk_coded_start[b], blk_this_data[b], block378);
+    };
+    auto try_append = [&](size_t b, const std::array<int8_t, 330>& cand) {
+        for (const auto& ex : bc[b].cands)
+            if (ex == cand)
+                return;
+        bc[b].cands.push_back(cand);
+    };
+
+    // ---- Phase 1: RS only (no Trellis-Chase) ------------------------------
+    for (size_t b = 0; b < num_blocks; ++b) {
+        int8_t blk[378];
+        std::array<int8_t, 330> d330{};
+        extract_block(b, tr.bits, blk);
+        if (rs_decode_block(blk, d330.data())) {
+            bc[b].cands.push_back(d330);
+            continue;
+        }
+        need_flips[b] = 1;
+        const size_t data_start = blk_data_start[b];
+        const size_t this_data = blk_this_data[b];
+        const size_t t_b = blk_coded_start[b];
+        struct SymRel {
+            int sym;
+            float min_m;
+        };
+        std::vector<SymRel> srel;
+        const int first_sym = static_cast<int>(data_start / 6);
+        for (int sy = first_sym; sy < 63; ++sy) {
+            float mm = 1e30f;
+            for (int bit = 0; bit < 6; ++bit) {
+                const size_t pos = static_cast<size_t>(sy * 6 + bit);
+                size_t vt = 0;
+                if (pos >= data_start && pos < 330)
+                    vt = t_b + (pos - data_start);
+                else if (pos >= 330)
+                    vt = t_b + this_data + (pos - 330);
+                else
+                    continue;
+                mm = std::min(mm, tr.margins[vt]);
+            }
+            srel.push_back({ sy, mm });
+        }
+        std::sort(srel.begin(), srel.end(),
+                  [](const SymRel& a, const SymRel& c) {
+                      return a.min_m < c.min_m;
+                  });
+        for (int v : { 2, 4, 6 }) {
+            if (static_cast<int>(srel.size()) < v)
+                break;
+            int ep[6];
+            for (int k = 0; k < v; ++k)
+                ep[k] = srel[k].sym;
+            if (rs_decode_block_erasures(blk, ep, v, d330.data())) {
+                try_append(b, d330);
+                break;
+            }
+        }
+    }
+
+    std::vector<size_t> idx(num_blocks, 0);
+    std::vector<int8_t> psdu_out(psdu_bits);
+    std::vector<uint8_t> bytes(psdu_bits / 8);
+    auto combine_and_crc = [&](size_t max_iter) -> bool {
+        std::fill(idx.begin(), idx.end(), 0);
+        size_t iter = 0;
+        while (iter < max_iter) {
+            size_t doff = 0;
+            for (size_t b = 0; b < num_blocks; ++b) {
+                const size_t this_data = blk_this_data[b];
+                const size_t data_start = blk_data_start[b];
+                const auto& c = bc[b].cands[idx[b]];
+                for (size_t i = 0; i < this_data; ++i)
+                    psdu_out[doff + i] = c[data_start + i];
+                doff += this_data;
+            }
+            pack_psdu_bytes(psdu_out, bytes);
+            uint16_t calculated = 0, received = 0;
+            if (check_psdu_fcs(bytes, calculated, received)) {
+                out = PayloadResult{};
+                out.ok = true;
+                out.fcs_pass = true;
+                out.bytes = bytes;
+                out.bits.assign(psdu_out.begin(), psdu_out.end());
+                out.calculated_fcs = calculated;
+                out.received_fcs = received;
+                return true;
+            }
+            ++iter;
+            size_t pos = num_blocks;
+            while (pos-- > 0) {
+                if (++idx[pos] < bc[pos].cands.size())
+                    break;
+                idx[pos] = 0;
+            }
+            if (pos == static_cast<size_t>(-1))
+                break;
+        }
+        return false;
+    };
+
+    bool all_have_cands = true;
+    for (size_t b = 0; b < num_blocks; ++b)
+        if (bc[b].cands.empty())
+            all_have_cands = false;
+    if (all_have_cands && combine_and_crc(64))
+        return true;
+
+    // ---- Phase 2: local Trellis-Chase on the still-failing blocks ---------
+    std::vector<int8_t> work_bits;
+    for (size_t b = 0; b < num_blocks; ++b) {
+        if (!need_flips[b])
+            continue;
+        int8_t blk[378];
+        std::array<int8_t, 330> d330{};
+        const size_t t_b = blk_coded_start[b];
+        const size_t t_e = t_b + blk_this_coded[b];
+        struct StepM {
+            size_t t;
+            float m;
+        };
+        std::vector<StepM> sm;
+        sm.reserve(blk_this_coded[b]);
+        for (size_t t = t_b; t < t_e; ++t)
+            sm.push_back({ t, tr.margins[t] });
+        std::sort(sm.begin(), sm.end(),
+                  [](const StepM& a, const StepM& c) { return a.m < c.m; });
+        std::vector<size_t> weak;
+        for (const auto& s : sm) {
+            bool near = false;
+            for (size_t w : weak) {
+                if (std::llabs(static_cast<int64_t>(s.t) -
+                               static_cast<int64_t>(w)) < 3) {
+                    near = true;
+                    break;
+                }
+            }
+            if (!near) {
+                weak.push_back(s.t);
+                if (weak.size() >= 6)
+                    break;
+            }
+        }
+        if (work_bits.empty())
+            work_bits = tr.bits;
+        for (size_t i = 0; i < weak.size() && bc[b].cands.size() < 4; ++i) {
+            const size_t t = weak[i];
+            const size_t lo = (t > 12) ? (t - 12) : 0;
+            const size_t hi = std::min(total, t + 13);
+            std::copy(tr.bits.begin() + lo, tr.bits.begin() + hi,
+                      work_bits.begin() + lo);
+            const uint8_t fu = tr.lose_u[t];
+            local_cl3_trellis_flip_biorth(m0, m1, lo, hi, tr.states[lo],
+                                          tr.states[hi], &t, &fu, 1, work_bits);
+            extract_block(b, work_bits, blk);
+            if (rs_decode_block(blk, d330.data()))
+                try_append(b, d330);
+        }
+        for (size_t i = 0; i < weak.size() && bc[b].cands.size() < 4; ++i) {
+            for (size_t j = i + 1;
+                 j < weak.size() && bc[b].cands.size() < 4; ++j) {
+                const size_t t0 = std::min(weak[i], weak[j]);
+                const size_t t1 = std::max(weak[i], weak[j]);
+                const size_t lo = (t0 > 12) ? (t0 - 12) : 0;
+                const size_t hi = std::min(total, t1 + 13);
+                std::copy(tr.bits.begin() + lo, tr.bits.begin() + hi,
+                          work_bits.begin() + lo);
+                const size_t ft[2] = { t0, t1 };
+                const uint8_t fu[2] = { tr.lose_u[t0], tr.lose_u[t1] };
+                local_cl3_trellis_flip_biorth(m0, m1, lo, hi, tr.states[lo],
+                                              tr.states[hi], ft, fu, 2,
+                                              work_bits);
+                extract_block(b, work_bits, blk);
+                if (rs_decode_block(blk, d330.data()))
+                    try_append(b, d330);
+            }
+        }
+        if (bc[b].cands.empty())
+            return false;
+    }
+
+    if (combine_and_crc(64))
+        return true;
+    return false;
+}
+
+// End-to-end bi-orthogonal payload entry point.  Same contract as
+// decode_payload_soft(): the 21 PHR symbols are prepended to the payload
+// symbols, one tracing Viterbi decodes the joint stream, the first 19
+// systematic PHR bits and the two tail bits are removed, and the shared
+// finish_rs_crc_payload() performs RS + PSDU assembly + FCS.  The rescue runs
+// only when that first attempt does not pass the FCS.  A false FCS therefore
+// still returns `ok == true, fcs_pass == false`, exactly like the soft path.
+//
+// `ws->llr0_joint` / `llr1_joint` are reused as the joined m0/m1 buffers (they
+// are plain float workspaces; the name is historical).  With a workspace the
+// steady state performs no heap allocation apart from the trace vectors.
+inline bool decode_payload_biorth_soft(const float* m0p,
+                                       const float* m1p,
+                                       const float* m0,
+                                       const float* m1,
+                                       size_t payload_symbols,
+                                       size_t psdu_bits,
+                                       PayloadResult& out,
+                                       PayloadSubTimers* sub = nullptr,
+                                       PayloadDecodeWorkspace* ws = nullptr,
+                                       bool terminated = false,
+                                       bool enable_clip = false)
+{
+    PayloadSubTimer sub_guard(sub);
+    out = PayloadResult{};
+    if (!m0p || !m1p || !m0 || !m1 || payload_symbols == 0)
+        return false;
+
+    const size_t total = 21 + payload_symbols;
+    std::vector<float> local_m0j, local_m1j;
+    std::vector<float>& m0j = ws ? ws->llr0_joint : local_m0j;
+    std::vector<float>& m1j = ws ? ws->llr1_joint : local_m1j;
+    m0j.resize(total);
+    m1j.resize(total);
+    for (size_t s = 0; s < 21; ++s) {
+        m0j[s] = m0p[s];
+        m1j[s] = m1p[s];
+    }
+    for (size_t s = 0; s < payload_symbols; ++s) {
+        m0j[s + 21] = m0[s];
+        m1j[s + 21] = m1[s];
+    }
+    if (enable_clip)
+        clip_biorth_metrics(m0j.data(), m1j.data(), total);
+
+    Cl3TrellisTrace tr;
+    const auto t_vit = std::chrono::steady_clock::now();
+    vitdec_cl3_biorth_trace(m0j.data(), m1j.data(), total, tr, terminated);
+    if (sub)
+        sub->viterbi_us += payload_elapsed_us(t_vit);
+    if (tr.bits.size() < total)
+        return false;
+
+    std::vector<int8_t> local_rs_cw;
+    std::vector<int8_t>& rs_cw = ws ? ws->rs_cw : local_rs_cw;
+    rs_cw.assign(tr.bits.begin() + 19, tr.bits.begin() + (total - 2));
+    if (rs_cw.size() != payload_symbols)
+        return false;
+    if (finish_rs_crc_payload(rs_cw, psdu_bits, out, sub, ws) && out.fcs_pass)
+        return true;
+
+    PayloadResult rescued;
+    if (rescue_payload_biorth(m0j.data(), m1j.data(), total, psdu_bits, tr,
+                              rescued, sub)) {
+        out = std::move(rescued);
+        return true;
+    }
+    return out.ok;
+}
+
+// Bi-orthogonal PHR entry point (21 symbols, fixed `terminated = false`
+// because the PHR is followed by the payload in the same continuous CL-3
+// trellis).  uwb_demod_fec.h cannot include uwb_demod_phr.h (that header
+// includes this one), so the SECDED/parser tail is implemented here from the
+// same hrp_secded() primitive and the same 13 corrected-address table.  Note:
+// the phr_secded_parse() "long length tail-energy rollback" heuristic is NOT
+// replicated; Wave 2 re-checks this decode against decode_phr_decisions() and
+// the soft-chip energy at the uwb_demod_phr.h layer.  `soft_chips` and
+// `ns_sfd` are accepted only to keep the call sites symmetric.
+inline bool decode_phr_biorth_soft(const float* m0p,
+                                   const float* m1p,
+                                   const std::vector<float>& soft_chips,
+                                   const NsSfdResult& ns_sfd,
+                                   PhrResult& out)
+{
+    (void)soft_chips;
+    (void)ns_sfd;
+    out = PhrResult{};
+    if (!m0p || !m1p)
+        return false;
+
+    const size_t nsym = 21;
+    std::vector<int8_t> decoded;
+    vitdec_cl3_biorth(m0p, m1p, nsym, decoded, false);
+    if (decoded.size() < 19)
+        return false;
+
+    std::vector<int8_t> sys13(decoded.begin(), decoded.begin() + 13);
+    std::vector<int8_t> recv_par(decoded.begin() + 13, decoded.begin() + 19);
+    std::vector<int8_t> phr19;
+    hrp_secded(sys13, phr19);
+    int8_t synd[6];
+    for (int i = 0; i < 6; ++i)
+        synd[i] = static_cast<int8_t>(recv_par[i] ^ phr19[13 + i]);
+
+    bool secded_pass = true;
+    int idx = 0;
+    for (int i = 1; i < 6; ++i)
+        idx |= (synd[i] << (i - 1));
+    if (idx > 0) {
+        static const int kAddresses[13] = { 3, 5, 6, 7, 9, 10, 11,
+                                            12, 13, 14, 15, 17, 18 };
+        for (int j = 0; j < 13; ++j) {
+            if (kAddresses[j] == idx) {
+                phr19[j] ^= 1;
+                out.secded_corrected = true;
+                break;
+            }
+        }
+        if (!synd[0])
+            secded_pass = false; // DED
+    }
+    out.secded_uncorrectable = !secded_pass;
+
+    // MSB-first PHR layout: bits 1..2 = data rate, bits 3..9 = PSDU length.
+    uint32_t psdu = 0;
+    for (int i = 0; i < 7; ++i)
+        psdu |= (static_cast<uint32_t>(phr19[2 + i]) << (6 - i));
+    const int dr = (phr19[0] << 1) | phr19[1];
+    static const float kDataRates[4] = { 0.11f, 0.85f, 6.81f, 27.24f };
+    out.data_rate_mbps = kDataRates[dr & 3];
+    out.psdu_length = psdu;
+    out.phr_bits.reserve(19);
+    for (int i = 0; i < 19; ++i)
+        out.phr_bits.push_back(static_cast<uint8_t>(phr19[i]));
+    out.ok = true;
+    return true;
+}
+
 } // namespace detail
 
 
