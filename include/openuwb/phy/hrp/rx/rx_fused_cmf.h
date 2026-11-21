@@ -860,206 +860,56 @@ inline bool payload_window_bounds(size_t n,
 // or any candidate window is not fully readable.  The caller retries the
 // legacy full stream once; the fused path must not silently truncate a field
 // or zero-pad its tail.
-inline bool correlate_field(const std::complex<float>* rx,
-                            size_t n,
-                            const std::complex<float>* fir_taps,
-                            size_t tap_count,
-                            int64_t chip_start,
-                            size_t samples_per_chip,
-                            int64_t field_start,
-                            const int8_t* pn,
-                            size_t symbols,
-                            const Geometry& geometry,
-                            int8_t polarity,
-                            std::complex<float> rot,
-                            Metrics& out,
-                            Scratch& scratch,
-                            Timings* timings = nullptr)
-{
-    if (!rx || !fir_taps || !pn || symbols == 0 || tap_count == 0 ||
-        tap_count > kMaxTapCount)
-        return false;
-    if (samples_per_chip != kSamplesPerChip)
-        return false;
-    if (chip_start < 0 || field_start < 0)
-        return false;
-    if (polarity != 1 && polarity != -1)
-        return false;
-    if (geometry.candidate_count != kCandidateCount ||
-        !geometry.candidate_chip_offset)
-        return false;
-    if (geometry.chips_per_burst == 0 || geometry.chips_per_symbol == 0)
-        return false;
-    // Every candidate burst must lie inside its symbol (offset + chips_per_burst <= chips_per_symbol).
-    // Compare with subtraction so the addition cannot wrap.
-    if (geometry.chips_per_burst > geometry.chips_per_symbol)
-        return false;
-    const size_t max_allowed_offset =
-        geometry.chips_per_symbol - geometry.chips_per_burst;
-    size_t max_candidate_offset = 0;
-    for (size_t p = 0; p < kCandidateCount; ++p) {
-        const size_t off = geometry.candidate_chip_offset[p];
-        if (off > max_allowed_offset)
-            return false;
-        if (off > max_candidate_offset)
-            max_candidate_offset = off;
-    }
-    // Bound the template length without overflowing size_t.  The support
-    // limit is the 64-chip PHR burst: 38 taps give 164 complex samples and
-    // the absolute maximum is 64 + 2*63 = 190.
-    const size_t max_len =
-        kMaxTapCount + kSamplesPerChip * (kPhrChipsPerBurst - 1);
-    if (geometry.chips_per_burst - 1 >
-        (max_len - tap_count) / samples_per_chip)
-        return false;
-    if (geometry.chips_per_symbol > (static_cast<size_t>(1) << 30))
-        return false;
-    if (symbols > (static_cast<size_t>(1) << 20))
-        return false;
-    // The PN contract is a +/-1 sequence.  A zero would silently be treated
-    // as +1 by build_template_geometry(), so reject it before producing
-    // metrics.
-    if (!pn_stream_is_pm1(pn, symbols * geometry.chips_per_burst))
-        return false;
-
-    const size_t len =
-        template_length(tap_count, samples_per_chip, geometry.chips_per_burst);
-    const int64_t spc = static_cast<int64_t>(samples_per_chip);
-    // Guard the sample-coordinate product before it enters int64.  Real
-    // fields use small chip indices; this only rejects absurd offsets.
-    if (field_start >
-        (std::numeric_limits<int64_t>::max() - chip_start) / spc)
-        return false;
-    // Window for symbol 0, hop 0, half 0, chip c=0.  The furthest candidate is
-    // symbol symbols-1 with the maximum geometry offset across all candidates;
-    // its template then spans len samples.
-    const int64_t base0 = chip_start + field_start * spc -
-                          static_cast<int64_t>(tap_count) + 1;
-    if (base0 < 0)
-        return false;
-    const int64_t last_start_chip =
-        static_cast<int64_t>(symbols - 1) *
-            static_cast<int64_t>(geometry.chips_per_symbol) +
-        static_cast<int64_t>(max_candidate_offset);
-    // Compare as unsigned int64/u64 indices; base0 is non-negative and the
-    // geometry bounds above keep this addition far from wrapping.
-    const uint64_t add = static_cast<uint64_t>(last_start_chip) *
-                             static_cast<uint64_t>(spc) +
-                         static_cast<uint64_t>(len) - 1;
-    const uint64_t last = static_cast<uint64_t>(base0) + add;
-    if (last < static_cast<uint64_t>(base0) ||
-        last >= static_cast<uint64_t>(n))
-        return false;
-
-    out.reset(symbols);
-    const size_t block_symbols = std::min(kBlockSymbols, symbols);
-    scratch.ensure(block_symbols, len);
-
-    auto t_template = std::chrono::steady_clock::duration::zero();
-    auto t_correlate = std::chrono::steady_clock::duration::zero();
-    // No clock calls at all when the caller does not ask for timings.
-    const bool want_timings = (timings != nullptr);
-    std::chrono::steady_clock::time_point t0, t1, t2;
-
-    for (size_t start = 0; start < symbols; start += kBlockSymbols) {
-        const size_t count = std::min(kBlockSymbols, symbols - start);
-        if (want_timings)
-            t0 = std::chrono::steady_clock::now();
-        for (size_t i = 0; i < count; ++i) {
-            build_template_geometry(
-                scratch.templates.data() + i * len, fir_taps, tap_count,
-                pn + (start + i) * geometry.chips_per_burst,
-                geometry.chips_per_burst, samples_per_chip);
-        }
-        if (want_timings) {
-            t1 = std::chrono::steady_clock::now();
-            t_template += t1 - t0;
-        }
-
-        for (size_t i = 0; i < count; ++i) {
-            const size_t s = start + i;
-            const std::complex<float>* taps =
-                scratch.templates.data() + i * len;
-            const int64_t win0 =
-                base0 + static_cast<int64_t>(s) *
-                            static_cast<int64_t>(geometry.chips_per_symbol) *
-                            spc;
-            for (size_t p = 0; p < kCandidateCount; ++p) {
-                const int64_t off =
-                    static_cast<int64_t>(
-                        geometry.candidate_chip_offset[p]) *
-                    spc;
-                const std::complex<float> m =
-                    dot_template(rx + win0 + off, taps, len);
-                out.complex_value[kCandidateCount * s + p] = m;
-                const float re = rot.real() * m.real() -
-                                 rot.imag() * m.imag();
-                out.signed_value[kCandidateCount * s + p] =
-                    (polarity < 0) ? -re : re;
-            }
-        }
-        if (want_timings) {
-            t2 = std::chrono::steady_clock::now();
-            t_correlate += t2 - t1;
-        }
-    }
-
-    if (timings) {
-        timings->template_update_us = static_cast<uint64_t>(
-            std::chrono::duration_cast<std::chrono::microseconds>(t_template)
-                .count());
-        timings->correlate_us = static_cast<uint64_t>(
-            std::chrono::duration_cast<std::chrono::microseconds>(t_correlate)
-                .count());
-    }
-    return true;
-}
+bool correlate_field(const std::complex<float>* rx,
+                     size_t n,
+                     const std::complex<float>* fir_taps,
+                     size_t tap_count,
+                     int64_t chip_start,
+                     size_t samples_per_chip,
+                     int64_t field_start,
+                     const int8_t* pn,
+                     size_t symbols,
+                     const Geometry& geometry,
+                     int8_t polarity,
+                     std::complex<float> rot,
+                     Metrics& out,
+                     Scratch& scratch,
+                     Timings* timings = nullptr);
 
 // Payload wrapper.  Signature and arithmetic are unchanged from the verified
 // payload fast path: 8 chips/burst, 64 chips/symbol, PN scrambler offset
 // 1344, four candidates {0, 32, 8, 40} and the 52-point fixed dot for 38
 // taps.
-inline bool correlate_payload(const std::complex<float>* rx,
-                              size_t n,
-                              const std::complex<float>* fir_taps,
-                              size_t tap_count,
-                              int64_t chip_start,
-                              size_t samples_per_chip,
-                              int64_t payload_start,
-                              const int8_t* pn,
-                              size_t symbols,
-                              int8_t polarity,
-                              std::complex<float> rot,
-                              Metrics& out,
-                              Scratch& scratch,
-                              Timings* timings = nullptr)
-{
-    return correlate_field(rx, n, fir_taps, tap_count, chip_start,
-                           samples_per_chip, payload_start, pn, symbols,
-                           kPayloadGeometry, polarity, rot, out, scratch,
-                           timings);
-}
+bool correlate_payload(const std::complex<float>* rx,
+                       size_t n,
+                       const std::complex<float>* fir_taps,
+                       size_t tap_count,
+                       int64_t chip_start,
+                       size_t samples_per_chip,
+                       int64_t payload_start,
+                       const int8_t* pn,
+                       size_t symbols,
+                       int8_t polarity,
+                       std::complex<float> rot,
+                       Metrics& out,
+                       Scratch& scratch,
+                       Timings* timings = nullptr);
 
 // PHR wrapper: 21 symbols of 64 chips/burst and 512 chips/symbol starting at
 // `phr_start` (sfd_end_chip + 1), PN scrambler offset 0.
-inline bool correlate_phr(const std::complex<float>* rx,
-                          size_t n,
-                          const std::complex<float>* fir_taps,
-                          size_t tap_count,
-                          int64_t chip_start,
-                          size_t samples_per_chip,
-                          int64_t phr_start,
-                          const int8_t* pn,
-                          int8_t polarity,
-                          std::complex<float> rot,
-                          Metrics& out,
-                          Scratch& scratch,
-                          Timings* timings = nullptr)
-{
-    return correlate_field(rx, n, fir_taps, tap_count, chip_start,
-                           samples_per_chip, phr_start, pn, kPhrSymbols,
-                           kPhrGeometry, polarity, rot, out, scratch, timings);
-}
+bool correlate_phr(const std::complex<float>* rx,
+                   size_t n,
+                   const std::complex<float>* fir_taps,
+                   size_t tap_count,
+                   int64_t chip_start,
+                   size_t samples_per_chip,
+                   int64_t phr_start,
+                   const int8_t* pn,
+                   int8_t polarity,
+                   std::complex<float> rot,
+                   Metrics& out,
+                   Scratch& scratch,
+                   Timings* timings = nullptr);
 
 // Exact-CFO fused payload correlation.
 //
@@ -1081,7 +931,7 @@ inline bool correlate_phr(const std::complex<float>* rx,
 // always written in full.  `validate_pn` keeps the explicit +/-1 check for QA
 // and debug callers; production may set it false because
 // prepare_fused_payload_pn() only ever emits +/-1.
-inline bool correlate_payload_fused_cfo_impl(
+bool correlate_payload_fused_cfo_impl(
     const std::complex<float>* rx_raw,
     size_t n,
     const std::complex<float>* fir_taps,
@@ -1098,163 +948,10 @@ inline bool correlate_payload_fused_cfo_impl(
     Scratch& scratch,
     Timings* timings,
     bool write_complex,
-    bool validate_pn)
-{
-    if (!rx_raw || !fir_taps || !pn)
-        return false;
-    if (polarity != 1 && polarity != -1)
-        return false;
-    if (!std::isfinite(cfo_w_rad) || !std::isfinite(rot.real()) ||
-        !std::isfinite(rot.imag()))
-        return false;
-    int64_t base0 = 0;
-    size_t len = 0;
-    if (!payload_window_bounds(n, tap_count, chip_start, samples_per_chip,
-                               payload_start, symbols, base0, len))
-        return false;
-    if (validate_pn && !pn_stream_is_pm1(pn, symbols * kChipsPerBurst))
-        return false;
-
-    const double w = cfo_w_rad;
-    const bool has_cfo = (w != 0.0);
-    const bool fast = (tap_count == kFusedFastTaps);
-
-    scratch.ensure_fused_cfo(tap_count);
-    std::complex<float>* h_w = scratch.fused_h_w.data();
-    std::complex<float>* tpl = scratch.fused_tpl.data();
-
-    using clock = std::chrono::steady_clock;
-    clock::time_point t_begin;
-    if (timings)
-        t_begin = clock::now();
-
-    std::complex<float> chip_phase[kChipsPerBurst];
-    build_fused_tap_ramp(h_w, fir_taps, tap_count, w, chip_phase);
-    if (fast) {
-        build_fused_half_lut(scratch.fused_lut_lo.data(),
-                             scratch.fused_lut_hi.data(), h_w, chip_phase);
-    }
-    clock::time_point t_templ;
-    if (timings)
-        t_templ = clock::now();
-
-    // Per-packet phase of each candidate window offset (chips -> samples).
-    std::complex<float> cand_phase[kCandidateCount];
-    for (size_t p = 0; p < kCandidateCount; ++p) {
-        if (!has_cfo) {
-            cand_phase[p] = std::complex<float>(1.0f, 0.0f);
-            continue;
-        }
-        const double ang = -w * static_cast<double>(
-                                   kCandidateChipOffset[p] * samples_per_chip);
-        cand_phase[p] = std::complex<float>(static_cast<float>(std::cos(ang)),
-                                           static_cast<float>(std::sin(ang)));
-    }
-
-    out.reset(symbols, write_complex);
-
-    const int64_t symbol_stride =
-        static_cast<int64_t>(kChipsPerSymbol) *
-        static_cast<int64_t>(samples_per_chip);
-    const double dphi = -w * static_cast<double>(symbol_stride);
-    const std::complex<double> step(std::cos(dphi), std::sin(dphi));
-    std::complex<double> ramp(1.0, 0.0);
-
-    const std::complex<float>* lut_lo = scratch.fused_lut_lo.data();
-    const std::complex<float>* lut_hi = scratch.fused_lut_hi.data();
-    const int64_t off_sample[kCandidateCount] = {
-        static_cast<int64_t>(kCandidateChipOffset[0]) *
-            static_cast<int64_t>(samples_per_chip),
-        static_cast<int64_t>(kCandidateChipOffset[1]) *
-            static_cast<int64_t>(samples_per_chip),
-        static_cast<int64_t>(kCandidateChipOffset[2]) *
-            static_cast<int64_t>(samples_per_chip),
-        static_cast<int64_t>(kCandidateChipOffset[3]) *
-            static_cast<int64_t>(samples_per_chip)
-    };
-
-    for (size_t s = 0; s < symbols; ++s) {
-        std::complex<float> phase(1.0f, 0.0f);
-        if (has_cfo) {
-            if ((s % kFusedPhaseAnchor) == 0) {
-                const double ang =
-                    -w * static_cast<double>(
-                             base0 + static_cast<int64_t>(s) * symbol_stride);
-                ramp = std::complex<double>(std::cos(ang), std::sin(ang));
-            }
-            phase = std::complex<float>(static_cast<float>(ramp.real()),
-                                        static_cast<float>(ramp.imag()));
-            ramp *= step;
-        }
-
-        if (fast) {
-            const int8_t* ps = pn + s * kChipsPerBurst;
-            const float sign_lo = (ps[0] < 0) ? -1.0f : 1.0f;
-            const float sign_hi = (ps[4] < 0) ? -1.0f : 1.0f;
-            size_t idx_lo = 0;
-            size_t idx_hi = 0;
-            for (size_t c = 1; c < 4; ++c) {
-                if (ps[c] != ps[0])
-                    idx_lo |= (static_cast<size_t>(1) << (c - 1));
-                if (ps[c + 4] != ps[4])
-                    idx_hi |= (static_cast<size_t>(1) << (c - 1));
-            }
-            build_fused_symbol_template(tpl, lut_lo, lut_hi, idx_lo, sign_lo,
-                                        idx_hi, sign_hi);
-        } else {
-            std::fill(tpl, tpl + len, std::complex<float>(0.0f, 0.0f));
-            for (size_t c = 0; c < kChipsPerBurst; ++c) {
-                const float sgn =
-                    (pn[s * kChipsPerBurst + c] < 0) ? -1.0f : 1.0f;
-                accumulate_scaled_complex(tpl + samples_per_chip * c, h_w,
-                                          tap_count,
-                                          sgn * chip_phase[c].real(),
-                                          sgn * chip_phase[c].imag());
-            }
-        }
-
-        const int64_t win0 =
-            base0 + static_cast<int64_t>(s) * symbol_stride;
-        std::complex<float> m[kCandidateCount];
-        if (fast) {
-            dot4_shared_fixed52(rx_raw + win0 + off_sample[0],
-                                rx_raw + win0 + off_sample[1],
-                                rx_raw + win0 + off_sample[2],
-                                rx_raw + win0 + off_sample[3], tpl, m);
-        } else {
-            for (size_t p = 0; p < kCandidateCount; ++p)
-                m[p] = dot_generic(rx_raw + win0 + off_sample[p], tpl, len);
-        }
-
-        for (size_t p = 0; p < kCandidateCount; ++p) {
-            std::complex<float> value = m[p];
-            if (has_cfo)
-                value = (phase * cand_phase[p]) * m[p];
-            if (write_complex)
-                out.complex_value[kCandidateCount * s + p] = value;
-            const float re = rot.real() * value.real() -
-                             rot.imag() * value.imag();
-            out.signed_value[kCandidateCount * s + p] =
-                (polarity < 0) ? -re : re;
-        }
-    }
-
-    if (timings) {
-        const clock::time_point t_end = clock::now();
-        timings->template_update_us = static_cast<uint64_t>(
-            std::chrono::duration_cast<std::chrono::microseconds>(t_templ -
-                                                                 t_begin)
-                .count());
-        timings->correlate_us = static_cast<uint64_t>(
-            std::chrono::duration_cast<std::chrono::microseconds>(t_end -
-                                                                 t_templ)
-                .count());
-    }
-    return true;
-}
+    bool validate_pn);
 
 // Production entry: always validates the spreading stream.
-inline bool correlate_payload_fused_cfo(
+bool correlate_payload_fused_cfo(
     const std::complex<float>* rx_raw,
     size_t n,
     const std::complex<float>* fir_taps,
@@ -1270,45 +967,18 @@ inline bool correlate_payload_fused_cfo(
     Metrics& out,
     Scratch& scratch,
     Timings* timings = nullptr,
-    bool write_complex = false)
-{
-    return correlate_payload_fused_cfo_impl(
-        rx_raw, n, fir_taps, tap_count, chip_start, samples_per_chip,
-        payload_start, pn, symbols, polarity, rot, cfo_w_rad, out, scratch,
-        timings, write_complex, true);
-}
+    bool write_complex = false);
 
 // Reproduce bprf_demod()'s hard decision exactly from the four signed
 // metrics.  Hop 0 wins a tie against hop 1; BPM half 0 wins a tie against
 // half 1.  g1 is the sign of the selected metric (negative -> 1).
-inline void decide_bpm_impl(const Metrics& metrics,
-                            std::vector<int8_t>& g0, std::vector<int8_t>& g1,
-                            std::vector<float>* llr0, std::vector<float>* llr1)
-{
-    g0.resize(metrics.symbols);
-    g1.resize(metrics.symbols);
-    if (llr0) {
-        llr0->resize(metrics.symbols);
-        llr1->resize(metrics.symbols);
-    }
-    for (size_t s = 0; s < metrics.symbols; ++s) {
-        const float* m = &metrics.signed_value[kCandidateCount * s];
-        const auto decision = rxopt::decide_bpm_symbol(m, false);
-        g0[s] = decision.position;
-        g1[s] = decision.polarity;
-        if (llr0) {
-            (*llr0)[s] = decision.position_llr;
-            (*llr1)[s] = rxopt::bpm_polarity_llr(m);
-        }
-    }
-}
+void decide_bpm_impl(const Metrics& metrics,
+                     std::vector<int8_t>& g0, std::vector<int8_t>& g1,
+                     std::vector<float>* llr0, std::vector<float>* llr1);
 
-inline void decide_bpm(const Metrics& metrics,
-                       std::vector<int8_t>& g0,
-                       std::vector<int8_t>& g1)
-{
-    decide_bpm_impl(metrics, g0, g1, nullptr, nullptr);
-}
+void decide_bpm(const Metrics& metrics,
+                std::vector<int8_t>& g0,
+                std::vector<int8_t>& g1);
 
 // Soft-output twin of decide_bpm().  The hard decisions written to g0/g1 are
 // bit-identical to decide_bpm() (same tie rules: hop 0 wins a hop tie, BPM
@@ -1327,12 +997,9 @@ inline void decide_bpm(const Metrics& metrics,
 // max|soft| scale cancels in the hard decision), the LLRs are on the same
 // arbitrary positive scale as the metrics.  A soft-decision Viterbi only
 // needs a consistent scale per packet, so no renormalization is applied here.
-inline void decide_bpm_soft(const Metrics& metrics,
-                            std::vector<int8_t>& g0, std::vector<int8_t>& g1,
-                            std::vector<float>& llr0, std::vector<float>& llr1)
-{
-    decide_bpm_impl(metrics, g0, g1, &llr0, &llr1);
-}
+void decide_bpm_soft(const Metrics& metrics,
+                     std::vector<int8_t>& g0, std::vector<int8_t>& g1,
+                     std::vector<float>& llr0, std::vector<float>& llr1);
 
 // ---------------------------------------------------------------------------
 // Known-hop 2-candidate kernel + symbol-level DD-PLL.
@@ -1422,7 +1089,7 @@ inline std::complex<float> ddpll_rot_neg(float theta)
 // unsupported fractional request, PN chip outside {+1,-1}, zero symbols, or a
 // candidate window that is not fully readable.  The caller keeps the legacy /
 // 4-candidate fallback; this entry never truncates or zero-pads a field.
-inline bool correlate_payload_known_hop_fused_cfo(
+bool correlate_payload_known_hop_fused_cfo(
     const std::complex<float>* rx_raw,
     size_t n,
     const std::complex<float>* fir_taps,
@@ -1441,361 +1108,7 @@ inline bool correlate_payload_known_hop_fused_cfo(
     Timings* timings,
     bool write_complex,
     const std::complex<float>* frac_cir_bank,
-    size_t frac_phase_bins)
-{
-    if (!rx_raw || !fir_taps || !pn)
-        return false;
-    if (polarity != 1 && polarity != -1)
-        return false;
-    if (!std::isfinite(cfo_w_rad) || !std::isfinite(rot.real()) ||
-        !std::isfinite(rot.imag()))
-        return false;
-    if (tap_count == 0 || tap_count > kMaxTapCount)
-        return false;
-    if (symbols == 0 || symbols > (static_cast<size_t>(1) << 20))
-        return false;
-    if (chip_start < 0 || payload_start < 0)
-        return false;
-    if (!std::isfinite(samples_per_chip_actual) ||
-        !(samples_per_chip_actual > 0.0))
-        return false;
-    if (pll_cfg.enable) {
-        if (!std::isfinite(pll_cfg.alpha) || !std::isfinite(pll_cfg.beta) ||
-            !std::isfinite(pll_cfg.max_freq_step) ||
-            !std::isfinite(pll_cfg.min_mag_ratio) || pll_cfg.beta < 0.0f ||
-            pll_cfg.max_freq_step < 0.0f || pll_cfg.min_mag_ratio < 0.0f)
-            return false;
-    }
-
-    const bool sfo = (frac_cir_bank != nullptr);
-    if (sfo) {
-        if (frac_phase_bins == 0 || frac_phase_bins > kKhMaxPhaseBins)
-            return false;
-    } else if (samples_per_chip_actual !=
-               static_cast<double>(kSamplesPerChip)) {
-        // Non-integer spacing without a phase bank is unsupported.
-        return false;
-    }
-
-    // The hop is taken from the same chip as the first half template sign, so
-    // the +/-1 scan also protects the hop rule from a zero chip.
-    if (!pn_stream_is_pm1(pn, symbols * kChipsPerBurst))
-        return false;
-
-    const size_t len =
-        template_length(tap_count, kSamplesPerChip, kChipsPerBurst);
-    const double w = cfo_w_rad;
-    const bool has_cfo = (w != 0.0);
-    const bool fast = (tap_count == kFusedFastTaps);
-    const bool sfo_path = sfo;
-    const double spc_d =
-        sfo_path ? samples_per_chip_actual
-                 : static_cast<double>(kSamplesPerChip);
-    const size_t bins = sfo_path ? frac_phase_bins : 0;
-
-    int64_t base0 = 0;
-    double base_d = 0.0;
-    const int64_t stride_i =
-        static_cast<int64_t>(kChipsPerSymbol) *
-        static_cast<int64_t>(kSamplesPerChip); // 128
-    const double stride_d = static_cast<double>(kChipsPerSymbol) * spc_d;
-
-    if (!sfo_path) {
-        const int64_t spc = static_cast<int64_t>(kSamplesPerChip);
-        if (payload_start >
-            (std::numeric_limits<int64_t>::max() - chip_start) / spc)
-            return false;
-        const int64_t window0 = chip_start + payload_start * spc;
-        base0 = window0 - static_cast<int64_t>(tap_count) + 1;
-        if (base0 < 0)
-            return false;
-        // Furthest window: known hop 1, BPM half 1 = 16 + 64 samples.
-        const int64_t max_off = 16 + 64;
-        const uint64_t add =
-            static_cast<uint64_t>(symbols - 1) *
-                static_cast<uint64_t>(stride_i) +
-            static_cast<uint64_t>(max_off) + static_cast<uint64_t>(len) - 1;
-        const uint64_t last = static_cast<uint64_t>(base0) + add;
-        if (last < static_cast<uint64_t>(base0) ||
-            last >= static_cast<uint64_t>(n))
-            return false;
-        base_d = static_cast<double>(base0);
-    } else {
-        base_d = static_cast<double>(chip_start) +
-                 static_cast<double>(payload_start) * spc_d -
-                 static_cast<double>(tap_count) + 1.0;
-        if (base_d < 0.0 || !std::isfinite(base_d))
-            return false;
-        const double last_d = base_d +
-                              static_cast<double>(symbols - 1) * stride_d +
-                              40.0 * spc_d; // hop 1 + half 1 = 40 chips
-        if (!std::isfinite(last_d) || last_d > 9.0e15)
-            return false;
-        int64_t last_int = 0;
-        size_t last_bin = 0;
-        if (!decompose_frac_position(last_d, bins, last_int, last_bin))
-            return false;
-        if (last_int < 0)
-            return false;
-        const uint64_t last =
-            static_cast<uint64_t>(last_int) + static_cast<uint64_t>(len) - 1;
-        if (last >= static_cast<uint64_t>(n))
-            return false;
-        (void)last_bin;
-    }
-
-    scratch.ensure_known_hop(tap_count);
-    if (sfo_path)
-        scratch.ensure_known_hop_sfo(tap_count, bins);
-
-    using clock = std::chrono::steady_clock;
-    clock::time_point t_begin{};
-    clock::time_point t_templ{};
-    if (timings)
-        t_begin = clock::now();
-
-    std::complex<float> chip_phase[kChipsPerBurst];
-    std::complex<float>* tpl = scratch.fused_tpl.data();
-    if (!sfo_path) {
-        build_fused_tap_ramp(scratch.fused_h_w.data(), fir_taps, tap_count, w,
-                             chip_phase);
-        if (fast) {
-            build_fused_half_lut(scratch.fused_lut_lo.data(),
-                                 scratch.fused_lut_hi.data(),
-                                 scratch.fused_h_w.data(), chip_phase);
-        }
-    } else {
-        for (size_t b = 0; b < bins; ++b) {
-            build_fused_tap_ramp(scratch.kh_h_w.data() + b * tap_count,
-                                 frac_cir_bank + b * tap_count, tap_count, w,
-                                 chip_phase);
-        }
-        if (fast) {
-            for (size_t b = 0; b < bins; ++b) {
-                std::complex<float>* lo =
-                    scratch.kh_lut.data() + b * kKhLutPerBin;
-                std::complex<float>* hi =
-                    lo + kFusedHalfTemplates * kFusedHalfSpan;
-                build_fused_half_lut(lo, hi,
-                                     scratch.kh_h_w.data() + b * tap_count,
-                                     chip_phase);
-            }
-        }
-    }
-    if (timings)
-        t_templ = clock::now();
-
-    // Per-packet constants.  hop_phase[1] and half_phase are the same
-    // single-rounded values as the 4-candidate cand_phase[] entries for chip
-    // offsets 8 and 32, so the integer path stays close to bit-identical.
-    std::complex<float> hop_phase[2] = {
-        std::complex<float>(1.0f, 0.0f), std::complex<float>(1.0f, 0.0f)
-    };
-    std::complex<float> half_phase(1.0f, 0.0f);
-    if (!sfo_path && has_cfo) {
-        hop_phase[1] = std::complex<float>(
-            static_cast<float>(std::cos(-w * 16.0)),
-            static_cast<float>(std::sin(-w * 16.0)));
-        half_phase = std::complex<float>(
-            static_cast<float>(std::cos(-w * 64.0)),
-            static_cast<float>(std::sin(-w * 64.0)));
-    }
-    const double dphi = -w * static_cast<double>(stride_i);
-    const std::complex<double> ramp_step(std::cos(dphi), std::sin(dphi));
-    std::complex<double> ramp(1.0, 0.0);
-
-    out.reset(symbols, write_complex);
-
-    const bool pll_on = pll_cfg.enable;
-    // rot_cur is the per-symbol tracking rotation.  Polarity is applied only
-    // to the final real metric, never folded into z0/z1 or the phase detector.
-    std::complex<float> rot_cur = rot;
-    float pll_freq = 0.0f;
-    float pll_theta = 0.0f;
-    float mag_ema = 0.0f;
-    bool mag_init = false;
-    size_t pll_updates = 0;
-
-    for (size_t s = 0; s < symbols; ++s) {
-        const int8_t* ps = pn + s * kChipsPerBurst;
-        const int hop = (ps[0] < 0) ? 1 : 0;
-        const float sign_lo = (ps[0] < 0) ? -1.0f : 1.0f;
-        const float sign_hi = (ps[4] < 0) ? -1.0f : 1.0f;
-
-        int64_t win0 = 0;
-        int64_t win1 = 0;
-        size_t bin = 0;
-        std::complex<float> phase0(1.0f, 0.0f);
-        std::complex<float> phase1(1.0f, 0.0f);
-
-        if (!sfo_path) {
-            if (has_cfo) {
-                if ((s % kFusedPhaseAnchor) == 0) {
-                    const double ang =
-                        -w * static_cast<double>(
-                                 base0 + static_cast<int64_t>(s) * stride_i);
-                    ramp = std::complex<double>(std::cos(ang), std::sin(ang));
-                }
-                // Anchor at win0 + hop*16, i.e. the true half-0 window.
-                phase0 = std::complex<float>(static_cast<float>(ramp.real()),
-                                             static_cast<float>(ramp.imag())) *
-                         hop_phase[hop];
-                phase1 = phase0 * half_phase;
-                ramp *= ramp_step;
-            }
-            win0 = base0 + static_cast<int64_t>(s) * stride_i + hop * 16;
-            win1 = win0 + 64;
-        } else {
-            // Half 0 starts at the known-hop offset (hop*8 chips); half 1 is
-            // another 32 chips later, matching the integer path.
-            const double pos0 =
-                base_d + static_cast<double>(s) * stride_d +
-                static_cast<double>(hop * 8) * spc_d;
-            int64_t int0 = 0;
-            int64_t int1 = 0;
-            size_t bin0 = 0;
-            size_t bin1 = 0;
-            if (!decompose_frac_position(pos0, bins, int0, bin0))
-                return false;
-            if (!decompose_frac_position(
-                    pos0 + static_cast<double>(kChipsPerSymbol / 2) * spc_d,
-                    bins, int1, bin1))
-                return false;
-            win0 = int0;
-            win1 = int1;
-            bin = bin0;
-            (void)bin1;
-            if (has_cfo) {
-                const double ang0 = -w * static_cast<double>(int0);
-                const double ang1 = -w * static_cast<double>(int1);
-                phase0 = std::complex<float>(
-                    static_cast<float>(std::cos(ang0)),
-                    static_cast<float>(std::sin(ang0)));
-                phase1 = std::complex<float>(
-                    static_cast<float>(std::cos(ang1)),
-                    static_cast<float>(std::sin(ang1)));
-            }
-        }
-
-        if (fast) {
-            size_t idx_lo = 0;
-            size_t idx_hi = 0;
-            for (size_t c = 1; c < 4; ++c) {
-                if (ps[c] != ps[0])
-                    idx_lo |= (static_cast<size_t>(1) << (c - 1));
-                if (ps[c + 4] != ps[4])
-                    idx_hi |= (static_cast<size_t>(1) << (c - 1));
-            }
-            const std::complex<float>* lut_lo;
-            const std::complex<float>* lut_hi;
-            if (sfo_path) {
-                lut_lo = scratch.kh_lut.data() + bin * kKhLutPerBin;
-                lut_hi = lut_lo + kFusedHalfTemplates * kFusedHalfSpan;
-            } else {
-                lut_lo = scratch.fused_lut_lo.data();
-                lut_hi = scratch.fused_lut_hi.data();
-            }
-            build_fused_symbol_template(tpl, lut_lo, lut_hi, idx_lo, sign_lo,
-                                        idx_hi, sign_hi);
-        } else {
-            const std::complex<float>* hw =
-                sfo_path ? scratch.kh_h_w.data() + bin * tap_count
-                         : scratch.fused_h_w.data();
-            std::fill(tpl, tpl + len, std::complex<float>(0.0f, 0.0f));
-            for (size_t c = 0; c < kChipsPerBurst; ++c) {
-                const float sgn = (ps[c] < 0) ? -1.0f : 1.0f;
-                accumulate_scaled_complex(
-                    tpl + kSamplesPerChip * c, hw, tap_count,
-                    sgn * chip_phase[c].real(), sgn * chip_phase[c].imag());
-            }
-        }
-
-        std::complex<float> m[2];
-        if (fast) {
-            dot2_shared_fixed52(rx_raw + win0, rx_raw + win1, tpl, m);
-        } else {
-            m[0] = dot_generic(rx_raw + win0, tpl, len);
-            m[1] = dot_generic(rx_raw + win1, tpl, len);
-        }
-        // Raw complex correlation on the same phase basis as
-        // Metrics::complex_value: CFO fusion applied, rot/polarity/PLL not.
-        const std::complex<float> v0 = has_cfo ? phase0 * m[0] : m[0];
-        const std::complex<float> v1 = has_cfo ? phase1 * m[1] : m[1];
-        if (write_complex) {
-            out.z0[s] = v0;
-            out.z1[s] = v1;
-        }
-
-        if (pll_on) {
-            // rot_cur is the per-symbol tracked rotation (starts at rot).
-            const std::complex<float> r0 = rot_cur * v0;
-            const std::complex<float> r1 = rot_cur * v1;
-            const float re0 = r0.real();
-            const float re1 = r1.real();
-            out.m0[s] = (polarity < 0) ? -re0 : re0;
-            out.m1[s] = (polarity < 0) ? -re1 : re1;
-
-            const float norm0 = std::norm(r0);
-            const float norm1 = std::norm(r1);
-            const std::complex<float> z_win =
-                (norm0 >= norm1) ? r0 : r1;
-            const float mag = std::sqrt(std::norm(z_win));
-            if (!std::isfinite(mag)) {
-                // Never propagate a non-finite phase error into the loop.
-                continue;
-            }
-            if (!mag_init) {
-                mag_ema = mag;
-                mag_init = true;
-            } else {
-                mag_ema += 0.05f * (mag - mag_ema);
-            }
-            if (!(mag_ema > 0.0f) ||
-                mag < pll_cfg.min_mag_ratio * mag_ema)
-                continue;
-            const float sgn = (z_win.real() >= 0.0f) ? 1.0f : -1.0f;
-            const float err = (sgn * z_win.imag()) / (mag + 1e-12f);
-            pll_freq += pll_cfg.beta * err;
-            pll_freq = std::max(-pll_cfg.max_freq_step,
-                                std::min(pll_cfg.max_freq_step, pll_freq));
-            const float dtheta = pll_cfg.alpha * err + pll_freq;
-            pll_theta -= dtheta;
-            rot_cur *= ddpll_rot_neg(dtheta);
-            ++pll_updates;
-            if ((pll_updates % 64) == 0) {
-                const float rmag = std::sqrt(std::norm(rot_cur));
-                if (rmag > 0.0f && std::isfinite(rmag))
-                    rot_cur /= rmag;
-            }
-        } else {
-            // PLL disabled: rot_cur == rot, and the arithmetic matches the
-            // 4-candidate signed_value expression exactly.
-            const float re0 = rot.real() * v0.real() -
-                              rot.imag() * v0.imag();
-            const float re1 = rot.real() * v1.real() -
-                              rot.imag() * v1.imag();
-            out.m0[s] = (polarity < 0) ? -re0 : re0;
-            out.m1[s] = (polarity < 0) ? -re1 : re1;
-        }
-    }
-
-    out.pll_freq_rad = pll_freq;
-    out.pll_theta = pll_theta;
-    out.pll_updates = pll_updates;
-
-    if (timings) {
-        const clock::time_point t_end = clock::now();
-        timings->template_update_us = static_cast<uint64_t>(
-            std::chrono::duration_cast<std::chrono::microseconds>(t_templ -
-                                                                 t_begin)
-                .count());
-        timings->correlate_us = static_cast<uint64_t>(
-            std::chrono::duration_cast<std::chrono::microseconds>(t_end -
-                                                                 t_templ)
-                .count());
-    }
-    return true;
-}
+    size_t frac_phase_bins);
 
 // Known-hop 2-candidate PHR correlation (64 chips/burst, 512 chips/symbol).
 //
@@ -1806,111 +1119,19 @@ inline bool correlate_payload_known_hop_fused_cfo(
 // symbol instead of being LUT-cached; m0/m1 are the signed real parts, and z0/
 // z1 are ALWAYS filled because Wave 2 needs the 21 complex pilot values for
 // PHR frequency/phase refinement and biorthogonal decoding.
-inline bool correlate_phr_known_hop(const std::complex<float>* rx,
-                                    size_t n,
-                                    const std::complex<float>* fir_taps,
-                                    size_t tap_count,
-                                    int64_t chip_start,
-                                    size_t samples_per_chip,
-                                    int64_t phr_start,
-                                    const int8_t* pn,
-                                    int8_t polarity,
-                                    std::complex<float> rot,
-                                    Metrics2& out,
-                                    Scratch& scratch,
-                                    Timings* timings = nullptr)
-{
-    if (!rx || !fir_taps || !pn)
-        return false;
-    if (polarity != 1 && polarity != -1)
-        return false;
-    if (tap_count == 0 || tap_count > kMaxTapCount)
-        return false;
-    if (samples_per_chip != kSamplesPerChip)
-        return false;
-    if (chip_start < 0 || phr_start < 0)
-        return false;
-    if (!std::isfinite(rot.real()) || !std::isfinite(rot.imag()))
-        return false;
-    if (!pn_stream_is_pm1(pn, kPhrSymbols * kPhrChipsPerBurst))
-        return false;
-
-    const int64_t spc = static_cast<int64_t>(samples_per_chip);
-    if (phr_start > (std::numeric_limits<int64_t>::max() - chip_start) / spc)
-        return false;
-    const size_t len = template_length(tap_count, kSamplesPerChip,
-                                       kPhrChipsPerBurst);
-    const int64_t base0 = chip_start + phr_start * spc -
-                          static_cast<int64_t>(tap_count) + 1;
-    if (base0 < 0)
-        return false;
-    // Furthest window: known hop 1, BPM half 1 = (64 + 256) chips.
-    const int64_t max_off =
-        static_cast<int64_t>(kPhrChipsPerBurst + kPhrChipsPerSymbol / 2) * spc;
-    const int64_t stride_i =
-        static_cast<int64_t>(kPhrChipsPerSymbol) * spc;
-    const uint64_t add = static_cast<uint64_t>(kPhrSymbols - 1) *
-                             static_cast<uint64_t>(stride_i) +
-                         static_cast<uint64_t>(max_off) +
-                         static_cast<uint64_t>(len) - 1;
-    const uint64_t last = static_cast<uint64_t>(base0) + add;
-    if (last < static_cast<uint64_t>(base0) || last >= static_cast<uint64_t>(n))
-        return false;
-
-    using clock = std::chrono::steady_clock;
-    clock::time_point t_begin{};
-    clock::time_point t_templ{};
-    if (timings)
-        t_begin = clock::now();
-
-    scratch.ensure(kPhrSymbols, len);
-    std::complex<float>* templates = scratch.templates.data();
-    for (size_t s = 0; s < kPhrSymbols; ++s) {
-        build_template_geometry(templates + s * len, fir_taps, tap_count,
-                                pn + s * kPhrChipsPerBurst,
-                                kPhrChipsPerBurst, kSamplesPerChip);
-    }
-    if (timings)
-        t_templ = clock::now();
-
-    out.reset(kPhrSymbols, true);
-    for (size_t s = 0; s < kPhrSymbols; ++s) {
-        const int hop =
-            (pn[s * kPhrChipsPerBurst] < 0) ? 1 : 0;
-        const int64_t win0 = base0 + static_cast<int64_t>(s) * stride_i +
-                             static_cast<int64_t>(hop * kPhrChipsPerBurst) *
-                                 spc;
-        const int64_t win1 =
-            win0 + static_cast<int64_t>(kPhrChipsPerSymbol / 2) * spc;
-        const std::complex<float>* tpl = templates + s * len;
-        // Raw complex correlation on the Metrics::complex_value phase basis:
-        // no rot, no polarity.  Wave 2 consumes these 21 pilot values
-        // directly, so they are always written.
-        const std::complex<float> z0 = dot_generic(rx + win0, tpl, len);
-        const std::complex<float> z1 = dot_generic(rx + win1, tpl, len);
-        out.z0[s] = z0;
-        out.z1[s] = z1;
-        const float re0 = rot.real() * z0.real() -
-                          rot.imag() * z0.imag();
-        const float re1 = rot.real() * z1.real() -
-                          rot.imag() * z1.imag();
-        out.m0[s] = (polarity < 0) ? -re0 : re0;
-        out.m1[s] = (polarity < 0) ? -re1 : re1;
-    }
-
-    if (timings) {
-        const clock::time_point t_end = clock::now();
-        timings->template_update_us = static_cast<uint64_t>(
-            std::chrono::duration_cast<std::chrono::microseconds>(t_templ -
-                                                                 t_begin)
-                .count());
-        timings->correlate_us = static_cast<uint64_t>(
-            std::chrono::duration_cast<std::chrono::microseconds>(t_end -
-                                                                 t_templ)
-                .count());
-    }
-    return true;
-}
+bool correlate_phr_known_hop(const std::complex<float>* rx,
+                             size_t n,
+                             const std::complex<float>* fir_taps,
+                             size_t tap_count,
+                             int64_t chip_start,
+                             size_t samples_per_chip,
+                             int64_t phr_start,
+                             const int8_t* pn,
+                             int8_t polarity,
+                             std::complex<float> rot,
+                             Metrics2& out,
+                             Scratch& scratch,
+                             Timings* timings = nullptr);
 
 } // namespace rxfusion
 } // namespace demod
