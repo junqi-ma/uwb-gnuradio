@@ -1,5 +1,9 @@
-# dsp: resampler kernels and the tone-cancel core.
-set(sources uwb_fixed_tone_cancel_core.cc)
+# dsp: resampler kernels (rational resampler core + transposed kernel) and
+# the tone-cancel core.
+set(sources
+    uwb_fixed_tone_cancel_core.cc
+    uwb_rational_resampler_core.cc
+    uwb_resampler_transposed.cc)
 # The AVX-512 kernels live in their own translation units and are built only
 # when CMake selected the AVX-512 backend; the rest stays on AVX2/FMA.
 if(UWB_SIMD_HAVE_AVX512)
