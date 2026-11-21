@@ -20,7 +20,11 @@ include(CMakeFindDependencyMacro)
 find_dependency(Threads)
 find_dependency(Volk)
 set(OPENUWB_UHD_DEP_OK TRUE)
-include("${CMAKE_CURRENT_LIST_DIR}/../OpenUWB/OpenUWBConfigUhdDep.cmake")
+# Only a UHD-enabled build carries the UHD dependency; on a no-UHD build the
+# exported targets reference no UHD::UHD, so requiring UHD here made the legacy
+# package report not-found on every machine without UHD.  Mirrors the primary
+# OpenUWBConfig.cmake (same @OPENUWB_CONFIG_UHD_DEP@ substitution).
+@OPENUWB_CONFIG_UHD_DEP@
 if(NOT OPENUWB_UHD_DEP_OK)
     set(uwb_FOUND FALSE)
     set(uwb_NOT_FOUND_MESSAGE "${OpenUWB_NOT_FOUND_MESSAGE}")
