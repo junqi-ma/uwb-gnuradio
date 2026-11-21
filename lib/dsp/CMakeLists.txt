@@ -1,6 +1,7 @@
 # dsp: resampler kernels (rational resampler core + transposed kernel) and
 # the tone-cancel core.
 set(sources
+    uwb_detector_core.cc
     uwb_fixed_tone_cancel_core.cc
     uwb_rational_resampler_core.cc
     uwb_resampler_transposed.cc)
