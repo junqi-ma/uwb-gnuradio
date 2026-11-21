@@ -58,72 +58,22 @@ namespace rxopt {
 // Sum corresponding IQ samples across repetitions first, then contract the
 // one-symbol sum with the sparse spreading code and CMF. Linearity preserves
 // the old statistic, apart from floating-point summation order.
-inline bool sync_phase_gain(const std::complex<float>* rx, size_t n,
-                            int64_t base, const std::complex<float>* h,
-                            size_t taps, const std::vector<int8_t>& spread,
-                            size_t reps, std::vector<std::complex<float>>& sum,
-                            std::complex<float>& gain)
-{
-    gain = {};
-    if (!rx || !h || taps == 0 || taps > 64 || spread.empty() ||
-        spread.size() > 508 || reps == 0 || reps > 32 || base < -64)
-        return false;
-    const size_t stride = 2 * spread.size();
-    const size_t span = 2 * (spread.size() - 1) + taps;
-    const size_t extent = (reps - 1) * stride + span;
-    // Avoid additions to a caller-controlled signed coordinate.
-    if (base >= 0 && (static_cast<uint64_t>(base) > n ||
-        extent > n - static_cast<size_t>(base)))
-        return false;
-    if (base < 0 && extent > n + static_cast<size_t>(-base))
-        return false;
-    sum.assign(span, std::complex<float>{});
-    for (size_t r = 0; r < reps; ++r) {
-        const int64_t first = base + static_cast<int64_t>(r * stride);
-        const size_t lo = first < 0 ? static_cast<size_t>(-first) : 0;
-        if (lo == 0 && static_cast<uint64_t>(first + span) <= n) {
-            vector_accumulate_complex(sum.data(), rx + first, span);
-        } else {
-            for (size_t m = lo; m < span; ++m)
-                sum[m] += rx[static_cast<size_t>(first + static_cast<int64_t>(m))];
-        }
-    }
-    for (size_t c = 0; c < spread.size(); ++c) {
-        if (!spread[c])
-            continue;
-        std::complex<float> v{};
-        for (size_t q = 0; q < taps; ++q)
-            v += h[q] * sum[2 * c + q];
-        gain += static_cast<float>(spread[c]) * v;
-    }
-    return std::isfinite(gain.real()) && std::isfinite(gain.imag());
-}
+bool sync_phase_gain(const std::complex<float>* rx, size_t n,
+                     int64_t base, const std::complex<float>* h,
+                     size_t taps, const std::vector<int8_t>& spread,
+                     size_t reps, std::vector<std::complex<float>>& sum,
+                     std::complex<float>& gain);
 
 // Contract a pre-averaged SYNC tail with the CIR taps and the spreading code,
 // producing exactly the statistic sync_phase_gain() returns after its own
 // repetition sum.  The tail is the coherent average of the last
 // min(32, preamble_repetitions) SYNCs on the 2*508 integer grid, already
 // CFO-compensated, so the 32 symbol windows no longer have to be re-read.
-inline bool sync_phase_gain_from_tail(const std::complex<float>* tail,
-                                      const std::complex<float>* h,
-                                      size_t taps,
-                                      const std::vector<int8_t>& spread,
-                                      std::complex<float>& gain)
-{
-    gain = {};
-    if (!tail || !h || taps == 0 || taps > 64 || spread.empty() ||
-        spread.size() > 508)
-        return false;
-    for (size_t c = 0; c < spread.size(); ++c) {
-        if (!spread[c])
-            continue;
-        std::complex<float> v{};
-        for (size_t q = 0; q < taps; ++q)
-            v += h[q] * tail[2 * c + q];
-        gain += static_cast<float>(spread[c]) * v;
-    }
-    return std::isfinite(gain.real()) && std::isfinite(gain.imag());
-}
+bool sync_phase_gain_from_tail(const std::complex<float>* tail,
+                               const std::complex<float>* h,
+                               size_t taps,
+                               const std::vector<int8_t>& spread,
+                               std::complex<float>& gain);
 
 // Project a chip range onto the recovered SYNC phase and return its peak
 // magnitude so the caller can normalize a prefix or update the full stream.
@@ -178,13 +128,7 @@ inline constexpr float kNormalizationEps = 1e-12f;
 //   nsym = psdu_bits + 48*num_blocks
 //   chips = 21*512 (PHR) + nsym*64 (6.81 Mb/s payload)
 // ---------------------------------------------------------------------------
-inline size_t payload_chips_needed(uint32_t psdu_len)
-{
-    const size_t psdu_bits = static_cast<size_t>(psdu_len) * 8;
-    const size_t num_blocks = (psdu_bits + 329) / 330;
-    const size_t nsym = psdu_bits + 48 * num_blocks;
-    return kPhrSymbols * kPhrChipsPerSymbol + nsym * kPayloadChipsPerSymbol;
-}
+size_t payload_chips_needed(uint32_t psdu_len);
 
 // ---------------------------------------------------------------------------
 // Full-stream chip budget. It also caps the initial and final on-demand
@@ -200,22 +144,7 @@ inline size_t payload_chips_needed(uint32_t psdu_len)
 // point result is part of the current behaviour (e.g. 159154.8 for a 16-byte
 // budget becomes 159155).
 // ---------------------------------------------------------------------------
-inline size_t legacy_chip_budget(const Qm35825Profile& profile)
-{
-    const size_t n_shr =
-        (profile.preamble_repetitions + kSfdSymbols) * kQm35ChipsPerSymbol;
-    const size_t n_phr_head = kLegacyPhrHeadSymbols * kQm35ChipsPerSymbol;
-    const size_t extra_bytes =
-        (profile.max_psdu_bytes > 12) ? (profile.max_psdu_bytes - 12) : 0;
-    const size_t n_extra = static_cast<size_t>(
-        std::ceil(static_cast<double>(extra_bytes) *
-                  kLegacyExtraChipsPerByte));
-    const size_t n_guard = kLegacyGuardSymbols * kQm35ChipsPerSymbol;
-    size_t n_chips = n_shr + n_phr_head + n_extra + n_guard;
-    n_chips = static_cast<size_t>(
-        std::ceil(static_cast<double>(n_chips) * kLegacyBudgetFactor));
-    return n_chips;
-}
+size_t legacy_chip_budget(const Qm35825Profile& profile);
 
 // ---------------------------------------------------------------------------
 // Prefix budget: enough chips for
@@ -231,17 +160,7 @@ inline size_t legacy_chip_budget(const Qm35825Profile& profile)
 // covers the required 32512 + 4064 + 21*512 = 47328 chips with 12413 spare.
 // The formula is >= the required chip index for every preamble_repetitions.
 // ---------------------------------------------------------------------------
-inline size_t initial_chip_budget(const Qm35825Profile& profile)
-{
-    const size_t n_preamble =
-        (profile.preamble_repetitions + kSfdSymbols) * kQm35ChipsPerSymbol;
-    const size_t n_phr_head = kLegacyPhrHeadSymbols * kQm35ChipsPerSymbol;
-    size_t budget = static_cast<size_t>(
-        std::ceil(static_cast<double>(n_preamble + n_phr_head) *
-                  kLegacyBudgetFactor));
-    const size_t cap = legacy_chip_budget(profile);
-    return std::min(budget, cap);
-}
+size_t initial_chip_budget(const Qm35825Profile& profile);
 
 // ---------------------------------------------------------------------------
 // PHR-fusion prefix budget.  The fused PHR kernel consumes raw CFO-compensated
@@ -258,16 +177,7 @@ inline size_t initial_chip_budget(const Qm35825Profile& profile)
 // PHR-fusion option is on.
 // Default profile: 32512 + 8 + 4064 + 2 = 36586 chips.
 // ---------------------------------------------------------------------------
-inline size_t fused_phr_prefix_budget(const Qm35825Profile& profile)
-{
-    const size_t expected =
-        profile.preamble_repetitions * kQm35ChipsPerSymbol;
-    const size_t ns_sfd_positive_shift = 8;
-    const size_t sfd_len = kSfdSymbols * kQm35ChipsPerSymbol;
-    size_t budget = expected + ns_sfd_positive_shift + sfd_len + 2;
-    const size_t cap = legacy_chip_budget(profile);
-    return std::min(budget, cap);
-}
+size_t fused_phr_prefix_budget(const Qm35825Profile& profile);
 
 // ---------------------------------------------------------------------------
 // Total chips needed once the PHR has been decoded:
@@ -288,25 +198,9 @@ inline size_t fused_phr_prefix_budget(const Qm35825Profile& profile)
 // than the 59741-chip prefix, so the extension is a no-op).
 // Default profile, 127-byte PHR: 36576 + 88064 + 64 = 124704 chips.
 // ---------------------------------------------------------------------------
-inline size_t final_chip_budget(const Qm35825Profile& profile,
-                                int64_t sfd_end_chip,
-                                uint32_t psdu_length)
-{
-    if (sfd_end_chip < 0)
-        return 0;
-    const uint64_t neighbourhood =
-        static_cast<uint64_t>(psdu_length) + 2u;
-    const uint64_t capped_len =
-        std::min<uint64_t>(neighbourhood,
-                           static_cast<uint64_t>(profile.max_psdu_bytes));
-    uint64_t wanted = static_cast<uint64_t>(sfd_end_chip) + 1u;
-    wanted += static_cast<uint64_t>(
-        payload_chips_needed(static_cast<uint32_t>(capped_len)));
-    wanted += static_cast<uint64_t>(kFinalGuardChips);
-    const size_t cap = legacy_chip_budget(profile);
-    return static_cast<size_t>(std::min<uint64_t>(
-        wanted, static_cast<uint64_t>(cap)));
-}
+size_t final_chip_budget(const Qm35825Profile& profile,
+                         int64_t sfd_end_chip,
+                         uint32_t psdu_length);
 
 // ---------------------------------------------------------------------------
 // Two-phase normalization.
