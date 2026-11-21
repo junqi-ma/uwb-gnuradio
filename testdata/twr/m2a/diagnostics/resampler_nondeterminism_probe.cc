@@ -14,7 +14,10 @@
 // Build (no source-tree path baked in; pass everything on the command line):
 //   c++ -std=c++17 -O2 -I gr-uwb/include \
 //       testdata/twr/m2a/diagnostics/resampler_nondeterminism_probe.cc \
-//       -o /tmp/rsnd -L/usr/local/lib -lvolk -lpthread -ldl -lm
+//       -o /tmp/rsnd build/dev-avx2/lib/libopenuwb_dsp.a \
+//       -L/usr/local/lib -lvolk -lpthread -ldl -lm
+// (the static openuwb_dsp archive is required now that the core
+// implementations live there and the header is declaration-only).
 // Run:
 //   env -u LD_LIBRARY_PATH /tmp/rsnd <taps.f32> <L> <M> <N> <out_extra> <kernel|-> <iters>
 //   e.g. /tmp/rsnd testdata/resampler_65_48/taps_quality_minorder.txt 65 48 4096 256 - 10
