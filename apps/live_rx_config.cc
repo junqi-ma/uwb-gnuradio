@@ -20,6 +20,44 @@
 namespace openuwb {
 namespace live {
 
+namespace {
+
+// Map the operator-facing DW1000 name to the demod/mod SFD table name.  All
+// accepted values are 8-symbol SFDs, which is what the Ipatov pulse cache and
+// the DW1000 default assume.
+const char* normalize_sic_sfd(const std::string& s)
+{
+    if (s == "dw-8" || s == "dw8" || s == "decawave")
+        return "decawave";
+    if (s == "4z1") return "4z1";
+    if (s == "4z2") return "4z2";
+    if (s == "4z3") return "4z3";
+    if (s == "4z4") return "4z4";
+    if (s == "ieee") return "ieee";
+    return nullptr;
+}
+
+bool sic_ipatov_reps(size_t reps)
+{
+    return reps == 64 || reps == 128 || reps == 256;
+}
+
+size_t parse_strict_size(const std::string& key, const std::string& text)
+{
+    size_t used = 0;
+    unsigned long value = 0;
+    try {
+        value = std::stoul(text, &used, 10);
+    } catch (const std::exception&) {
+        throw std::runtime_error("invalid integer for " + key + ": " + text);
+    }
+    if (used != text.size())
+        throw std::runtime_error("invalid integer for " + key + ": " + text);
+    return static_cast<size_t>(value);
+}
+
+} // namespace
+
 // Runtime resource root for the resampler taps + preamble template.
 // Resolution order (first existing directory wins):
 //   1. --res-dir <dir>
@@ -121,6 +159,11 @@ LiveRxCli parse_live_rx_cli(int argc, char** argv)
         else if (key=="--timed-alignment") o.timed_alignment=std::stoul(value());
         else if (key=="--timed-t0-ms") o.timed_t0_ms=std::stod(value());
         else if (key=="--res-dir") o.res_dir=value();
+        else if (key=="--sic") o.sic=value();
+        else if (key=="--sic-backend") o.sic_backend=value();
+        else if (key=="--sic-code") o.sic_code=parse_strict_size(key,value());
+        else if (key=="--sic-reps") o.sic_reps=parse_strict_size(key,value());
+        else if (key=="--sic-sfd") o.sic_sfd=value();
         else throw std::runtime_error("unknown option "+key);
     }
     return cli;
@@ -210,6 +253,32 @@ void validate_live_rx_config(LiveRxConfig& o)
         throw std::runtime_error("invalid lock/timed configuration");
     if (o.locked_pre_guard == 0)
         throw std::runtime_error("--locked-pre-guard must be > 0");
+    // Optional SIC stage.  Every enum and range is fail-closed even while the
+    // stage is off, so a later `--sic` flip cannot silently accept a typo that
+    // was already on the command line.
+    if (o.sic != "off" && o.sic != "preamble" && o.sic != "full" &&
+        o.sic != "auto")
+        throw std::runtime_error(
+            "--sic must be off, preamble, full or auto");
+    if (o.sic_backend != "ipatov" && o.sic_backend != "discrete" &&
+        o.sic_backend != "path")
+        throw std::runtime_error(
+            "--sic-backend must be ipatov, discrete or path");
+    if (o.sic_code < 9 || o.sic_code > 12)
+        throw std::runtime_error("--sic-code must be an HRP code index 9..12");
+    if (o.sic_reps == 0 || o.sic_reps > 2048)
+        throw std::runtime_error("--sic-reps must be in 1..2048");
+    const char* sic_sfd = normalize_sic_sfd(o.sic_sfd);
+    if (!sic_sfd)
+        throw std::runtime_error(
+            "--sic-sfd must be dw-8, 4z1, 4z2, 4z3, 4z4 or ieee");
+    if (o.sic != "off" && o.sic_backend == "ipatov" &&
+        !sic_ipatov_reps(o.sic_reps))
+        throw std::runtime_error(
+            "--sic-backend ipatov supports --sic-reps 64, 128 or 256");
+    // Keep the canonical demod table name for the session and for the SIC
+    // configuration hash.
+    o.sic_sfd = sic_sfd;
     // The timed UHD command path is NOT enabled: it must be validated on a
     // board before it can be claimed.  Failing closed here is deliberate.
     if (o.mode=="timed" && o.replay.empty())

@@ -298,6 +298,33 @@ struct Qm35825Profile {
     // detectRepeatedPreamble.m, so it must not replace the dense default.
     bool rx_timing_shaped_sparse = false;
 
+    // ---- Wide-window interval probe (blind acquisition only) -------------
+    // AcquireLegacy normally scans every stride-14 lag across the whole search
+    // margin.  A whole-window SIC blind search spans hundreds of thousands of
+    // samples, so that scan dominates the stage.  When this switch is on AND
+    // the search span is at least 16 SYMBOL periods, stage_timing probes the
+    // window on a coarse symbol grid instead: at each probe origin it folds
+    // `rx_wide_probe_fold_symbols` SYNC periods coherently (K=2 gives +3 dB,
+    // K=4 +6 dB) and correlates over one symbol period.  A probe anywhere
+    // inside a long preamble sees the same P-periodic code, so the coarse grid
+    // cannot skip a preamble; the recovered absolute symbol start goes through
+    // the normal
+    // backtrack / SYNC-train / SFD path.  Default off: LockedBounded and any
+    // narrow ROI keep the historical behaviour exactly.
+    bool rx_wide_interval_probe = false;
+    // Probe stride in SYMBOL periods.  Upper-bounded by
+    // max(8, preamble_repetitions / 3), by (preamble_repetitions - K) and by
+    // timing_max_backtrack_symbols, so a short preamble still gets a probe
+    // inside it and the normal backtrack can reach the true first SYNC.
+    size_t rx_wide_probe_step_symbols = 42;
+    // Symbols coherently folded at each probe (2 = +3 dB, 4 = +6 dB but needs
+    // a low CFO; 4 is the current default, with 2 retained as the
+    // CFO-robust option for +/-100 kHz-class offsets).
+    size_t rx_wide_probe_fold_symbols = 4;
+    // On an all-probe miss, keep the legacy coarse / grid / fold fallbacks
+    // instead of failing fast.  Default false is the wide-search fast path.
+    bool rx_wide_probe_fallback = false;
+
     // Derive the chip/symbol period (SFO) from the Stage-2 carrier frequency
     // offset estimate (-cfo_hz / carrier_freq_hz) instead of the integer-peak
     // OLS timing slope. On co-sourced crystal hardware (DW3000/QM35825 <-> X410),

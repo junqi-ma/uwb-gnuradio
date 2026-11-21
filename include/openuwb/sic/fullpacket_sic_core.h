@@ -9,6 +9,9 @@ struct FullPacketScratch {
     std::vector<std::complex<double>> accum, phase_tmp;
     std::vector<int8_t> expected_phr;
     size_t capacity = 0;
+    // Unified SIC sets this after preparing its configured public profile.
+    // Direct callers keep the historical code10/64/4z2 gate.
+    bool allow_configured_profile = false;
     UWB_API void reserve(size_t max_samples);
     // Optional exact prefix phase cache. Allocated explicitly before hot calls.
     bool prefix_cache_enabled = false, prefix_key_valid = false;

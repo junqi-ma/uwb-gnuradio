@@ -383,6 +383,7 @@ bool cholesky_lower(const cd* a, size_t k, cd* l)
 void DiscreteCirScratch::reserve(size_t max_window_samples_)
 {
     prepared = false;
+    allow_configured_profile = false;
     max_window_samples = max_window_samples_;
     max_packet_samples = 0;
 
@@ -662,13 +663,19 @@ bool prepare_discrete_cir(const DiscreteCirConfig& cfg,
     scratch.max_packet_samples = max_packet;
 
     scratch.ipatov_correlation = cfg.ipatov_correlation;
+    scratch.allow_configured_profile = cfg.allow_configured_profile;
     scratch.sparse_pulse_reconstruct = false;
     if (cfg.sparse_pulse_reconstruct && !cfg.ipatov_correlation)
         return fail("sparse_pulse_requires_ipatov");
     if (cfg.ipatov_correlation) {
+        // The Ipatov backend reconstructs the known preamble as unit pulses
+        // from the public code, so it is independent of the configured SYNC
+        // repetition count.  64/128/256 are the geometries validated by the
+        // SIC QA (128 is the DW1000 default used by the live receiver).
         if (sps != demod::kQm35SamplesPerSymbol || cfg.fit_reps < 3 ||
             cfg.sample_rate != radar_meta::kWorkRateHz ||
-            (cfg.sync_reps != 64 && cfg.sync_reps != 256))
+            (cfg.sync_reps != 64 && cfg.sync_reps != 128 &&
+             cfg.sync_reps != 256))
             return fail("unsupported Ipatov geometry");
         if (!radar_meta::code_index_supported(cfg.comm_code))
             return fail("unsupported Ipatov code");
@@ -685,7 +692,7 @@ bool prepare_discrete_cir(const DiscreteCirConfig& cfg,
         auto& raw = scratch.impulse_profile;
         raw.code_index = cfg.comm_code;
         raw.sync_repetitions = cfg.sync_reps;
-        raw.sfd_mode = "4z2";
+        raw.sfd_mode = cfg.sfd_mode;
         raw.peak_amplitude = 1.f;
         raw.pulse.shape = mod::PulseShape::External;
         raw.external_taps = {1.f, 0.f}; // unit impulses, 2 samples/chip

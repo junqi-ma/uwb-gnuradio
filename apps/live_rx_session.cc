@@ -29,6 +29,9 @@
 #include <gnuradio/uwb/uwb_timed_rx_plan.h>
 #include <gnuradio/uwb/uwb_uhd_sc16_pipeline.h>
 
+#include <openuwb/phy/hrp/tx/hrp_mod_core.h>
+#include <openuwb/sic/sic_unified.h>
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -75,6 +78,69 @@ template<class T> std::vector<T> load(const std::string& path) {
     return v;
 }
 
+namespace {
+
+// Immutable SIC waveform templates shared by every worker.  Each worker copies
+// the raw pointer view (SicUnifiedTemplates) but the shared_ptr keeps the
+// backing vectors alive for the whole worker lifetime.
+struct SicTemplateBundle {
+    std::vector<std::complex<float>> sync;
+    std::vector<std::complex<float>> preamble;
+    sic::SicUnifiedTemplates templates;
+};
+
+sic::SicPolicy sic_policy_from_cli(const std::string& s)
+{
+    if (s == "preamble") return sic::SicPolicy::PreambleOnly;
+    if (s == "full") return sic::SicPolicy::FullPacket;
+    return sic::SicPolicy::AutoFallback; // "auto"
+}
+
+sic::SicEstimatorBackend sic_backend_from_cli(const std::string& s)
+{
+    if (s == "discrete") return sic::SicEstimatorBackend::DiscreteCir;
+    if (s == "path") return sic::SicEstimatorBackend::PathFractional;
+    return sic::SicEstimatorBackend::Ipatov; // "ipatov"
+}
+
+// Build one shaped SYNC symbol for the configured interferer code and tile it
+// into a full preamble template.  This mirrors the TX modulator, so the SIC
+// waveform-scale check and the Ipatov unit-impulse cache stay consistent.
+std::shared_ptr<SicTemplateBundle> make_sic_template_bundle(const LiveRxConfig& o)
+{
+    auto bundle = std::make_shared<SicTemplateBundle>();
+
+    mod::HrpModConfig mod_cfg;
+    mod_cfg.code_index = o.sic_code;
+    mod_cfg.sync_repetitions = 1; // one SYNC + LSFD, first symbol extracted
+    mod_cfg.sfd_mode = o.sic_sfd.c_str();
+    mod_cfg.peak_amplitude = 0.8f;
+
+    mod::HrpModScratch mod_scratch;
+    const size_t prefix_cap = 64 * 1016;
+    mod_scratch.reserve(1, prefix_cap);
+    std::vector<std::complex<float>> prefix(prefix_cap);
+    size_t prefix_n = 0;
+    if (!mod::modulate_prefix_waveform(mod_cfg, mod_scratch, prefix.data(),
+                                       prefix.size(), prefix_n) ||
+        prefix_n < 1016)
+        throw std::runtime_error("cannot build SIC interferer SYNC template");
+
+    bundle->sync.assign(prefix.begin(), prefix.begin() + 1016);
+    bundle->preamble.reserve(o.sic_reps * bundle->sync.size());
+    for (size_t rep = 0; rep < o.sic_reps; ++rep)
+        bundle->preamble.insert(bundle->preamble.end(), bundle->sync.begin(),
+                                bundle->sync.end());
+
+    bundle->templates.sync = bundle->sync.data();
+    bundle->templates.sync_len = bundle->sync.size();
+    bundle->templates.preamble = bundle->preamble.data();
+    bundle->templates.preamble_len = bundle->preamble.size();
+    return bundle;
+}
+
+} // namespace
+
 struct PendingSubmit : live::PacketRequest {
     size_t count = 0;
     double metric = 0.0;
@@ -98,8 +164,56 @@ struct Workers {
             const std::vector<std::complex<float>>& tmpl)
         : report(r), lock(lk), pool(o.capacity, window) {
         resample_group_delay = taps.empty() ? 0.0 : 0.5 * (double(taps.size()) - 1.0);
-        pool.start(o.workers, [&, o, taps, tmpl](size_t worker, live::PacketSlotPool::WorkerLoop& loop) {
-            live::PacketProcessor processor(taps, tmpl, window);
+        // Built once, read-only, and shared by every worker's PacketProcessor.
+        // With --sic off this stays null: no templates, scratch or residual
+        // buffers are ever allocated.
+        std::shared_ptr<SicTemplateBundle> sic_templates;
+        if (o.sic != "off")
+            sic_templates = make_sic_template_bundle(o);
+        pool.start(o.workers, [&, o, taps, tmpl, sic_templates](size_t worker, live::PacketSlotPool::WorkerLoop& loop) {
+            live::PacketSicOptions sic_options;
+            if (sic_templates) {
+                sic_options.enabled = true;
+                sic_options.templates = sic_templates->templates;
+                auto& sc = sic_options.config;
+                sc.policy = sic_policy_from_cli(o.sic);
+                sc.backend = sic_backend_from_cli(o.sic_backend);
+                sc.comm_code = o.sic_code;
+                sc.sync_reps = o.sic_reps;
+                sc.samples_per_symbol = 1016;
+                sc.sample_rate = work_fs;
+                sc.sfd_mode = o.sic_sfd.c_str();
+                sc.fit_reps = std::min<size_t>(8, o.sic_reps);
+                // Blind search over the whole window; the worker overrides the
+                // subtraction ROI with its own work capacity in the constructor.
+                sc.roi_lo = 0;
+                sc.roi_hi = 0;
+                sc.sub_roi_lo = 0;
+                sc.sub_roi_hi = 0;
+                sc.observed_end_sample = 0;
+                // Mirror the acquisition kernel selection.  The blind SIC search
+                // covers the whole work window, so the dense 1016-tap timing
+                // correlation would dominate the stage; the shaped-sparse
+                // factorization is mathematically equivalent and falls back
+                // automatically when the template is not code*p.
+                sc.rx_timing_sparse = (o.timing_sparse == "on");
+                sc.rx_timing_shaped_sparse =
+                    (o.timing_shaped == "on") ||
+                    (o.timing_shaped == "auto" && o.timing_sparse == "off");
+                sc.cfo_refit_mode = (o.cfo_refit == "auto") ? 1
+                                  : (o.cfo_refit == "skip") ? 2 : 0;
+                // The SIC search covers the whole work window.  Probe it on a
+                // coarse SYMBOL grid with a local K=4 coherent fold instead of
+                // a stride-14 scan over hundreds of thousands of lags.  The
+                // probe still sees any preamble because the SYNC code is
+                // P-periodic; a miss fails fast to L0_Bypass.
+                sc.rx_wide_interval_probe = true;
+                sc.rx_wide_probe_step_symbols = 42;
+                sc.rx_wide_probe_fold_symbols = 4;
+                sc.rx_wide_probe_fallback = false;
+            }
+            live::PacketProcessor processor(taps, tmpl, window,
+                                            std::move(sic_options));
             // Acquisition / interference profile: unchanged legacy wide acquisition.
             demod::Qm35825Profile acq;
             acq.code_index = 10; acq.preamble_repetitions = 256;
@@ -164,10 +278,17 @@ struct Workers {
                     auto& r = processed.decoded;
                     const bool retry = processed.retried;
                     const auto resample_end = processed.resample_end;
+                    const auto sic_end = processed.sic_end;
                     const auto demod_end = processed.demod_end;
                     const auto compute_end = processed.compute_end;
                     cost.resample_us = elapsed_us(compute_start, resample_end);
-                    cost.demod_us = elapsed_us(resample_end, demod_end);
+                    // SIC (when enabled) sits between resampling and the target
+                    // demodulator.  Keep the split truthful; with --sic off
+                    // sic_end == resample_end, so demod_us is unchanged.
+                    cost.sic_us = elapsed_us(resample_end, sic_end);
+                    cost.demod_us = elapsed_us(sic_end, demod_end);
+                    cost.sic_executed = processed.sic_executed;
+                    cost.sic_level = int(processed.sic_level);
                     cost.retry_us = retry ? elapsed_us(demod_end, compute_end) : 0;
                     cost.compute_us = elapsed_us(compute_start, compute_end);
                     cost.cpu_us = thread_cpu_us() - cpu_start;
@@ -658,7 +779,15 @@ int run_live_rx(const LiveRxConfig& o)
     lock_cfg.window_capacity = window;
     core::TargetLockCore lock(lock_cfg);
     core::TargetLockState last_state = lock.state();
-    ConsoleReporter report(o.summary, o.print == "packets");
+    ConsoleReporter report(o.summary, o.print == "packets", o.sic != "off");
+    std::string sic_info;
+    if (o.sic != "off") {
+        std::ostringstream s;
+        s << " sic=" << o.sic << " sic_backend=" << o.sic_backend
+          << " sic_code=" << o.sic_code << " sic_reps=" << o.sic_reps
+          << " sic_sfd=" << o.sic_sfd;
+        sic_info = s.str();
+    }
     report.info("START mode="+o.mode+" sync="+o.sync+
         " par_only="+o.par_only+
         " channel="+o.channel+" antenna="+o.antenna+" cir="+o.cir+
@@ -683,7 +812,8 @@ int run_live_rx(const LiveRxConfig& o)
         " acq_peak="+std::to_string(o.acq_peak)+
         " lock_fcs="+o.lock_fcs+
         " stop_after_sfd="+o.stop_after_sfd+
-        " autocorr_when_locked="+std::string(o.autocorr_suspend?"suspend":"scan"));
+        " autocorr_when_locked="+std::string(o.autocorr_suspend?"suspend":"scan")+
+        sic_info);
     // Effective pre-guard for the next cut window.  It follows the lock state:
     // the blind acquisition platform needs the wide guard, the locked
     // predictor only needs the bounded ROI.  Every window cut (target,

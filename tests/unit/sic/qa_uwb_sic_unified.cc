@@ -516,7 +516,7 @@ BOOST_AUTO_TEST_CASE(test_ipatov_256_sync_cancels_tail_without_extending_trainin
     }
     BOOST_CHECK_LT(residual_tail,original_tail*.01);
     for(size_t j=q+256*kSps;j<n;++j) BOOST_REQUIRE_EQUAL(out[j],y[j]);
-    cfg.sync_reps=128;
+    cfg.sync_reps=32;
     BOOST_CHECK(!prepare_sic_unified(cfg,templates,scratch,&error));
     BOOST_CHECK_EQUAL(error,"unsupported Ipatov geometry");
 }

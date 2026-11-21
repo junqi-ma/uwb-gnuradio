@@ -154,6 +154,14 @@ struct LiveRxConfig {
     double timed_t0_ms = 0.0;
     size_t timed_lookahead = 4, timed_alignment = 4;
     std::string res_dir;   // --res-dir: runtime resource root (see resolve_res_dir)
+    // Optional SIC stage (default off: zero allocation, zero extra hot-path
+    // work and unchanged stdout).  The PHY parameters describe the INTERFERER
+    // that is reconstructed and subtracted before the target demodulator runs.
+    std::string sic = "off";            // off|preamble|full|auto
+    std::string sic_backend = "ipatov"; // ipatov|discrete|path
+    size_t sic_code = 11;               // interferer HRP code index (9..12)
+    size_t sic_reps = 128;              // interferer SYNC repetitions
+    std::string sic_sfd = "dw-8";       // dw-8|4z1|4z2|4z3|4z4|ieee
     // Resolved by validate_live_rx_config(): true when the lock is tracking and
     // the autocorrelation scan must be suspended (requires --interference off).
     bool autocorr_suspend = false;

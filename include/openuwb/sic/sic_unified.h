@@ -267,6 +267,22 @@ struct SicUnifiedConfig {
     bool rx_fused_payload_cmf = true;
     bool rx_fused_phr_cmf = true;
 
+    // Timing / CFO kernel selection forwarded to Qm35825Profile.  Defaults keep
+    // the dense timing kernel and legacy CFO handling used by existing SIC
+    // baselines; openuwb_rx mirrors its acquisition profile here so a whole
+    // window blind search runs the same sparse/shaped-sparse timing kernel.
+    bool rx_timing_sparse = false;
+    bool rx_timing_shaped_sparse = false;
+    int cfo_refit_mode = 0;
+
+    // Wide-window blind-search probe (see Qm35825Profile).  Off by default so
+    // existing SIC callers keep the historical acquisition; openuwb_rx enables
+    // it for its whole-window --sic search.
+    bool rx_wide_interval_probe = false;
+    size_t rx_wide_probe_step_symbols = 42;
+    size_t rx_wide_probe_fold_symbols = 4;
+    bool rx_wide_probe_fallback = false;
+
     // Kernel SIMD controls
     bool enable_b3_simd = true;
 
@@ -388,6 +404,11 @@ struct SicUnifiedResult {
     // i_hat: optional reconstruction buffer of length n. Zero outside support.
     std::complex<float>* out = nullptr;
     std::complex<float>* i_hat = nullptr;
+    // Default true keeps the public fail-closed contract: every L0/failure path
+    // copies y into out.  A caller that consumes out only on committed L1/L2
+    // (the live PacketProcessor) can set this false and skip a full-window copy
+    // on every bypass.
+    bool copy_out_on_bypass = true;
 };
 
 // ---------------------------------------------------------------------------

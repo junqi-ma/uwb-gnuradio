@@ -246,6 +246,57 @@ with tempfile.TemporaryDirectory(prefix='uwb-live-console-') as temporary:
     assert fields['ondemand'] == 'on', fields
     assert fields['lock_fcs'] == 'on', fields
     assert fields['stop_after_sfd'] == 'off', fields
+    # The default keeps the pre-SIC console contract byte-identical: no SIC
+    # key on START/PACKET and no SIC_STATS line.
+    assert 'sic' not in fields, fields
+    assert 'SIC_STATS' not in baseline.stdout, baseline.stdout
+    baseline_packet = re.search(r'^PACKET .*$', baseline.stdout, re.M)
+    assert baseline_packet is not None, baseline.stdout
+    assert 'sic_us=' not in baseline_packet.group(0), baseline_packet.group(0)
+
+    # ------------------------------------------------------------------
+    # Optional SIC stage: fail-closed CLI, then an auto-policy replay smoke.
+    # The synthetic DC burst is not a code-11 packet, so SIC must execute and
+    # bypass at L0; the target demod result is unchanged.
+    # ------------------------------------------------------------------
+    for extra, why in [
+        (['--sic', 'bogus'], '--sic must be off, preamble, full or auto'),
+        (['--sic-backend', 'bogus'], '--sic-backend must be ipatov, discrete or path'),
+        (['--sic-code', '8'], '--sic-code must be an HRP code index 9..12'),
+        (['--sic-code', '13'], '--sic-code must be an HRP code index 9..12'),
+        (['--sic-code', '11x'], 'invalid integer for --sic-code'),
+        (['--sic-reps', '0'], '--sic-reps must be in 1..2048'),
+        (['--sic-reps', '128x'], 'invalid integer for --sic-reps'),
+        (['--sic-sfd', 'bogus'], '--sic-sfd must be dw-8, 4z1, 4z2, 4z3, 4z4 or ieee'),
+        (['--sic', 'auto', '--sic-backend', 'ipatov', '--sic-reps', '32'],
+         '--sic-backend ipatov supports --sic-reps 64, 128 or 256'),
+    ]:
+        rejected = subprocess.run(
+            [binary, '--replay', str(path), '--summary', '1'] + extra,
+            capture_output=True, text=True, timeout=30)
+        assert rejected.returncode == 2, (extra, rejected.stdout + rejected.stderr)
+        assert why in rejected.stderr, (extra, rejected.stderr)
+        assert 'START ' not in rejected.stdout, (extra, rejected.stdout)
+
+    sic_run = subprocess.run(
+        [binary, '--replay', str(path), '--summary', '1', '--sic', 'auto',
+         '--workers', '1'],
+        capture_output=True, text=True, timeout=60)
+    assert sic_run.returncode == 0, sic_run.stderr + sic_run.stdout
+    sfields = start_fields(sic_run.stdout)
+    assert sfields['sic'] == 'auto', sfields
+    assert sfields['sic_backend'] == 'ipatov', sfields
+    assert sfields['sic_code'] == '11', sfields
+    assert sfields['sic_reps'] == '128', sfields
+    assert sfields['sic_sfd'] == 'decawave', sfields
+    sic_stats = re.search(r'^SIC_STATS executed=\d+ l0=\d+ l1=\d+ l2=\d+ ', sic_run.stdout, re.M)
+    assert sic_stats is not None, sic_run.stdout
+    sic_packet = re.search(r'^PACKET .*$', sic_run.stdout, re.M)
+    assert sic_packet is not None, sic_run.stdout
+    for key in ('sic_us=', 'sic_lvl=', 'sic_exec='):
+        assert key in sic_packet.group(0), sic_packet.group(0)
+    assert re.search(r'^FINAL completed=1 fcs=0/1 ', sic_run.stdout, re.M), \
+        sic_run.stdout
 
     # Python wrapper default (--cir auto) and `--` passthrough to C++ live.
     wrapper = Path(__file__).resolve().parent / 'live_dw3000_packets.py'
@@ -376,4 +427,5 @@ with tempfile.TemporaryDirectory(prefix='uwb-live-console-') as temporary:
 
 print('live console: acquisition/rejection, batch summary, SIGINT, source failure, '
       'locked strategy, timed-burst plan, locked pre-guard, low-SNR '
-      'lock/capture switches and submission accounting PASS')
+      'lock/capture switches, SIC fail-closed/auto smoke and submission '
+      'accounting PASS')

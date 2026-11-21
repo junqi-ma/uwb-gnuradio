@@ -33,12 +33,62 @@ set(UWB_APPS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../apps)
 set(UWB_QA_WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/qa_work")
 file(MAKE_DIRECTORY "${UWB_QA_WORKING_DIRECTORY}")
 
+########################################################################
+# Stage 1: precompiled headers for the QA executables.
+#
+# 63+ QA executables are all Boost.Test frontends over the same header
+# set; PCH removes the repeated frontend parse of <boost/test/unit_test.hpp>,
+# the STL headers and the HRP profile header.  Two prototype PCH targets
+# carry the shared header set:
+#   uwb_qa_pch_plain : bound to the plain QA targets (no explicit ISA
+#                      flags; GCC/Clang require the PCH and the consuming
+#                      TU to carry the same -D macros and -m flags per the
+#                      UwbSimd.cmake compatibility rule).
+#   uwb_qa_pch_simd  : bound to the targets that call uwb_simd_apply();
+#                      it is compiled with the production ISA flags.
+# The REUSE_FROM bindings happen after the uwb_simd_apply() calls (the
+# SIMD target set is not known before then), so uwb_register_qa() binds
+# the plain PCH first and the SIMD rebinding runs right after.
+########################################################################
+set(UWB_QA_PCH_PUBLIC_HEADERS
+    <boost/test/unit_test.hpp>
+    <vector> <complex> <algorithm> <functional> <memory> <string>
+    <cstdint> <cstddef> <new> <stdexcept>
+    <openuwb/phy/hrp/common/profile.h>)
+
+if(UWB_ENABLE_PCH)
+    # The two PCH prototype targets need at least one source file
+    # (add_library(STATIC) without sources is rejected); this shared empty
+    # TU carries no code, the PCH comes from the header lists below.
+    set(OPENUWB_QA_PCH_PROTO_TU
+        ${CMAKE_CURRENT_SOURCE_DIR}/unit/openuwb_qa_pch_proto.cc)
+    add_library(uwb_qa_pch_plain STATIC ${OPENUWB_QA_PCH_PROTO_TU})
+    target_include_directories(uwb_qa_pch_plain PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+    target_precompile_headers(uwb_qa_pch_plain
+        PUBLIC ${UWB_QA_PCH_PUBLIC_HEADERS})
+
+    add_library(uwb_qa_pch_simd STATIC ${OPENUWB_QA_PCH_PROTO_TU})
+    target_include_directories(uwb_qa_pch_simd PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+    target_precompile_headers(uwb_qa_pch_simd
+        PUBLIC ${UWB_QA_PCH_PUBLIC_HEADERS} <immintrin.h>)
+    uwb_simd_apply(uwb_qa_pch_simd)
+
+    # Filled after the uwb_simd_apply() calls below: the names of the QA
+    # targets compiled through the production ISA chain.
+    set(UWB_QA_PCH_SIMD_TARGETS "")
+endif()
+
 function(uwb_register_qa qa_name qa_source)
     add_executable("uwb_${qa_name}" "${qa_source}")
     target_link_libraries("uwb_${qa_name}"
         PRIVATE uwb_native uwb_twr_phy Boost::unit_test_framework)
     set_target_properties("uwb_${qa_name}" PROPERTIES
         COMPILE_DEFINITIONS "BOOST_TEST_DYN_LINK;BOOST_TEST_MAIN")
+    if(UWB_ENABLE_PCH AND TARGET uwb_qa_pch_plain)
+        target_precompile_headers("uwb_${qa_name}" REUSE_FROM uwb_qa_pch_plain)
+    endif()
     add_test(NAME "uwb_${qa_name}" COMMAND "uwb_${qa_name}"
         WORKING_DIRECTORY "${UWB_QA_WORKING_DIRECTORY}")
 endfunction()
@@ -102,6 +152,9 @@ set(UWB_UNIT_QA_SOURCES
     # placeholders.
     ${UWB_UNIT_DIR}/phy/qa_hrp_standard_rev.cc
     ${UWB_UNIT_DIR}/runtime/qa_openuwb_runtime_config.cc
+    # SIC live processor QA. Appended last so the historical test numbering
+    # above is untouched.
+    ${UWB_UNIT_DIR}/runtime/qa_uwb_live_packet_processor_sic.cc
 )
 
 foreach(qa_source IN LISTS UWB_UNIT_QA_SOURCES)
@@ -122,6 +175,9 @@ function(uwb_add_pure_twr_test test_name test_source)
         PRIVATE uwb_twr_core uwb_twr_fake_link Boost::unit_test_framework)
     set_target_properties(${test_name} PROPERTIES
         COMPILE_DEFINITIONS "BOOST_TEST_DYN_LINK;BOOST_TEST_MAIN")
+    if(UWB_ENABLE_PCH AND TARGET uwb_qa_pch_plain)
+        target_precompile_headers(${test_name} REUSE_FROM uwb_qa_pch_plain)
+    endif()
     add_test(NAME ${test_name} COMMAND ${test_name})
 endfunction()
 
@@ -167,6 +223,10 @@ target_compile_definitions(uwb_qa_uwb_rational_resampler_core_65_32.cc PRIVATE
 # testdata/twr/m2a/taps/, so this QA needs the testdata root too.
 target_compile_definitions(uwb_qa_uwb_rational_resampler_m2a.cc PRIVATE
     "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/testdata\"")
+# SIC live processor QA: loads the 65/48 RX taps and the 48/65 TX taps used to
+# synthesize a native-rate replay window from work-grid waveforms.
+target_compile_definitions(uwb_qa_uwb_live_packet_processor_sic.cc PRIVATE
+    "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/testdata\"")
 # RS-5: the transposed kernel QA reads the four 65/48 and two 65/32 taps files.
 target_compile_definitions(uwb_qa_uwb_resampler_transposed.cc PRIVATE
     "UWB_TESTDATA_DIR=\"${CMAKE_SOURCE_DIR}/testdata\"")
@@ -194,6 +254,7 @@ target_compile_definitions(uwb_qa_uwb_twr_math.cc PRIVATE
 # exercise (previously -march=native, which could sneak AVX-512 into an AVX2
 # build).  uwb_simd_apply() requires the target to exist, hence the names.
 uwb_simd_apply(uwb_qa_uwb_fullpacket_fast_rx.cc)
+uwb_simd_apply(uwb_qa_uwb_live_packet_processor_sic.cc)
 uwb_simd_apply(uwb_qa_uwb_rx_fused_cmf.cc)
 uwb_simd_apply(uwb_qa_uwb_rx_fused_phr.cc)
 uwb_simd_apply(uwb_qa_uwb_uhd_sc16_pipeline.cc)
@@ -201,6 +262,27 @@ uwb_simd_apply(uwb_qa_uwb_rational_resampler_core.cc)
 uwb_simd_apply(uwb_qa_uwb_resampler_burst_opt.cc)
 uwb_simd_apply(uwb_qa_uwb_resampler_transposed.cc)
 uwb_simd_apply(uwb_qa_uwb_rational_resampler_core_65_32.cc)
+set(UWB_QA_PCH_SIMD_TARGETS
+    uwb_qa_uwb_fullpacket_fast_rx.cc
+    uwb_qa_uwb_live_packet_processor_sic.cc
+    uwb_qa_uwb_rx_fused_cmf.cc
+    uwb_qa_uwb_rx_fused_phr.cc
+    uwb_qa_uwb_uhd_sc16_pipeline.cc
+    uwb_qa_uwb_rational_resampler_core.cc
+    uwb_qa_uwb_resampler_burst_opt.cc
+    uwb_qa_uwb_resampler_transposed.cc
+    uwb_qa_uwb_rational_resampler_core_65_32.cc)
+
+# Stage 1: SIMD-chain rebinding.  The nine QA targets above were first
+# bound to the plain PCH by uwb_register_qa(); they are compiled through
+# the production ISA chain, so rebind them to the SIMD PCH.
+if(UWB_ENABLE_PCH AND TARGET uwb_qa_pch_simd)
+    foreach(_t IN LISTS UWB_QA_PCH_SIMD_TARGETS)
+        if(TARGET ${_t})
+            target_precompile_headers(${_t} REUSE_FROM uwb_qa_pch_simd)
+        endif()
+    endforeach()
+endif()
 
 ########################################################################
 # Integration tests.
@@ -419,4 +501,117 @@ if(UWB_BUILD_EXPERIMENTS)
         ${UWB_BENCH_DIR}/bench_demod_sic_kernels.cc)
     target_link_libraries(bench_demod_sic_kernels uwb_native)
     uwb_simd_apply(bench_demod_sic_kernels)
+endif()
+
+########################################################################
+# CTest grouping labels (non-destructive: keeps all targets and order).
+#   core / rx_sic : essential openuwb_rx, SIC, PHY, runtime & resampler QA
+#   twr           : two-way ranging unit + Python integration QA
+#   sensing       : monostatic radar CIR/SFD/timing QA
+#   dsp_extra     : secondary resampler & tone-cancellation QA
+#   legacy_diag   : historical diagnostics & experiment self-tests
+#   infra         : contract/config/log/install/benchmark smoke QA
+########################################################################
+foreach(_t IN ITEMS
+    uwb_qa_uwb_live_packet_processor_sic.cc
+    uwb_qa_uwb_uhd_sc16_pipeline.cc
+    uwb_qa_sc16_pipeline_runner_exit
+    uwb_qa_uwb_sic_unified.cc
+    uwb_qa_uwb_discrete_cir_estimator.cc
+    uwb_qa_uwb_discrete_cir_reconstruct.cc
+    uwb_qa_uwb_fullpacket_sic_core.cc
+    uwb_qa_uwb_preamble_sic_core.cc
+    uwb_qa_uwb_demod_core.cc
+    uwb_qa_uwb_hrp_mod_core.cc
+    uwb_qa_uwb_rx_fused_cmf.cc
+    uwb_qa_uwb_rx_fused_phr.cc
+    uwb_qa_uwb_rx_phase_sfo.cc
+    uwb_qa_uwb_cfo_derotate.cc
+    uwb_qa_uwb_target_lock_core.cc
+    uwb_qa_uwb_timed_rx_plan.cc
+    uwb_qa_uwb_autocorr_gate.cc
+    uwb_qa_uwb_rational_resampler_core.cc
+    uwb_qa_uwb_resampler_transposed.cc
+)
+    if(TEST ${_t})
+        set_tests_properties(${_t} PROPERTIES LABELS "core;rx_sic")
+    endif()
+endforeach()
+
+foreach(_t IN ITEMS
+    uwb_qa_uwb_twr_config.cc
+    uwb_qa_uwb_twr_config_parity.cc
+    uwb_qa_uwb_twr_frame.cc
+    uwb_qa_uwb_twr_math.cc
+    uwb_qa_uwb_twr_native_phy.cc
+    uwb_qa_uwb_twr_phy_impairment.cc
+    uwb_qa_uwb_twr_tof_input.cc
+    uwb_qa_uwb_twr_protocol_time.cc
+    uwb_qa_uwb_twr_fake_link.cc
+    uwb_qa_uwb_twr_core.cc
+    uwb_qa_uwb_twr_m1b_e2e.cc
+    uwb_qa_twr_config_py
+    uwb_qa_twr_fake_demo_py
+    uwb_qa_twr_m1b_verify_py
+    uwb_qa_twr_m2a_native_phy_verify_py
+)
+    if(TEST ${_t})
+        set_tests_properties(${_t} PROPERTIES LABELS "twr")
+    endif()
+endforeach()
+
+foreach(_t IN ITEMS
+    uwb_qa_uwb_radar_cir_core.cc
+    uwb_qa_uwb_radar_cir_estimator.cc
+    uwb_qa_uwb_radar_sfd_core.cc
+    uwb_qa_uwb_radar_timing_core.cc
+)
+    if(TEST ${_t})
+        set_tests_properties(${_t} PROPERTIES LABELS "sensing")
+    endif()
+endforeach()
+
+foreach(_t IN ITEMS
+    uwb_qa_uwb_rational_resampler_core_65_32.cc
+    uwb_qa_uwb_rational_resampler_m2a.cc
+    uwb_qa_uwb_resampler_avx512.cc
+    uwb_qa_uwb_resampler_burst_opt.cc
+    uwb_qa_uwb_fixed_tone_cancel_core.cc
+    uwb_qa_uwb_fixed_tone_cancel_source.cc
+    uwb_qa_uwb_tone_canceller.cc
+)
+    if(TEST ${_t})
+        set_tests_properties(${_t} PROPERTIES LABELS "dsp_extra")
+    endif()
+endforeach()
+
+foreach(_t IN ITEMS
+    uwb_qa_uwb_fullpacket_cfo_diag.cc
+    uwb_qa_uwb_fullpacket_fast_rx.cc
+    uwb_qa_uwb_fullpacket_payload_cache.cc
+    uwb_qa_fullpacket_segment_diag
+    uwb_qa_uwb_demod_sic_avx512.cc
+)
+    if(TEST ${_t})
+        set_tests_properties(${_t} PROPERTIES LABELS "legacy_diag")
+    endif()
+endforeach()
+
+foreach(_t IN ITEMS
+    uwb_qa_uwb_defaults.cc
+    uwb_qa_uwb_refactor_contracts.cc
+    uwb_qa_uwb_log.cc
+    uwb_qa_hrp_standard_rev.cc
+    uwb_qa_openuwb_runtime_config.cc
+    uwb_qa_uwb_scheduled_dump_io.cc
+    uwb_benchmark_hrp_mod
+    uwb_qa_native_install_consumer
+)
+    if(TEST ${_t})
+        set_tests_properties(${_t} PROPERTIES LABELS "infra")
+    endif()
+endforeach()
+
+if(TEST uwb_qa_uwb_uhd_backend_device.cc)
+    set_tests_properties(uwb_qa_uwb_uhd_backend_device.cc PROPERTIES LABELS "radio_rx")
 endif()

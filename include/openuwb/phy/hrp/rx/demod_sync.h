@@ -374,6 +374,88 @@ inline FoldAcquireResult fold_acquire(const std::complex<float>* rx,
     return res;
 }
 
+// Interval local probe: coherently fold `fold_symbols` SYNC periods starting at
+// `probe`, then correlate over ONE symbol period and report the best absolute
+// SYMBOL start (`probe + peak.lag`).
+//
+// Unlike fold_acquire(), which collapses the WHOLE search window into one
+// period and is therefore limited to +/-P/2 of the seed, this keeps the fold
+// local.  A probe can sit anywhere inside a long preamble: the P-spaced comb
+// still lands on P-spaced SYNC copies, so the folded vector carries K aligned
+// symbols regardless of the probe's phase modulo P.  With K=4 that is +6 dB
+// of coherent gain (K=2 still gives +3 dB with more CFO margin), and one probe
+// costs one P-lag correlation instead of a stride-14 scan of the entire blind
+// margin.
+//
+// Normalization is the same |corr|^2 / (power * Et) as the single-symbol path.
+// The folded signal and its window power are measured on the SAME buffer, so no
+// extra K factor is applied: dividing by K would wrongly cap a perfect K-fold
+// at 1/K instead of 1.  (fold_acquire uses the identical convention.)
+inline FoldAcquireResult fold_probe_acquire(
+    const std::complex<float>* rx,
+    size_t n,
+    int64_t probe,
+    const std::complex<float>* tmpl,
+    size_t L,
+    float Et,
+    const rxopt::RealSyncTemplate& real_tmpl,
+    size_t fold_symbols,
+    float threshold,
+    const rxopt::SparseCirTemplate* sparse_tmpl = nullptr,
+    std::vector<std::complex<float>>* fold_buf = nullptr,
+    const rxopt::ShapedSparseTemplate* shaped_tmpl = nullptr)
+{
+    FoldAcquireResult res;
+    const int64_t P = static_cast<int64_t>(kQm35SamplesPerSymbol);
+    const int64_t Li = static_cast<int64_t>(L);
+    const bool have_sparse = sparse_tmpl && sparse_tmpl->code_energy > 0.0f;
+    const bool have_shaped = shaped_tmpl && shaped_tmpl->valid;
+    if (!rx || L == 0 || n < L || fold_symbols == 0 || probe < 0 ||
+        (!tmpl && !have_sparse && !have_shaped))
+        return res;
+    if (fold_symbols > static_cast<size_t>(P))
+        fold_symbols = static_cast<size_t>(P);
+    const int64_t K = static_cast<int64_t>(fold_symbols);
+    // Buffer covers one period of possible start phases plus the template.
+    const int64_t fold_len = P + Li - 1;
+    // The deepest sample is probe + (K-1)*P + fold_len - 1.
+    if (probe + K * P + Li - 1 > static_cast<int64_t>(n))
+        return res;
+
+    std::vector<std::complex<float>> local_folded;
+    std::vector<std::complex<float>>& folded =
+        fold_buf ? *fold_buf : local_folded;
+    const size_t flen = static_cast<size_t>(fold_len);
+    if (folded.size() < flen)
+        folded.resize(flen);
+    std::fill(folded.begin(), folded.begin() + flen,
+              std::complex<float>(0.0f, 0.0f));
+    for (int64_t k = 0; k < K; ++k)
+        fold_accumulate(folded.data(), rx + probe + k * P, flen, 0.0);
+
+    const float* real_taps = real_tmpl.is_real && real_tmpl.length == L
+        ? real_tmpl.taps_dup.data() : nullptr;
+    const rxopt::SyncMatchedFilter filter(tmpl, L, real_taps, sparse_tmpl,
+                                          true, shaped_tmpl);
+    if (shaped_tmpl && shaped_tmpl->valid)
+        Et = shaped_tmpl->energy;
+    else if (sparse_tmpl && sparse_tmpl->code_energy > 0.0f)
+        Et = sparse_tmpl->code_energy;
+    const auto peak = rxopt::scan_normalized_sync(
+        filter, folded.data(), static_cast<size_t>(P),
+        window_power_8acc(folded.data(), L), Et);
+
+    res.symbols_folded = fold_symbols;
+    res.window_lags = static_cast<size_t>(P);
+    if (!(peak.metric >= threshold))
+        return res;
+    res.ok = true;
+    res.start = probe + static_cast<int64_t>(peak.lag);
+    res.metric = peak.metric;
+    res.corr = peak.corr;
+    return res;
+}
+
 // 16-SYMBOL super-anchor period/origin fit for the fold path.
 //
 // The folded metric resolves the packet origin to ~1 sample, but its period

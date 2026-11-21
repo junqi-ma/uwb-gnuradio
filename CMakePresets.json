@@ -10,7 +10,7 @@
       "name": "native-avx2",
       "displayName": "Native release (AVX2/FMA)",
       "description": "Release build of the native UHD/C++ chain with the AVX2/FMA DSP kernels and the UHD backend auto-detected.",
-      "generator": "Unix Makefiles",
+      "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/${presetName}",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
@@ -23,7 +23,7 @@
       "name": "native-avx512",
       "displayName": "Native release (AVX-512)",
       "description": "Release build enabling the AVX-512 DSP kernel translation unit on an AVX2/FMA baseline, with the UHD backend auto-detected.",
-      "generator": "Unix Makefiles",
+      "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/${presetName}",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
@@ -36,7 +36,7 @@
       "name": "scalar-debug",
       "displayName": "Scalar debug",
       "description": "Debug build with the self-written SIMD kernels disabled, for reference/step-through QA.",
-      "generator": "Unix Makefiles",
+      "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/${presetName}",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
@@ -49,13 +49,26 @@
       "name": "no-uhd",
       "displayName": "Native release (no UHD)",
       "description": "Release build with the UHD device backends disabled; the replay/library/QA chain still builds and tests.",
-      "generator": "Unix Makefiles",
+      "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/${presetName}",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "UWB_SIMD": "AUTO",
         "ENABLE_UHD_BACKEND": "OFF",
         "UWB_BUILD_EXPERIMENTS": "ON"
+      }
+    },
+    {
+      "name": "dev-avx2",
+      "displayName": "Daily dev (Ninja, AVX2, experiments off)",
+      "description": "Ninja + Release + AVX2/FMA, UHD backend auto-detected, experiments OFF: the everyday build+test loop.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "UWB_SIMD": "AVX2",
+        "ENABLE_UHD_BACKEND": "AUTO",
+        "UWB_BUILD_EXPERIMENTS": "OFF"
       }
     }
   ],
@@ -75,6 +88,10 @@
     {
       "name": "no-uhd",
       "configurePreset": "no-uhd"
+    },
+    {
+      "name": "dev-avx2",
+      "configurePreset": "dev-avx2"
     }
   ],
   "testPresets": [
@@ -102,6 +119,13 @@
     {
       "name": "no-uhd",
       "configurePreset": "no-uhd",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "dev-avx2",
+      "configurePreset": "dev-avx2",
       "output": {
         "outputOnFailure": true
       }

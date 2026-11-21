@@ -1,5 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include <openuwb/sic/fullpacket_sic_core.h>
+#include <openuwb/phy/hrp/common/profile.h>
+#include <openuwb/sensing/radar_meta_core.h>
 #include <array>
 #include <volk/volk.h>
 #include <chrono>
@@ -124,9 +126,17 @@ FullPacketResult fullpacket_cancel(
        s.phase0.size()<s.capacity || s.phase1.size()<s.capacity)
         return fail("scratch_capacity");
     if(!fcs_pass) return fail("fcs_failed");
-    if(profile.code_index!=10 || profile.sync_repetitions!=64 || profile.insert_sts ||
-       !profile.sfd_mode || std::strcmp(profile.sfd_mode,"4z2") ||
-       profile.ranging || profile.pulse.shape!=mod::PulseShape::Legacy)
+    if(profile.insert_sts || profile.ranging || !profile.sfd_mode ||
+       !radar_meta::code_index_supported(profile.code_index) ||
+       !radar_meta::sync_reps_supported(profile.sync_repetitions) ||
+       demod::GetSfdSequence(profile.sfd_mode).empty() ||
+       profile.pulse.shape!=mod::PulseShape::Legacy)
+        return fail("unsupported_profile");
+    // Direct legacy callers keep the frozen code10/64/4z2 contract; unified
+    // SIC opts into its own validated public profile.
+    if(!s.allow_configured_profile &&
+       (profile.code_index!=10 || profile.sync_repetitions!=64 ||
+        std::strcmp(profile.sfd_mode,"4z2")))
         return fail("unsupported_profile");
     if(phr.size()!=19 || psdu.size()<2 || psdu.size()>127)
         return fail("invalid_frame_length");
@@ -137,7 +147,7 @@ FullPacketResult fullpacket_cancel(
         if(phr[i]>1 || phr[i]!=uint8_t(s.expected_phr[i])) return fail("unsupported_phr");
     if(!m.valid || m.state!=SicState::Committed || !m.n_paths || m.n_paths>kSicMaxPaths ||
        m.sample_rate!=998.4e6 || m.samples_per_symbol!=1016 ||
-       m.nominal_sync_reps!=64 || !std::isfinite(m.cfo_hz) ||
+       m.nominal_sync_reps!=profile.sync_repetitions || !std::isfinite(m.cfo_hz) ||
        m.phase_reference_sample<0 || m.phase_reference_sample>int64_t(n) ||
        !reference_sync || sync_n!=1016 || roi_lo<0 || roi_hi<=roi_lo || roi_hi>int64_t(n))
         return fail("invalid_model_or_roi");

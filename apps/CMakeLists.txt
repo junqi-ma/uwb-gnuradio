@@ -106,11 +106,11 @@ if(UWB_BUILD_EXPERIMENTS)
     if(Python3_Interpreter_FOUND)
         add_test(NAME uwb_qa_fullpacket_compare_py
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/sic/qa_fullpacket_compare.py)
-        set_tests_properties(uwb_qa_fullpacket_compare_py PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+        set_tests_properties(uwb_qa_fullpacket_compare_py PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE LABELS "legacy_diag")
 
         add_test(NAME uwb_qa_discrete_cir_compare_py
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/sic/verify_discrete_cir_compare.py --self-test)
-        set_tests_properties(uwb_qa_discrete_cir_compare_py PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+        set_tests_properties(uwb_qa_discrete_cir_compare_py PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE LABELS "legacy_diag")
     endif()
 else()
     message(STATUS "UWB_BUILD_EXPERIMENTS=OFF: skipping historical benchmark/"
@@ -191,7 +191,7 @@ if(Python3_Interpreter_FOUND)
     add_test(NAME uwb_qa_dw3000_live_console
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/rx/qa_live_dw3000_console.py
                 $<TARGET_FILE:uwb_dw3000_live>)
-    set_tests_properties(uwb_qa_dw3000_live_console PROPERTIES TIMEOUT 90)
+    set_tests_properties(uwb_qa_dw3000_live_console PROPERTIES TIMEOUT 90 LABELS "core;rx_sic")
 endif()
 
 ########################################################################

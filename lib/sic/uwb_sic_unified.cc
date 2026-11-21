@@ -200,10 +200,12 @@ DiscreteCirConfig SicUnifiedConfig::to_discrete_cir_config() const
 {
     DiscreteCirConfig c;
     c.ipatov_correlation = (backend == SicEstimatorBackend::Ipatov);
+    c.allow_configured_profile = true;
     c.sparse_pulse_reconstruct = (backend == SicEstimatorBackend::Ipatov && sparse_pulse_reconstruct);
     c.comm_code = comm_code;
     c.sync_reps = sync_reps;
     c.samples_per_symbol = samples_per_symbol;
+    c.sfd_mode = sfd_mode;
     c.sample_rate = sample_rate;
     c.fit_reps = fit_reps;
     c.roi_lo = roi_lo;
@@ -397,6 +399,10 @@ bool prepare_sic_unified(
     }
 
     scratch.reserve(cfg.max_window_samples, cfg.max_packet_samples);
+    // The unified layer validates the caller's public profile; downstream
+    // full-packet transactions may therefore use the configured code/SYNC/SFD
+    // instead of the historical code10/64/4z2 gate.
+    scratch.fullpacket.allow_configured_profile = true;
 
     if (cfg.backend == SicEstimatorBackend::PathFractional) {
         SicConfig sc = cfg.to_sic_config();
@@ -571,7 +577,7 @@ bool reconstruct_and_subtract_unified(
     SicUnifiedResult& result)
 {
     auto fail_closed = [&](const char* reason) {
-        if (out && y && n > 0 && out != y) {
+        if (out && y && n > 0 && out != y && result.copy_out_on_bypass) {
             std::copy(y, y + n, out);
         }
         if (i_hat && i_hat != y && i_hat != out) {
@@ -877,7 +883,8 @@ bool sic_process_unified(
         result.reason = (!y || !result.out || n == 0 || !scratch.prepared)
                             ? "invalid_buffers_or_scratch"
                             : "config_or_template_mismatch";
-        if (result.out && y && n > 0 && result.out != y) {
+        if (result.copy_out_on_bypass && result.out && y && n > 0 &&
+            result.out != y) {
             std::copy(y, y + n, result.out);
         }
         if (result.i_hat) {
@@ -887,7 +894,7 @@ bool sic_process_unified(
     }
 
     auto fail_closed_before_recon = [&](const char* reason) {
-        if (result.out != y) {
+        if (result.copy_out_on_bypass && result.out != y) {
             std::copy(y, y + n, result.out);
         }
         if (result.i_hat) {
@@ -922,6 +929,13 @@ bool sic_process_unified(
     demod_prof.rx_softchip_on_demand = cfg.rx_softchip_on_demand;
     demod_prof.rx_fused_payload_cmf = cfg.rx_fused_payload_cmf;
     demod_prof.rx_fused_phr_cmf = cfg.rx_fused_phr_cmf;
+    demod_prof.rx_timing_sparse = cfg.rx_timing_sparse;
+    demod_prof.rx_timing_shaped_sparse = cfg.rx_timing_shaped_sparse;
+    demod_prof.cfo_refit_mode = cfg.cfo_refit_mode;
+    demod_prof.rx_wide_interval_probe = cfg.rx_wide_interval_probe;
+    demod_prof.rx_wide_probe_step_symbols = cfg.rx_wide_probe_step_symbols;
+    demod_prof.rx_wide_probe_fold_symbols = cfg.rx_wide_probe_fold_symbols;
+    demod_prof.rx_wide_probe_fallback = cfg.rx_wide_probe_fallback;
 
     SicUnifiedChannel channel;
 
@@ -938,6 +952,15 @@ bool sic_process_unified(
 
         const bool preamble_only = (cfg.policy == SicPolicy::PreambleOnly);
         demod_prof.rx_stop_after_sfd = preamble_only;
+        // A blind / whole-window SIC search can acquire a later SYNC of a long
+        // interferer preamble (the stride-14 coarse scan is intentionally
+        // cheap).  The default 40-symbol backtrack cannot reach the true first
+        // SYNC of a 128/256-SYNC DW1000-style preamble, which would then place
+        // the SFD 128 symbols too late and fail detection.  The SIC knows the
+        // configured repetition count, so allow the walk-back to cover it.
+        demod_prof.timing_max_backtrack_symbols = std::max(
+            demod_prof.timing_max_backtrack_symbols,
+            static_cast<size_t>(cfg.sync_reps));
         const size_t demod_len = preamble_only ? static_cast<size_t>(obs) : n;
 
         const auto t_rx = Clock::now();

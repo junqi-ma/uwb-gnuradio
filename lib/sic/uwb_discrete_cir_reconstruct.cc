@@ -930,10 +930,19 @@ DiscreteCirResult fullpacket_cancel_discrete(
         return fail("invalid_template");
     if (!fcs_pass)
         return fail("fcs_failed");
-    if (profile.code_index != 10 || profile.sync_repetitions != 64 ||
-        profile.insert_sts || !profile.sfd_mode ||
-        std::strcmp(profile.sfd_mode, "4z2") != 0 || profile.ranging ||
+    if (profile.insert_sts || profile.ranging || !profile.sfd_mode ||
+        !radar_meta::code_index_supported(profile.code_index) ||
+        !radar_meta::sync_reps_supported(profile.sync_repetitions) ||
+        demod::GetSfdSequence(profile.sfd_mode).empty() ||
         profile.pulse.shape != mod::PulseShape::Legacy)
+        return fail("unsupported_profile");
+    // Historical contract for direct callers: only code10 / 64 SYNC / 4z2 is
+    // exercised by the frozen full-packet core.  Unified SIC opts in through
+    // prepare_discrete_cir(allow_configured_profile) and may use its own
+    // validated public profile.
+    if (!scratch.allow_configured_profile &&
+        (profile.code_index != 10 || profile.sync_repetitions != 64 ||
+         std::strcmp(profile.sfd_mode, "4z2") != 0))
         return fail("unsupported_profile");
     if (phr_bits.size() != 19 || wire_psdu.size() < 2 ||
         wire_psdu.size() > radar_meta::kMaxPsduBytes)

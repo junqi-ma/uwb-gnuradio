@@ -614,6 +614,84 @@ inline bool stage_timing(const std::complex<float>* rx,
             }
         }
 
+        // ---- Wide-window interval probe (K-symbol local fold) --------------
+        // Reached only for AcquireLegacy when the blind search spans many
+        // SYMBOL periods.  Each probe coherently folds K SYNC periods
+        // (+3 dB at K=2, +6 dB at K=4) and correlates over one period.
+        // The coarse probe grid only skips *start* positions, never a whole
+        // preamble: a probe
+        // anywhere inside the preamble still sees the same P-periodic code
+        // (its peak lag resolves back to a true symbol boundary), so the
+        // normal backtrack / SYNC-train / SFD path recovers the origin.
+        //
+        // On an all-miss, the historical stride-14 coarse scan, whole-SYNC
+        // grid and fold rescue are skipped so an SIC candidate that contains
+        // no target preamble fails fast to L0_Bypass instead of paying the
+        // full wide acquisition.  rx_wide_probe_fallback restores the old
+        // behaviour for callers that prefer recall over latency.
+        if (!seed_acquired && profile.rx_wide_interval_probe) {
+            const int64_t P = static_cast<int64_t>(kQm35SamplesPerSymbol);
+            if (P > 0 && j_hi - j_lo >= 16 * P) {
+                const size_t fold_k = std::max<size_t>(
+                    2, std::min<size_t>(profile.rx_wide_probe_fold_symbols, 4));
+                size_t step_symbols = profile.rx_wide_probe_step_symbols
+                    ? profile.rx_wide_probe_step_symbols : 42;
+                const size_t m_cap = std::max<size_t>(
+                    8, profile.preamble_repetitions / 3);
+                step_symbols = std::min(step_symbols, m_cap);
+                if (profile.preamble_repetitions > fold_k)
+                    step_symbols = std::min(
+                        step_symbols, profile.preamble_repetitions - fold_k);
+                else
+                    step_symbols = 0;
+                // The probe may land up to `step_symbols` into the preamble;
+                // the backtrack must be able to walk that far back.
+                if (profile.timing_max_backtrack_symbols > 0)
+                    step_symbols = std::min(step_symbols,
+                                            profile.timing_max_backtrack_symbols);
+                const int64_t last_probe =
+                    std::min(j_hi,
+                             static_cast<int64_t>(n) -
+                                 static_cast<int64_t>(fold_k) * P -
+                                 static_cast<int64_t>(L) + 1);
+                if (step_symbols > 0 && last_probe >= j_lo) {
+                    const int64_t step =
+                        static_cast<int64_t>(step_symbols) * P;
+                    int64_t best_pos = -1;
+                    float best_met = -1.0f;
+                    std::complex<float> best_corr(0.0f, 0.0f);
+                    int64_t last_scanned = -1;
+                    auto probe_one = [&](int64_t p) {
+                        if (p == last_scanned)
+                            return;
+                        last_scanned = p;
+                        const auto r = detail::fold_probe_acquire(
+                            rx, n, p, scratch.work.data(), L, Et,
+                            scratch.real_sync_template, fold_k, thr,
+                            sparse_tmpl, &scratch.fold_buf, shaped_tmpl);
+                        if (r.ok && r.start >= j_lo && r.start <= j_hi &&
+                            r.metric > best_met) {
+                            best_met = r.metric;
+                            best_pos = r.start;
+                            best_corr = r.corr;
+                        }
+                    };
+                    for (int64_t p = j_lo; p <= last_probe; p += step)
+                        probe_one(p);
+                    probe_one(last_probe);
+                    if (best_pos >= 0) {
+                        first_start = best_pos;
+                        first_metric = best_met;
+                        first_corr = best_corr;
+                        seed_acquired = true;
+                    } else if (!profile.rx_wide_probe_fallback) {
+                        finish_timing_profile();
+                        return false;
+                    }
+                }
+            }
+        }
+
         // ---- Phase probe + symbol-grid acquisition (TM-1) ------------------
         // The preamble is N verbatim copies of one P=1016-sample SYNC symbol.
         // A window of P consecutive lags therefore contains one code-phase

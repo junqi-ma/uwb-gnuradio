@@ -106,8 +106,9 @@ add_test(NAME uwb_uhd_burst_dry_run
         --max-fragment-size 65536
         --t0-ticks 36864000
         --schedule-index 0)
+set_tests_properties(uwb_uhd_burst_dry_run PROPERTIES LABELS "radio_tx")
 
 add_test(NAME uwb_uhd_burst_dry_run_rejects_invalid_config
     COMMAND uwb_uhd_burst_dry_run --pri-num 0)
 set_tests_properties(uwb_uhd_burst_dry_run_rejects_invalid_config
-    PROPERTIES WILL_FAIL TRUE)
+    PROPERTIES WILL_FAIL TRUE LABELS "radio_tx")

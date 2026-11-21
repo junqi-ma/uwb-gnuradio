@@ -66,6 +66,10 @@ struct DiscreteCirConfig {
     // Ipatov forward correlation / code energy, no projection or LS.
     // The resulting response includes TX shaping; apply uses unit impulses.
     bool ipatov_correlation = false;
+    // Opt-in for the full-packet transaction to accept this config's public
+    // code/SYNC/SFD profile instead of the historical code10/64/4z2 gate.
+    // The unified SIC sets this; direct legacy callers keep the strict gate.
+    bool allow_configured_profile = false;
     // Experimental sparse-pulse reconstruction.  Valid only with
     // ipatov_correlation: the decoded packet is represented as non-zero
     // positions/signs and the frozen CIR is added at each event with the
@@ -76,6 +80,7 @@ struct DiscreteCirConfig {
     size_t comm_code = 10;
     size_t sync_reps = 64;
     size_t samples_per_symbol = 1016;
+    const char* sfd_mode = "4z2";
     double sample_rate = 998.4e6;
     size_t fit_reps = 8;             // training symbols, strictly visible prefix
     int64_t roi_lo = 0, roi_hi = 0;  // public coarse candidate search ROI
@@ -144,6 +149,10 @@ struct DiscreteCirActiveFactor {
 
 struct DiscreteCirScratch {
     bool prepared = false;
+    // Set by prepare_discrete_cir() from the config.  The full-packet
+    // transaction keeps the historical code10/64/4z2 gate unless the caller
+    // explicitly opted into its configured public profile (unified SIC does).
+    bool allow_configured_profile = false;
     uint64_t template_hash = 0;
     uint64_t config_hash = 0;
     const void* orig_sync = nullptr;

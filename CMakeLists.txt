@@ -1,7 +1,7 @@
 # Copyright 2011-2020 Free Software Foundation, Inc.
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-cmake_minimum_required(VERSION 3.8)
+cmake_minimum_required(VERSION 3.20)
 # Phase 3: the repository root is the project.  `OpenUWB` is the package name
 # consumers find; targets keep the `openuwb_` prefix (see lib/CMakeLists.txt).
 project(OpenUWB LANGUAGES CXX)
@@ -41,6 +41,24 @@ set(CMAKE_BUILD_TYPE ${CMAKE_BUILD_TYPE} CACHE STRING "")
 
 option(UWB_BUILD_EXPERIMENTS
     "Build historical benchmark/diagnostic experiment apps" ON)
+
+# Stage 1 (2026-11-21): build-base upgrades.  Generator selection moves to
+# CMakePresets.json (Ninja); the options below cover the two general lifts:
+# precompiled headers for the QA targets and ccache acceleration.
+option(UWB_ENABLE_PCH
+    "Enable precompiled headers for the QA targets" ON)
+option(UWB_USE_CCACHE
+    "Use ccache as the C++ compiler launcher when available" ON)
+
+if(UWB_USE_CCACHE)
+    find_program(CCACHE_PROGRAM ccache)
+    if(CCACHE_PROGRAM)
+        set(CMAKE_CXX_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
+        message(STATUS "UWB: using ccache (${CCACHE_PROGRAM}) as compiler launcher")
+    else()
+        message(STATUS "UWB: ccache not found; compiling without it")
+    endif()
+endif()
 
 # Make sure our local CMake Modules path comes first
 list(INSERT CMAKE_MODULE_PATH 0 ${CMAKE_CURRENT_SOURCE_DIR}/cmake/Modules)

@@ -39,9 +39,19 @@ namespace openuwb {
 namespace live {
 
 struct PacketCost {
-    double queue_us=0, resample_us=0, demod_us=0, retry_us=0, compute_us=0, cpu_us=0;
+    double queue_us=0, resample_us=0, sic_us=0, demod_us=0, retry_us=0, compute_us=0, cpu_us=0;
+    bool sic_executed=false;
+    int sic_level=0; // 0=L0, 1=L1, 2=L2
     size_t worker=0;
 };
+
+inline const char* sic_level_name(int level) {
+    switch (level) {
+    case 1: return "L1";
+    case 2: return "L2";
+    default: return "L0";
+    }
+}
 
 inline bool crc_ok(const std::vector<uint8_t>& b) {
     return live::verify_packet_crc(b);
@@ -75,11 +85,17 @@ struct ConsoleReporter {
     // Per-batch timing, so `--summary N` alone is enough to watch the pipeline:
     // at a 1 ms packet period N=500 is one report per 0.5 s.
     std::vector<float> batch_compute, batch_resample, batch_demod;
+    // SIC telemetry is only maintained/printed when `--sic != off`, so the
+    // historical console contract is byte-identical for the default run.
+    bool sic_enabled = false;
+    uint64_t sic_executed = 0, sic_l0 = 0, sic_l1 = 0, sic_l2 = 0;
+    double sic_total_us = 0.0, sic_max_us = 0.0;
+    std::vector<float> batch_sic;
     bool done = false;
     std::thread thread;
     bool print_packets = true;
-    explicit ConsoleReporter(size_t n, bool packets = true)
-        : interval(n), print_packets(packets)
+    explicit ConsoleReporter(size_t n, bool packets = true, bool sic = false)
+        : interval(n), sic_enabled(sic), print_packets(packets)
     { thread = std::thread([this]{ loop(); }); }
     ~ConsoleReporter() { finish(); }
     void line_locked(std::string s) {
@@ -116,9 +132,15 @@ struct ConsoleReporter {
           << " compute_mean=" << cm << " compute_p95=" << cp
           << " resample_mean=" << rm << " resample_p95=" << rp
           << " demod_mean=" << dm << " demod_p95=" << dp;
+        if (sic_enabled) {
+            float sm, sp;
+            stat(batch_sic, sm, sp);
+            s << " sic_mean=" << sm << " sic_p95=" << sp;
+        }
         for (const auto& v : batch_fail) s << ' ' << v.first << '=' << v.second;
         line_locked(s.str()); batch_pass = 0; batch_retries = 0; batch_fail.clear();
         batch_compute.clear(); batch_resample.clear(); batch_demod.clear();
+        batch_sic.clear();
     }
     void result(uint64_t id, int64_t seed, const std::string& state,
                 const demod::DemodResult* r = nullptr, double latency_ms = 0,
@@ -259,6 +281,20 @@ struct ConsoleReporter {
                     << " resample_us=" << cost->resample_us << " demod_us=" << cost->demod_us
                     << " retry_us=" << cost->retry_us << " compute_us=" << cost->compute_us
                     << " cpu_us=" << cost->cpu_us;
+        if (cost && sic_enabled) {
+            s << " sic_us=" << cost->sic_us
+              << " sic_lvl=" << sic_level_name(cost->sic_level)
+              << " sic_exec=" << cost->sic_executed;
+            if (cost->sic_executed) {
+                ++sic_executed;
+                if (cost->sic_level == 1) ++sic_l1;
+                else if (cost->sic_level == 2) ++sic_l2;
+                else ++sic_l0;
+                sic_total_us += cost->sic_us;
+                sic_max_us = std::max(sic_max_us, cost->sic_us);
+                batch_sic.push_back(float(cost->sic_us));
+            }
+        }
         if (cost) {
             batch_compute.push_back(float(cost->compute_us));
             batch_resample.push_back(float(cost->resample_us));
@@ -281,6 +317,16 @@ struct ConsoleReporter {
             std::lock_guard<std::mutex> l(mutex);
             if (done) return;
             if (count % interval) batch_locked("SUMMARY_PARTIAL", count % interval);
+            if (sic_enabled) {
+                std::ostringstream ss;
+                ss << std::fixed << std::setprecision(1)
+                   << "SIC_STATS executed=" << sic_executed
+                   << " l0=" << sic_l0 << " l1=" << sic_l1 << " l2=" << sic_l2
+                   << " mean_us="
+                   << (sic_executed ? sic_total_us / double(sic_executed) : 0.0)
+                   << " max_us=" << sic_max_us;
+                lines.push_back(ss.str());
+            }
             std::ostringstream s;
             s << "FINAL completed=" << count << " fcs=" << pass << '/' << count
               << " raw_samples=" << received << " raw_drop_samples=" << raw_drops

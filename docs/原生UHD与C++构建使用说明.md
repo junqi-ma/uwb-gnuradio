@@ -116,6 +116,11 @@ build/native-avx2/apps/openuwb_rx \
 | `--lock-residual-limit` | `0`（自动取 `max(512, locked_roi_native)`）；显式指定网格残差异常门限（原生样点） |
 | `--period-ms` | `5`；可按发送周期改为其他值 |
 | `--mode timed` | 仅 replay；无 replay 返回 2，单音消除关闭 |
+| `--sic` | `off`；`preamble/full/auto` 在目标 demod 前重建并减去干扰源。`off` 不分配 SIC scratch/残差缓冲，既有输出不变 |
+| `--sic-backend` | `ipatov`；可选 `discrete/path` |
+| `--sic-code` | `11`；干扰源 HRP code（9..12） |
+| `--sic-reps` | `128`；干扰源 SYNC 数；Ipatov 仅 64/128/256 |
+| `--sic-sfd` | `dw-8`（映射 `decawave`）；可选 `4z1/4z2/4z3/4z4/ieee` |
 
 `--autocorr-when-locked` 的 `START` 输出解析后的
 `autocorr_when_locked=scan|suspend`；`LOCK_STATS` 末尾新增
@@ -125,6 +130,19 @@ build/native-avx2/apps/openuwb_rx \
 这两个参数只影响 continuous 模式；`--mode timed` 本就不跑自相关，门控
 计数恒为 0。`--autocorr-resume-lookback -1` 是默认哨兵，等同
 `acq_span+window`；除 `-1` 外的负值会被拒绝。
+
+`--sic != off` 时 `START` 追加 `sic/sic_backend/sic_code/sic_reps/sic_sfd`，
+`PACKET` 追加 `sic_us/sic_lvl/sic_exec`，`SUMMARY` 追加
+`sic_mean/sic_p95`，`FINAL` 前输出独立 `SIC_STATS`。SIC 失败或落
+`L0_Bypass` 时原样使用未修改的重采样窗口（fail-open）。SIC 全窗盲搜的
+定时核跟随 `--timing-sparse/--timing-shaped/--cfo-refit`（与 acq 一致；
+默认 `--timing-sparse on`），并在宽窗上启用间隔局部探测 + K=4 相干折叠
+（`rx_wide_interval_probe`，M=42 SYMBOL，仍受 `sync_reps/3`/回溯上限
+约束；全 miss 快速落 `L0_Bypass`）。live 路径还通过
+`copy_out_on_bypass=false` + `i_hat=nullptr` 跳过 L0 整窗拷贝/清零。
+25 ms 回放夹具上 `sic_mean` 从约 10.6 ms 降到约 **0.124 ms**
+（K=4/M=42、L0 免拷贝；旧 L0 路径约 0.70 ms），单 worker
+`dropped=0`。当前结果仅为文件回放，尚未实时化，未上板。
 当前默认仍为 `scan`；回放证据见
 [锁定后暂停自相关_实现与回放验证_2026-11-20](performance/锁定后暂停自相关_实现与回放验证_2026-11-20.md)，
 未上板。
