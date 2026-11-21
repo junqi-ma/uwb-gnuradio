@@ -128,225 +128,66 @@ inline void build_cfo_table(std::array<std::complex<float>, kCfoDerotateBlock>& 
 // cross-lane combine), therefore the AVX2 and the scalar form compute each
 // output with the same sequence of float operations and an AVX-512 build -- which
 // compiles this header with the same -mavx2 baseline -- is bit-identical.
-inline void derotate_block_anchored(std::complex<float>* dst,
-                                    const std::complex<float>* src,
-                                    const std::complex<float>* table,
-                                    std::size_t len,
-                                    float ar,
-                                    float ai)
-{
-    std::size_t k = 0;
-#if UWB_RX_CFO_HAVE_AVX2
-    // Complex multiply, interleaved [re, im, re, im, ...] lanes:
-    //   permute(x, 0xB1) swaps re/im, addsub(a, b) = (a_even - b_even,
-    //   a_odd + b_odd), which yields re = xr*yr - xi*yi, im = xi*yr + xr*yi.
-    const __m256 are = _mm256_set1_ps(ar);
-    const __m256 aim = _mm256_set1_ps(ai);
-    for (; k + 4 <= len; k += 4) {
-        const __m256 t = _mm256_loadu_ps(reinterpret_cast<const float*>(table + k));
-        const __m256 ts = _mm256_permute_ps(t, 0xB1);
-        const __m256 a =
-            _mm256_addsub_ps(_mm256_mul_ps(t, are), _mm256_mul_ps(ts, aim));
-        const __m256 s = _mm256_loadu_ps(reinterpret_cast<const float*>(src + k));
-        const __m256 ss = _mm256_permute_ps(s, 0xB1);
-        const __m256 r =
-            _mm256_addsub_ps(_mm256_mul_ps(s, _mm256_moveldup_ps(a)),
-                             _mm256_mul_ps(ss, _mm256_movehdup_ps(a)));
-        _mm256_storeu_ps(reinterpret_cast<float*>(dst + k), r);
-    }
-#endif
-    for (; k < len; ++k) {
-        const std::complex<float> t = table[k];
-        const float tr = t.real();
-        const float ti = t.imag();
-        const float yr = tr * ar - ti * ai;
-        const float yi = ti * ar + tr * ai;
-        const float sr = src[k].real();
-        const float si = src[k].imag();
-        dst[k] = std::complex<float>(sr * yr - si * yi, si * yr + sr * yi);
-    }
-}
+void derotate_block_anchored(std::complex<float>* dst,
+                             const std::complex<float>* src,
+                             const std::complex<float>* table,
+                             std::size_t len,
+                             float ar,
+                             float ai);
 
 } // namespace detail
 
 // dst[i] = src[i] * exp(-j*w*i) for absolute i in [lo, hi), w in rad/sample.
 // Phase origin is strictly sample 0 (not lo). dst may not alias src.
-inline void derotate_range_block(std::complex<float>* dst,
-                                 const std::complex<float>* src,
-                                 std::size_t n,
-                                 std::size_t lo,
-                                 std::size_t hi,
-                                 double w)
-{
-    if (n == 0 || src == nullptr || dst == nullptr)
-        return;
-    hi = std::min(hi, n);
-    if (lo >= hi)
-        return;
-
-    std::array<std::complex<float>, kCfoDerotateBlock> table;
-    detail::build_cfo_table(table, w);
-
-    const std::size_t b_start = (lo / kCfoDerotateBlock) * kCfoDerotateBlock;
-    for (std::size_t b0 = b_start; b0 < hi; b0 += kCfoDerotateBlock) {
-        const std::size_t k_start = (b0 < lo) ? (lo - b0) : 0;
-        const std::size_t k_end =
-            std::min(hi - b0, std::min(kCfoDerotateBlock, n - b0));
-        if (k_start >= k_end)
-            continue;
-        const std::size_t len = k_end - k_start;
-
-        // Exact double block anchor; b0 == 0 gives (1, 0) and the fold below is
-        // then bit-exactly the identity, matching the legacy "no second pass
-        // for the first block" behaviour.
-        const double phase = -w * static_cast<double>(b0);
-        const float ar = static_cast<float>(std::cos(phase));
-        const float ai = static_cast<float>(std::sin(phase));
-
-        detail::derotate_block_anchored(dst + b0 + k_start,
-                                        src + b0 + k_start,
-                                        table.data() + k_start,
-                                        len,
-                                        ar,
-                                        ai);
-    }
-}
+void derotate_range_block(std::complex<float>* dst,
+                          const std::complex<float>* src,
+                          std::size_t n,
+                          std::size_t lo,
+                          std::size_t hi,
+                          double w);
 
 // 4-chain recurrence with 1024-sample block re-anchoring.
 // Matches the legacy scalar stage_cfo rotation speed and accuracy, generalized
 // to operate on an arbitrary absolute range [lo, hi) where phase origin is sample 0.
-inline void derotate_range_recurrence(std::complex<float>* dst,
-                                      const std::complex<float>* src,
-                                      std::size_t n,
-                                      std::size_t lo,
-                                      std::size_t hi,
-                                      double w)
-{
-    if (n == 0 || src == nullptr || dst == nullptr)
-        return;
-    hi = std::min(hi, n);
-    if (lo >= hi)
-        return;
-
-    constexpr std::size_t kB = 1024;
-    const double cw = w;
-    const double s4_phase = -4.0 * cw;
-    const float s4r = static_cast<float>(std::cos(s4_phase));
-    const float s4i = static_cast<float>(std::sin(s4_phase));
-
-    for (std::size_t b0 = lo; b0 < hi; b0 += kB) {
-        const std::size_t b1 = std::min(hi, b0 + kB);
-        const double ph0 = -cw * static_cast<double>(b0);
-        float cr[4], ci[4];
-        for (int c = 0; c < 4; ++c) {
-            const double ph = ph0 - cw * static_cast<double>(c);
-            cr[c] = static_cast<float>(std::cos(ph));
-            ci[c] = static_cast<float>(std::sin(ph));
-        }
-        std::size_t i = b0;
-        for (; i + 4 <= b1; i += 4) {
-            for (int c = 0; c < 4; ++c) {
-                const float sr = src[i + c].real();
-                const float si = src[i + c].imag();
-                dst[i + c] = std::complex<float>(sr * cr[c] - si * ci[c],
-                                                 sr * ci[c] + si * cr[c]);
-                const float nr = cr[c] * s4r - ci[c] * s4i;
-                const float ni = cr[c] * s4i + ci[c] * s4r;
-                cr[c] = nr;
-                ci[c] = ni;
-            }
-        }
-        for (; i < b1; ++i) {
-            const double ph = -cw * static_cast<double>(i);
-            const float c = static_cast<float>(std::cos(ph));
-            const float s = static_cast<float>(std::sin(ph));
-            const float sr = src[i].real();
-            const float si = src[i].imag();
-            dst[i] = std::complex<float>(sr * c - si * s, sr * s + si * c);
-        }
-    }
-}
+void derotate_range_recurrence(std::complex<float>* dst,
+                               const std::complex<float>* src,
+                               std::size_t n,
+                               std::size_t lo,
+                               std::size_t hi,
+                               double w);
 
 // Scalar reference range derotation.  Phase origin is strictly
 // sample 0 (i.e. base sample index has phase -w * i, not treating lo as 0).
 // Kept for QA and numerical verification; not used on hot demod paths.
-inline void derotate_range_scalar(std::complex<float>* dst,
-                                  const std::complex<float>* src,
-                                  std::size_t n,
-                                  std::size_t lo,
-                                  std::size_t hi,
-                                  double w)
-{
-    if (n == 0 || src == nullptr || dst == nullptr)
-        return;
-    hi = std::min(hi, n);
-    if (lo >= hi)
-        return;
-    for (std::size_t i = lo; i < hi; ++i) {
-        const double phase = -w * static_cast<double>(i);
-        const float c = static_cast<float>(std::cos(phase));
-        const float s = static_cast<float>(std::sin(phase));
-        const float re = src[i].real();
-        const float im = src[i].imag();
-        dst[i] = std::complex<float>(re * c - im * s, re * s + im * c);
-    }
-}
+void derotate_range_scalar(std::complex<float>* dst,
+                           const std::complex<float>* src,
+                           std::size_t n,
+                           std::size_t lo,
+                           std::size_t hi,
+                           double w);
 
 // dst[i] = src[i] * exp(-j*w*i) for absolute i, w in rad/sample.
 // Replaces the legacy scalar four-chain rotation in stage_cfo when
 // profile.rx_fast_cfo_rotation is enabled.  dst may not alias src.
-inline void derotate_block(std::vector<std::complex<float>>& dst,
-                           const std::complex<float>* src,
-                           std::size_t n,
-                           double w)
-{
-    dst.resize(n);
-    derotate_range_block(dst.data(), src, n, 0, n, w);
-}
+void derotate_block(std::vector<std::complex<float>>& dst,
+                    const std::complex<float>* src,
+                    std::size_t n,
+                    double w);
 
 // QA-only independent reference: per-sample double-precision cos/sin and
 // double complex multiply, rounded once to float.  Not used on any hot path.
-inline void derotate_reference(std::complex<float>* dst,
-                               const std::complex<float>* src,
-                               std::size_t n,
-                               double w)
-{
-    if (n == 0 || src == nullptr || dst == nullptr)
-        return;
-    for (std::size_t i = 0; i < n; ++i) {
-        const double phase = -w * static_cast<double>(i);
-        const double c = std::cos(phase);
-        const double s = std::sin(phase);
-        const double re = static_cast<double>(src[i].real());
-        const double im = static_cast<double>(src[i].imag());
-        dst[i] = std::complex<float>(static_cast<float>(re * c - im * s),
-                                     static_cast<float>(re * s + im * c));
-    }
-}
+void derotate_reference(std::complex<float>* dst,
+                        const std::complex<float>* src,
+                        std::size_t n,
+                        double w);
 
 // QA-only independent range reference: exact double precision cos/sin over [lo, hi).
-inline void derotate_range_reference(std::complex<float>* dst,
-                                     const std::complex<float>* src,
-                                     std::size_t n,
-                                     std::size_t lo,
-                                     std::size_t hi,
-                                     double w)
-{
-    if (n == 0 || src == nullptr || dst == nullptr)
-        return;
-    hi = std::min(hi, n);
-    if (lo >= hi)
-        return;
-    for (std::size_t i = lo; i < hi; ++i) {
-        const double phase = -w * static_cast<double>(i);
-        const double c = std::cos(phase);
-        const double s = std::sin(phase);
-        const double re = static_cast<double>(src[i].real());
-        const double im = static_cast<double>(src[i].imag());
-        dst[i] = std::complex<float>(static_cast<float>(re * c - im * s),
-                                     static_cast<float>(re * s + im * c));
-    }
-}
+void derotate_range_reference(std::complex<float>* dst,
+                              const std::complex<float>* src,
+                              std::size_t n,
+                              std::size_t lo,
+                              std::size_t hi,
+                              double w);
 
 inline constexpr int64_t kSfdNarrowHalf = 64;
 inline constexpr int kSfdSymbolOffsets = 4;
