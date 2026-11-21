@@ -76,34 +76,8 @@ struct RealSyncTemplate {
     }
 };
 
-inline void build_real_sync_template(const std::vector<std::complex<float>>& template_wf,
-                                     RealSyncTemplate& out)
-{
-    out.reset();
-    if (template_wf.empty())
-        return;
-    const size_t L = template_wf.size();
-    bool real_only = true;
-    for (size_t k = 0; k < L; ++k) {
-        if (std::abs(template_wf[k].imag()) > 1e-7f) {
-            real_only = false;
-            break;
-        }
-    }
-    out.is_real = real_only;
-    out.length = L;
-    if (real_only) {
-        out.taps_dup.resize(2 * L);
-        float e = 0.0f;
-        for (size_t k = 0; k < L; ++k) {
-            const float r = template_wf[k].real();
-            out.taps_dup[2 * k] = r;
-            out.taps_dup[2 * k + 1] = r;
-            e += r * r;
-        }
-        out.energy = e;
-    }
-}
+void build_real_sync_template(const std::vector<std::complex<float>>& template_wf,
+                              RealSyncTemplate& out);
 
 // FNV-1a over the template's raw float words.  Only a content key is needed,
 // so hashing one 32-bit word per real/imag component (2 per complex) is
@@ -483,69 +457,21 @@ inline void real_template_dot_8lag(const std::complex<float>* rx,
     real_template_dot_4lag(rx + 4, taps_dup, L, out + 4);
 }
 
-inline void vector_accumulate_complex(std::complex<float>* dst,
-                                      const std::complex<float>* src,
-                                      size_t count)
-{
-    if (count == 0)
-        return;
-#if UWB_SIMD_HAVE_AVX512
-    if (use_avx512(openuwb::core::simd::KernelGroup::Sync)) {
-        openuwb::core::simd::avx512::accumulate_cf32(dst, src, count);
-        return;
-    }
-#endif
-#if UWB_RXOPT_HAVE_AVX2
-    if (has_avx2_fma()) {
-        vector_accumulate_complex_avx2(dst, src, count);
-        return;
-    }
-#endif
-    for (size_t m = 0; m < count; ++m)
-        dst[m] += src[m];
-}
-
-inline void vector_sub_complex(std::complex<float>* dst,
+void vector_accumulate_complex(std::complex<float>* dst,
                                const std::complex<float>* src,
-                               size_t count)
-{
-    if (count == 0)
-        return;
-#if UWB_SIMD_HAVE_AVX512
-    if (use_avx512(openuwb::core::simd::KernelGroup::Sync)) {
-        openuwb::core::simd::avx512::sub_cf32(dst, src, count);
-        return;
-    }
-#endif
-#if UWB_RXOPT_HAVE_AVX2
-    if (has_avx2_fma()) {
-        vector_sub_complex_avx2(dst, src, count);
-        return;
-    }
-#endif
-    for (size_t m = 0; m < count; ++m)
-        dst[m] -= src[m];
-}
+                               size_t count);
+
+void vector_sub_complex(std::complex<float>* dst,
+                        const std::complex<float>* src,
+                        size_t count);
 
 // dst = a - b (three-operand form).  Used by the SIC transactional
 // subtraction, which cannot use the in-place kernel because out may not alias
 // the received buffer.  Element-wise, so widening is transparent.
-inline void vector_sub3_complex(std::complex<float>* dst,
-                                const std::complex<float>* a,
-                                const std::complex<float>* b,
-                                size_t count)
-{
-    if (count == 0)
-        return;
-#if UWB_SIMD_HAVE_AVX512
-    if (use_avx512(openuwb::core::simd::KernelGroup::Sync)) {
-        openuwb::core::simd::avx512::sub3_cf32(dst, a, b, count);
-        return;
-    }
-#endif
-    for (size_t m = 0; m < count; ++m)
-        dst[m] = a[m] - b[m];
-}
+void vector_sub3_complex(std::complex<float>* dst,
+                         const std::complex<float>* a,
+                         const std::complex<float>* b,
+                         size_t count);
 
 #if UWB_RXOPT_HAVE_AVX2
 __attribute__((target("avx2")))
@@ -617,67 +543,12 @@ inline void fold_sfd_window_avx2(const std::complex<float>* rx_base,
 }
 #endif
 
-inline void fold_sfd_window(const std::complex<float>* rx_base,
-                            size_t sym,
-                            const int8_t* sfd_seq,
-                            size_t sfd_len,
-                            size_t fold_len,
-                            std::complex<float>* out)
-{
-    if (!rx_base || !sfd_seq || !out || sym == 0 || sfd_len == 0 || fold_len == 0)
-        return;
-#if UWB_SIMD_HAVE_AVX512
-    if (use_avx512(openuwb::core::simd::KernelGroup::Sync)) {
-        // Batched: the whole symbol loop runs inside the wide translation
-        // unit, so the fold pays one call instead of one per symbol.
-        openuwb::core::simd::avx512::fold_sfd_window(rx_base, sym, sfd_seq,
-                                                     sfd_len, fold_len, out);
-        return;
-    }
-#endif
-#if UWB_RXOPT_HAVE_AVX2
-    if (has_avx2_fma()) {
-        fold_sfd_window_avx2(rx_base, sym, sfd_seq, sfd_len, fold_len, out);
-        return;
-    }
-#endif
-    size_t idx[8];
-    int8_t sg[8];
-    bool have_out = false;
-    for (size_t chunk = 0; chunk < sfd_len; chunk += 8) {
-        const size_t chunk_end = std::min(chunk + 8, sfd_len);
-        size_t cnt = 0;
-        for (size_t i = chunk; i < chunk_end; ++i) {
-            if (sfd_seq[i] == 0)
-                continue;
-            idx[cnt] = i;
-            sg[cnt] = sfd_seq[i];
-            ++cnt;
-        }
-        if (cnt == 0)
-            continue;
-        const bool first_chunk = !have_out;
-        for (size_t k = 0; k < fold_len; ++k) {
-            size_t j = 0;
-            std::complex<float> acc;
-            if (first_chunk) {
-                const std::complex<float> v = rx_base[idx[0] * sym + k];
-                acc = (sg[0] == 1) ? v : std::complex<float>(0.0f, 0.0f) - v;
-                j = 1;
-            } else {
-                acc = out[k];
-            }
-            for (; j < cnt; ++j) {
-                const std::complex<float> v = rx_base[idx[j] * sym + k];
-                acc = (sg[j] == 1) ? acc + v : acc - v;
-            }
-            out[k] = acc;
-        }
-        have_out = true;
-    }
-    if (!have_out)
-        std::fill(out, out + fold_len, std::complex<float>(0.0f, 0.0f));
-}
+void fold_sfd_window(const std::complex<float>* rx_base,
+                     size_t sym,
+                     const int8_t* sfd_seq,
+                     size_t sfd_len,
+                     size_t fold_len,
+                     std::complex<float>* out);
 
 #if UWB_RXOPT_HAVE_AVX2
 __attribute__((target("avx2")))
@@ -730,98 +601,24 @@ inline void vector_mul_complex_avx2(std::complex<float>* dst,
 }
 #endif
 
-inline void vector_accumulate_scaled_complex(std::complex<float>* dst,
-                                             const std::complex<float>* src,
-                                             std::complex<float> alpha,
-                                             size_t count)
-{
-    if (count == 0)
-        return;
-#if UWB_RXOPT_HAVE_AVX2
-    if (has_avx2_fma()) {
-        vector_accumulate_scaled_complex_avx2(dst, src, alpha.real(),
-                                              alpha.imag(), count);
-        return;
-    }
-#endif
-    for (size_t j = 0; j < count; ++j)
-        dst[j] += alpha * src[j];
-}
+void vector_accumulate_scaled_complex(std::complex<float>* dst,
+                                      const std::complex<float>* src,
+                                      std::complex<float> alpha,
+                                      size_t count);
 
-inline void vector_mul_complex(std::complex<float>* dst,
-                               const std::complex<float>* mul,
-                               size_t count)
-{
-    if (count == 0)
-        return;
-#if UWB_RXOPT_HAVE_AVX2
-    if (has_avx2_fma()) {
-        vector_mul_complex_avx2(dst, mul, count);
-        return;
-    }
-#endif
-    for (size_t j = 0; j < count; ++j)
-        dst[j] *= mul[j];
-}
+void vector_mul_complex(std::complex<float>* dst,
+                        const std::complex<float>* mul,
+                        size_t count);
 
 // dst[i] = exp(-j*w*i), i < count, using the same 4-chain / 1024-sample
 // re-anchoring as derotate_range_recurrence().  Used by the fused CIR
 // estimator, which applies the per-sample phase once outside the SYNC loop.
-inline void build_rotation_ramp(double w, size_t count,
-                                std::complex<float>* table)
-{
-    if (count == 0)
-        return;
-    constexpr size_t kB = 1024;
-    const float s4r = static_cast<float>(std::cos(-4.0 * w));
-    const float s4i = static_cast<float>(std::sin(-4.0 * w));
-    for (size_t b0 = 0; b0 < count; b0 += kB) {
-        const size_t b1 = std::min(count, b0 + kB);
-        float cr[4], ci[4];
-        for (int c = 0; c < 4; ++c) {
-            const double ph = -w * static_cast<double>(b0 + c);
-            cr[c] = static_cast<float>(std::cos(ph));
-            ci[c] = static_cast<float>(std::sin(ph));
-        }
-        size_t i = b0;
-        for (; i + 4 <= b1; i += 4) {
-            for (int c = 0; c < 4; ++c) {
-                table[i + c] = std::complex<float>(cr[c], ci[c]);
-                const float nr = cr[c] * s4r - ci[c] * s4i;
-                const float ni = cr[c] * s4i + ci[c] * s4r;
-                cr[c] = nr;
-                ci[c] = ni;
-            }
-        }
-        for (; i < b1; ++i) {
-            const double ph = -w * static_cast<double>(i);
-            table[i] = std::complex<float>(static_cast<float>(std::cos(ph)),
-                                           static_cast<float>(std::sin(ph)));
-        }
-    }
-}
+void build_rotation_ramp(double w, size_t count,
+                         std::complex<float>* table);
 
-inline void vector_scale_complex(std::complex<float>* dst,
-                                 float scale,
-                                 size_t count)
-{
-    if (count == 0)
-        return;
-#if UWB_SIMD_HAVE_AVX512
-    if (use_avx512(openuwb::core::simd::KernelGroup::Sync)) {
-        openuwb::core::simd::avx512::scale_cf32(dst, scale, count);
-        return;
-    }
-#endif
-#if UWB_RXOPT_HAVE_AVX2
-    if (has_avx2_fma()) {
-        vector_scale_complex_avx2(dst, scale, count);
-        return;
-    }
-#endif
-    for (size_t m = 0; m < count; ++m)
-        dst[m] *= scale;
-}
+void vector_scale_complex(std::complex<float>* dst,
+                          float scale,
+                          size_t count);
 
 namespace detail {
 
@@ -869,28 +666,9 @@ inline uint64_t fnv1a_u64(uint64_t h, uint64_t v)
 // Callers must also require a non-empty cached template before reuse: a key of
 // 0 is also the "never built" state.
 // ---------------------------------------------------------------------------
-inline uint64_t
+uint64_t
 sfd_template_key(const std::vector<std::complex<float>>& template_wf,
-                 const std::vector<int8_t>& sfd_sequence)
-{
-    static_assert(sizeof(float) == 4, "SFD cache key assumes 32-bit float");
-    uint64_t h = detail::kFnvOffsetBasis;
-    h = detail::fnv1a_u64(h, static_cast<uint64_t>(template_wf.size()));
-    for (const std::complex<float>& v : template_wf) {
-        uint32_t re_bits = 0;
-        uint32_t im_bits = 0;
-        const float re = v.real();
-        const float im = v.imag();
-        std::memcpy(&re_bits, &re, sizeof(re_bits));
-        std::memcpy(&im_bits, &im, sizeof(im_bits));
-        h = detail::fnv1a_u32(h, re_bits);
-        h = detail::fnv1a_u32(h, im_bits);
-    }
-    h = detail::fnv1a_u64(h, static_cast<uint64_t>(sfd_sequence.size()));
-    if (!sfd_sequence.empty())
-        h = detail::fnv1a_bytes(h, sfd_sequence.data(), sfd_sequence.size());
-    return h;
-}
+                 const std::vector<int8_t>& sfd_sequence);
 
 // ---------------------------------------------------------------------------
 // Build the normalized SFD waveform: kron(sfd_sequence, template_wf), then
@@ -902,27 +680,10 @@ sfd_template_key(const std::vector<std::complex<float>>& template_wf,
 // callers can fail closed; the cache key must only be committed when the
 // output is non-empty.
 // ---------------------------------------------------------------------------
-inline void
+void
 build_sfd_template(const std::vector<std::complex<float>>& template_wf,
                    const std::vector<int8_t>& sfd_sequence,
-                   std::vector<std::complex<float>>& out)
-{
-    out.clear();
-    const size_t sym = kQm35SamplesPerSymbol;
-    if (sfd_sequence.empty() || template_wf.size() < sym)
-        return; // the legacy loop would read past the template: fail closed
-    if (sfd_sequence.size() > std::numeric_limits<size_t>::max() / sym)
-        return;
-    out.resize(sfd_sequence.size() * sym);
-    for (size_t i = 0; i < sfd_sequence.size(); ++i) {
-        const int8_t s = sfd_sequence[i];
-        for (size_t k = 0; k < sym; ++k)
-            out[i * sym + k] =
-                std::complex<float>(static_cast<float>(s) * template_wf[k].real(),
-                                    static_cast<float>(s) * template_wf[k].imag());
-    }
-    openuwb::core::uwb_l2_normalize(out);
-}
+                   std::vector<std::complex<float>>& out);
 
 // ---------------------------------------------------------------------------
 // Half-width of the first seeded SYNC refine.

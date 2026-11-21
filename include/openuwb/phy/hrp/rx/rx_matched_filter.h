@@ -51,33 +51,9 @@ inline uint64_t cir_template_key(const int8_t* code, size_t code_len)
     return h;
 }
 
-inline void build_sparse_cir_template(const int8_t* code,
-                                      size_t code_len,
-                                      SparseCirTemplate& tmpl)
-{
-    tmpl.reset();
-    tmpl.key = cir_template_key(code, code_len);
-    const std::vector<int8_t> spread = BuildSampledCode(code, code_len);
-    tmpl.entries.reserve(code_len);
-    for (size_t j = 0; j < spread.size(); ++j) {
-        if (spread[j] != 0) {
-            const size_t pos = 2 * j;
-            tmpl.entries.push_back({ pos, spread[j] });
-            if (spread[j] > 0) {
-                tmpl.pos_offsets.push_back(2 * pos);
-                if (tmpl.pos_count < kMaxSparseCirOffsets)
-                    tmpl.pos_off[tmpl.pos_count++] =
-                        static_cast<uint16_t>(2 * pos);
-            } else {
-                tmpl.neg_offsets.push_back(2 * pos);
-                if (tmpl.neg_count < kMaxSparseCirOffsets)
-                    tmpl.neg_off[tmpl.neg_count++] =
-                        static_cast<uint16_t>(2 * pos);
-            }
-        }
-    }
-    tmpl.code_energy = static_cast<float>(tmpl.entries.size());
-}
+void build_sparse_cir_template(const int8_t* code,
+                               size_t code_len,
+                               SparseCirTemplate& tmpl);
 
 // Single-lag dot.  The template is fixed for the whole scan, so the sign
 // sequence is the SAME on every call and the branch predictor learns it; a
@@ -249,28 +225,8 @@ inline void ensure_sparse_cir_template(const int8_t* code,
         build_sparse_cir_template(code, code_len, tmpl);
 }
 
-inline void build_half_rate_sparse_template(const SparseCirTemplate& full,
-                                            SparseCirTemplate& half)
-{
-    half.reset();
-    half.key = full.key ^ 0x9e3779b97f4a7c15ULL;
-    half.code_energy = full.code_energy;
-    half.entries.reserve(full.entries.size());
-    for (const auto& e : full.entries)
-        half.entries.push_back({ e.pos / 2, e.sign });
-    half.pos_offsets.reserve(full.pos_offsets.size());
-    for (const size_t off : full.pos_offsets)
-        half.pos_offsets.push_back(off / 2);
-    half.neg_offsets.reserve(full.neg_offsets.size());
-    for (const size_t off : full.neg_offsets)
-        half.neg_offsets.push_back(off / 2);
-    half.pos_count = full.pos_count;
-    for (size_t i = 0; i < full.pos_count; ++i)
-        half.pos_off[i] = static_cast<uint16_t>(full.pos_off[i] / 2);
-    half.neg_count = full.neg_count;
-    for (size_t i = 0; i < full.neg_count; ++i)
-        half.neg_off[i] = static_cast<uint16_t>(full.neg_off[i] / 2);
-}
+void build_half_rate_sparse_template(const SparseCirTemplate& full,
+                                     SparseCirTemplate& half);
 
 // Rebuild only when the full-template key changed.  stride=2 acquisition runs
 // once per candidate, so this removes a hot-path rebuild/allocation.
@@ -352,76 +308,15 @@ inline uint64_t shaped_template_key(const std::complex<float>* tmpl, size_t len)
 // Build (or reject) the factorized form. The gate is a reconstruction check:
 // a template that is not code*p (e.g. a different pulse or a non-real
 // waveform) leaves `valid == false`, and the caller keeps its old path.
-inline bool build_shaped_sparse_template(const std::complex<float>* tmpl,
-                                         size_t len,
-                                         const SparseCirTemplate& code,
-                                         ShapedSparseTemplate& out)
-{
-    out.reset();
-    if (!tmpl || len < 32 || code.entries.empty() ||
-        code.entries.size() > kMaxSparseCirOffsets)
-        return false;
-    const SparseCirEntry& first = code.entries.front();
-    const size_t base = first.pos;
-    const size_t last = code.entries.back().pos;
-    if (first.sign == 0 || base >= len || last >= len)
-        return false;
-    const size_t nt = std::min(ShapedSparseTemplate::kMaxPulse, len - last);
-    if (nt < 3)
-        return false;
-
-    double energy = 0.0;
-    double imag_energy = 0.0;
-    for (size_t k = 0; k < len; ++k) {
-        energy += static_cast<double>(std::norm(tmpl[k]));
-        imag_energy += static_cast<double>(tmpl[k].imag()) *
-                       static_cast<double>(tmpl[k].imag());
-    }
-    if (energy <= 0.0 || imag_energy > 1e-12 * energy)
-        return false;
-
-    // First pulse is uncontaminated up to the next chip (8 samples).
-    const float sign0 = static_cast<float>(first.sign);
-    for (size_t k = 0; k < nt; ++k)
-        out.pulse[k] = tmpl[base + k].real() / sign0;
-
-    // Reconstruction gate. The residual is the omitted pulse tail, which is
-    // ~0.3% of the energy for kPulse48; anything above 5% is not code*p.
-    double resid = 0.0;
-    for (const auto& e : code.entries) {
-        for (size_t k = 0; k < nt; ++k) {
-            const size_t idx = e.pos + k;
-            if (idx >= len)
-                break;
-            const double rec =
-                static_cast<double>(e.sign) * out.pulse[k];
-            const double d = rec - tmpl[idx].real();
-            resid += d * d;
-        }
-    }
-    if (!(resid <= 0.05 * energy))
-        return false;
-
-    out.code = code;
-    out.nt = static_cast<uint8_t>(nt);
-    out.energy = static_cast<float>(energy);
-    out.key = shaped_template_key(tmpl, len) ^ code.key;
-    out.valid = true;
-    return true;
-}
+bool build_shaped_sparse_template(const std::complex<float>* tmpl,
+                                  size_t len,
+                                  const SparseCirTemplate& code,
+                                  ShapedSparseTemplate& out);
 
 // Cache: rebuild only when the template contents or the code change.
-inline const ShapedSparseTemplate* ensure_shaped_sparse_template(
+const ShapedSparseTemplate* ensure_shaped_sparse_template(
     const std::complex<float>* tmpl, size_t len,
-    const SparseCirTemplate& code, ShapedSparseTemplate& out)
-{
-    const uint64_t key = shaped_template_key(tmpl, len) ^ code.key;
-    if (out.valid && out.key == key)
-        return &out;
-    if (!build_shaped_sparse_template(tmpl, len, code, out))
-        return nullptr;
-    return &out;
-}
+    const SparseCirTemplate& code, ShapedSparseTemplate& out);
 
 // c[0..7] then the short real FIR. The 8-lag kernel needs rx[0 .. last+7],
 // which is exactly inside the L-sample contract (L - last >= nt).
@@ -596,41 +491,17 @@ struct MatchedFilterPeak {
 // ~18% SLOWER than the simple per-lag division: divss has ~4-cycle throughput
 // and the extra near-tie branches cost more than they save.  Keep the original
 // float division; it is also the bit-exact reference for timing_metric.
-inline MatchedFilterPeak scan_normalized_sync(const SyncMatchedFilter& filter,
-                                              const std::complex<float>* rx,
-                                              size_t lag_count,
-                                              float power,
-                                              float template_energy,
-                                              float* metrics = nullptr)
-{
-    MatchedFilterPeak peak;
-    filter.for_each_lag(rx, lag_count, [&](size_t lag, std::complex<float> corr, bool) {
-        const float metric =
-            openuwb::core::normalized_correlation_power(corr, power, template_energy);
-        if (metrics)
-            metrics[lag] = metric;
-        if (metric > peak.metric)
-            peak = { lag, metric, corr };
-        if (lag + 1 < lag_count)
-            power += std::norm(rx[lag + filter.length()]) - std::norm(rx[lag]);
-    });
-    return peak;
-}
-
-inline MatchedFilterPeak scan_raw_sync(const SyncMatchedFilter& filter,
+MatchedFilterPeak scan_normalized_sync(const SyncMatchedFilter& filter,
                                        const std::complex<float>* rx,
                                        size_t lag_count,
-                                       float* powers)
-{
-    MatchedFilterPeak peak;
-    filter.for_each_lag(rx, lag_count, [&](size_t lag, std::complex<float> corr, bool) {
-        const float power = std::norm(corr);
-        powers[lag] = power;
-        if (power > peak.metric)
-            peak = { lag, power, corr };
-    });
-    return peak;
-}
+                                       float power,
+                                       float template_energy,
+                                       float* metrics = nullptr);
+
+MatchedFilterPeak scan_raw_sync(const SyncMatchedFilter& filter,
+                                const std::complex<float>* rx,
+                                size_t lag_count,
+                                float* powers);
 
 // Compare peak/background power without division. An empty or all-zero window
 // cannot produce a valid peak.
@@ -673,40 +544,19 @@ inline bool raw_lag_par_passes(const float* powers,
                           sum, samples, threshold);
 }
 
-inline void correlate_cir_sparse_raw(const std::complex<float>* corr,
-                                     const SparseCirTemplate& tmpl,
-                                     size_t tap_count,
-                                     std::complex<float>* values)
-{
-    if (tap_count == 0)
-        return;
-    const SyncMatchedFilter filter(nullptr, 0, nullptr, &tmpl);
-    filter.for_each_lag(corr, tap_count, [&](size_t lag, std::complex<float> acc, bool) {
-        values[lag] = acc;
-    });
-}
+void correlate_cir_sparse_raw(const std::complex<float>* corr,
+                              const SparseCirTemplate& tmpl,
+                              size_t tap_count,
+                              std::complex<float>* values);
 
-inline void correlate_cir_sparse(const std::complex<float>* corr,
-                                 const SparseCirTemplate& tmpl,
-                                 size_t tap_count,
-                                 std::complex<float>* values)
-{
-    if (tap_count == 0 || tmpl.code_energy <= 0.0f)
-        return;
-    correlate_cir_sparse_raw(corr, tmpl, tap_count, values);
-    for (size_t i = 0; i < tap_count; ++i)
-        values[i] /= tmpl.code_energy;
-}
+void correlate_cir_sparse(const std::complex<float>* corr,
+                          const SparseCirTemplate& tmpl,
+                          size_t tap_count,
+                          std::complex<float>* values);
 
-inline void correlate_cir_sparse(const std::complex<float>* corr,
-                                 const SparseCirTemplate& tmpl,
-                                 size_t tap_count,
-                                 std::vector<std::complex<float>>& values)
-{
-    values.resize(tap_count);
-    if (tmpl.code_energy <= 0.0f || tap_count == 0)
-        return;
-    correlate_cir_sparse(corr, tmpl, tap_count, values.data());
-}
+void correlate_cir_sparse(const std::complex<float>* corr,
+                          const SparseCirTemplate& tmpl,
+                          size_t tap_count,
+                          std::vector<std::complex<float>>& values);
 
 } // namespace openuwb::demod::rxopt

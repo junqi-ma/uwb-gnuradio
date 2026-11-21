@@ -151,7 +151,7 @@ struct PhrPhaseRefineResult {
     float coherence = 0.0f;
 };
 
-inline PhrPhaseRefineResult refine_phase_cfo_from_phr(
+PhrPhaseRefineResult refine_phase_cfo_from_phr(
     const std::complex<float>* phr_z_win,
     size_t nsym,
     const int8_t* phr_g1,
@@ -160,117 +160,7 @@ inline PhrPhaseRefineResult refine_phase_cfo_from_phr(
     double phr_symbol_samples,
     double phr_last_to_payload_samples,
     float min_coherence = 0.65f,
-    double max_delta_w_rad = 2.5e-5)
-{
-    PhrPhaseRefineResult out;
-
-    // --- Argument / value guards -------------------------------------------
-    const bool rot_finite =
-        std::isfinite(rot_init.real()) && std::isfinite(rot_init.imag());
-    const double rot_mag = rot_finite ? static_cast<double>(std::abs(rot_init))
-                                      : 0.0;
-    const bool rot_usable = rot_finite && std::isfinite(rot_mag) &&
-                            rot_mag > 1e-12;
-    if (rot_usable)
-        out.rot_at_payload_start = rot_init;
-    else
-        out.rot_at_payload_start = std::complex<float>(1.0f, 0.0f);
-
-    if (phr_z_win == nullptr || phr_g1 == nullptr)
-        return out;
-    if (nsym < 4)
-        return out;
-    if (!std::isfinite(phr_symbol_samples) || phr_symbol_samples <= 0.0)
-        return out;
-    if (!std::isfinite(phr_last_to_payload_samples))
-        return out;
-    if (!std::isfinite(min_coherence))
-        return out;
-    if (!std::isfinite(max_delta_w_rad) || max_delta_w_rad <= 0.0)
-        return out;
-    if (!rot_usable)
-        return out;
-
-    const double rr = static_cast<double>(rot_init.real()) / rot_mag;
-    const double ri = static_cast<double>(rot_init.imag()) / rot_mag;
-
-    // tilde[k] = (1-2*g1)*pol*z, expressed in the rot_init frame:
-    //   u[k] = rot_init_normalised * tilde[k].
-    // Recomputing it per pass avoids any allocation in this per-packet helper.
-    auto tilde_at = [&](size_t k, std::complex<double>& u) -> bool {
-        const double zr = static_cast<double>(phr_z_win[k].real());
-        const double zi = static_cast<double>(phr_z_win[k].imag());
-        if (!std::isfinite(zr) || !std::isfinite(zi))
-            return false;
-        const int sign_bit = 1 - 2 * static_cast<int>(phr_g1[k]);
-        const double sgn = static_cast<double>(sign_bit) *
-                           static_cast<double>(sfd_polarity);
-        const double tr = sgn * zr;
-        const double ti = sgn * zi;
-        if (!std::isfinite(tr) || !std::isfinite(ti))
-            return false;
-        u = std::complex<double>(rr * tr - ri * ti, ri * tr + rr * ti);
-        return std::isfinite(u.real()) && std::isfinite(u.imag());
-    };
-
-    // --- Pass 1: coherence and lag-1 residual CFO --------------------------
-    constexpr double kEps = 1e-30;
-    std::complex<double> sum(0.0, 0.0);
-    std::complex<double> lag(0.0, 0.0);
-    double abs_sum = 0.0;
-    std::complex<double> prev(0.0, 0.0);
-    for (size_t k = 0; k < nsym; ++k) {
-        std::complex<double> u;
-        if (!tilde_at(k, u))
-            return out;
-        // |u| == |tilde| because the frame rotation has unit modulus.
-        sum += u;
-        abs_sum += std::abs(u);
-        if (k > 0)
-            lag += u * std::conj(prev);
-        prev = u;
-    }
-    const double coherence = std::abs(sum) / (abs_sum + kEps);
-    out.coherence = static_cast<float>(coherence);
-    if (coherence < static_cast<double>(min_coherence))
-        return out; // applied = false, rot = rot_init, delta = 0
-
-    const double dtheta = std::atan2(lag.imag(), lag.real());
-    double delta = dtheta / phr_symbol_samples;
-    delta = std::max(-max_delta_w_rad, std::min(max_delta_w_rad, delta));
-    if (!std::isfinite(delta))
-        return out;
-
-    // --- Pass 2: mean phase at the centre symbol, extrapolated to payload ---
-    const double kc = 0.5 * static_cast<double>(nsym - 1);
-    std::complex<double> acc(0.0, 0.0);
-    for (size_t k = 0; k < nsym; ++k) {
-        std::complex<double> u;
-        if (!tilde_at(k, u))
-            return out;
-        const double ang = -delta *
-                           (static_cast<double>(k) - kc) *
-                           phr_symbol_samples;
-        acc += u * std::complex<double>(std::cos(ang), std::sin(ang));
-    }
-    const double theta_c = std::atan2(acc.imag(), acc.real());
-    const double d =
-        phr_last_to_payload_samples +
-        (static_cast<double>(nsym - 1) - kc) * phr_symbol_samples;
-    const double theta_payload = theta_c + delta * d;
-    if (!std::isfinite(theta_c) || !std::isfinite(theta_payload))
-        return out;
-
-    // rot = rot_init * exp(-j*theta_payload) in the unit-modulus frame.
-    const double cr = std::cos(-theta_payload);
-    const double ci = std::sin(-theta_payload);
-    out.rot_at_payload_start = std::complex<float>(
-        static_cast<float>(rr * cr - ri * ci),
-        static_cast<float>(ri * cr + rr * ci));
-    out.delta_cfo_w_rad = delta;
-    out.applied = true;
-    return out;
-}
+    double max_delta_w_rad = 2.5e-5);
 
 // Number of sub-sample phases in the fractional CIR template bank.
 inline constexpr size_t kSfoPhaseBins = 8;
@@ -281,76 +171,10 @@ inline constexpr size_t kSfoPhaseBins = 8;
 // Catmull-Rom interpolation with zero padding, then L2-normalised to the
 // norm of `fir_taps` (skipped when that norm is zero).  Returns false for a
 // null pointer, tap_count == 0, phase_bins == 0 (or an absurd bin count).
-inline bool build_fractional_cir_bank(const std::complex<float>* fir_taps,
-                                      size_t tap_count,
-                                      size_t phase_bins,
-                                      std::complex<float>* out_bank)
-{
-    if (fir_taps == nullptr || out_bank == nullptr)
-        return false;
-    if (tap_count == 0 || phase_bins == 0)
-        return false;
-    // Sanity bound: keeps tap_count*phase_bins far away from size_t overflow.
-    if (phase_bins > (static_cast<size_t>(1) << 16))
-        return false;
-
-    // bin 0: bit-exact integer grid.
-    std::copy(fir_taps, fir_taps + tap_count, out_bank);
-    if (phase_bins == 1)
-        return true;
-
-    double ref_norm_sq = 0.0;
-    for (size_t m = 0; m < tap_count; ++m) {
-        const double re = static_cast<double>(fir_taps[m].real());
-        const double im = static_cast<double>(fir_taps[m].imag());
-        ref_norm_sq += re * re + im * im;
-    }
-    const double ref_norm = std::sqrt(ref_norm_sq);
-
-    auto tap_value = [&](long long idx) -> std::complex<double> {
-        if (idx < 0 || idx >= static_cast<long long>(tap_count))
-            return std::complex<double>(0.0, 0.0);
-        const std::complex<float>& v = fir_taps[static_cast<size_t>(idx)];
-        return std::complex<double>(static_cast<double>(v.real()),
-                                    static_cast<double>(v.imag()));
-    };
-
-    for (size_t b = 1; b < phase_bins; ++b) {
-        const double delta =
-            static_cast<double>(b) / static_cast<double>(phase_bins);
-        std::complex<float>* dst = out_bank + b * tap_count;
-        double norm_sq = 0.0;
-        for (size_t m = 0; m < tap_count; ++m) {
-            // Catmull-Rom interpolation of h at x = m - delta: the template
-            // peak therefore moves by +delta samples.
-            const double x = static_cast<double>(m) - delta;
-            const double fl = std::floor(x);
-            const long long i = static_cast<long long>(fl);
-            const double t = x - fl;
-            const double t2 = t * t;
-            const double t3 = t2 * t;
-            const double w0 = -0.5 * t3 + t2 - 0.5 * t;
-            const double w1 = 1.5 * t3 - 2.5 * t2 + 1.0;
-            const double w2 = -1.5 * t3 + 2.0 * t2 + 0.5 * t;
-            const double w3 = 0.5 * t3 - 0.5 * t2;
-            const std::complex<double> v =
-                w0 * tap_value(i - 1) + w1 * tap_value(i) +
-                w2 * tap_value(i + 1) + w3 * tap_value(i + 2);
-            dst[m] = std::complex<float>(static_cast<float>(v.real()),
-                                         static_cast<float>(v.imag()));
-            const double re = static_cast<double>(dst[m].real());
-            const double im = static_cast<double>(dst[m].imag());
-            norm_sq += re * re + im * im;
-        }
-        const double norm = std::sqrt(norm_sq);
-        if (ref_norm > 0.0 && norm > 0.0) {
-            const float scale = static_cast<float>(ref_norm / norm);
-            for (size_t m = 0; m < tap_count; ++m)
-                dst[m] *= scale;
-        }
-    }
-    return true;
-}
+bool build_fractional_cir_bank(const std::complex<float>* fir_taps,
+                               size_t tap_count,
+                               size_t phase_bins,
+                               std::complex<float>* out_bank);
 
 // Nearest-sub-sample decomposition of a (possibly negative) fractional sample
 // position: int_pos + bin/phase_bins rounds to the nearest 1/phase_bins grid
