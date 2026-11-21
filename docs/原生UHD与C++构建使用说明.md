@@ -15,9 +15,15 @@ env -u LD_LIBRARY_PATH ctest --preset native-avx2 --output-on-failure
 | 预设 | 用途 |
 | --- | --- |
 | `native-avx2` | Release + AVX2/FMA 基线，UHD 自动探测;日常开发与验收默认档 |
+| `dev-avx2` | Release + AVX2/FMA，实验目标关闭（`UWB_BUILD_EXPERIMENTS=OFF`），日常编译 + `ctest -L rx_sic` 闭环的变体 |
 | `native-avx512` | Release + AVX-512 宽内核 TU（基线仍是 AVX2/FMA） |
 | `scalar-debug` | Debug + 关闭自写 SIMD 内核，用于单步与参考对照 |
 | `no-uhd` | Release 且不构建 UHD 后端；回放、库和全部非硬件测试仍可运行 |
+
+所有预设现在使用 Ninja 生成器（Stage 1）。首次切换到 Ninja 后，请删除旧的
+Makefile build 目录（如 `build/native-avx2`）并重新配置。QA 目标默认启用
+预编译头（`UWB_ENABLE_PCH=ON`）；可用 ccache 时自动探测并加速
+（`UWB_USE_CCACHE=ON`）。
 
 也可以不用预设，直接传参：
 
