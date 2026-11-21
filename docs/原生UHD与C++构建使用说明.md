@@ -37,9 +37,32 @@ env -u LD_LIBRARY_PATH cmake -S . -B build/custom \
 | `ENABLE_UHD_BACKEND` | `AUTO` | `ON` 要求 UHD 开发包。仅回放可用 `OFF`。 |
 | `UWB_SIMD` | `AUTO` | 在 CMake 配置时选择 DSP 编译档位。也可指定 `AVX2`、`AVX512` 或 `SCALAR`。 |
 | `UWB_BUILD_EXPERIMENTS` | `ON` | 允许构建原生实验应用。生产部署可设 `OFF`。 |
+| `UWB_ENABLE_PCH` | `ON` | 为 QA 目标启用预编译头。关闭后回退到逐目标解析。 |
+| `UWB_USE_CCACHE` | `ON` | 检测到 `ccache` 时作为编译器 launcher；未安装时静默跳过。 |
 
 C++17、CMake、VOLK、Threads 和 Boost.Test 是构建依赖。Python 解释器用于
 辅助工具和 Python 测试。
+
+### 增量编译与头文件拆分
+
+重型算法已从公共头下沉到库内编译单元（`lib/dsp`、`lib/phy/hrp`、`lib/runtime`），
+公共头只保留声明、类型与少量热路径内联函数。效果（i7-12700、GCC 11.4、`-j20`）：
+
+| 操作 | 拆分前 | 拆分后 |
+| --- | ---: | ---: |
+| 全量编译 | 68–70 s | 46–48 s |
+| 无改动增量 | 205 ms | 23 ms |
+| 改解调定时**实现** | 需改头：约 26 个编译单元 / 26 s | **1 个 `.o` + 链接 / 3.6 s** |
+| 改重采样**实现** | 需改头：25 个编译单元 / 28.5 s | **1 个 `.o` + 链接 / 5.7 s** |
+
+因此日常修改算法实现时，只需重编对应库的单个目标。若改的是**声明头**，
+包含它的目标仍会重编，但头的体积已大幅缩小，单 TU 解析成本随之下降。
+实测数据与口径见
+[Ninja与头文件解耦重构验收报告](performance/Ninja与头文件解耦重构验收报告_2026-11-21.md)。
+
+注意：重采样内核以 `extern template` 在库内显式实例化（65/48、65/32、48/65、32/65
+四个方向），消费者应链接 `openuwb::dsp`（或 `openuwb::phy_hrp` / `openuwb::runtime`），
+不要只包含头文件。
 
 ### SIMD 自动选择
 
