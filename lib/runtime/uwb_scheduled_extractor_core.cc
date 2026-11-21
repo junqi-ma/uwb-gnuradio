@@ -1,0 +1,885 @@
+/* -*- c++ -*- */
+/*
+ * Copyright 2026
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *
+ * Out-of-line implementations of the fixed-interval radar-slot IQ extraction
+ * core (declarations in include/openuwb/runtime/scheduled_extractor_core.h).
+ *
+ * Moved bodies: the window-bounds arithmetic, the ScheduledWindowCore
+ * WAIT_WINDOW -> COPY_WINDOW pool state machine (CF32 and native SC16), the
+ * free-list/ready-queue bookkeeping, the ScheduleLockTracker learn/hold loop
+ * and the in-window template verification scan.
+ *
+ * The header keeps the schedule arithmetic helpers, the config/meta/slot
+ * structs, the trivial accessors and the atomic counters.
+ */
+
+#include <openuwb/runtime/scheduled_extractor_core.h>
+
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <cmath>
+#include <complex>
+#include <cstdint>
+#include <cstring>
+#include <limits>
+#include <mutex>
+#include <vector>
+
+namespace openuwb {
+namespace core {
+
+WindowBounds window_bounds_for_slot(double first_packet_sample_exact,
+                                    double period_samples_exact,
+                                    uint64_t schedule_index,
+                                    size_t pre_guard,
+                                    size_t capture,
+                                    size_t post_guard)
+{
+    WindowBounds b;
+    b.predicted_start = predicted_start_sample(
+        first_packet_sample_exact, period_samples_exact, schedule_index);
+    b.capacity = pre_guard + capture + post_guard;
+    const int64_t ideal_start =
+        b.predicted_start - static_cast<int64_t>(pre_guard);
+    if (ideal_start >= 0) {
+        b.window_start = ideal_start;
+        b.window_end = b.predicted_start + static_cast<int64_t>(capture) +
+                       static_cast<int64_t>(post_guard);
+    } else {
+        b.window_start = 0;
+        b.window_end = static_cast<int64_t>(b.capacity);
+    }
+    return b;
+}
+
+bool ScheduleLockTracker::observe(uint64_t k, int64_t detected_start,
+                                  double /*nominal_period_arg*/)
+{
+    if (!enabled || detected_start < 0 || nominal_period <= 0.0)
+        return false;
+
+    // Hold: slow continuous tracking.  Only re-learn on sustained outliers.
+    if (state == State::Hold) {
+        const double pred =
+            t0_exact + static_cast<double>(k) * period_samples;
+        const double resid =
+            static_cast<double>(detected_start) - pred;
+        if (std::abs(resid) > unlock_residual_samples) {
+            ++consecutive_outliers;
+            if (consecutive_outliers >= unlock_outlier_count) {
+                // Drop back to Learning; keep last freeze as warm start.
+                state = State::Learning;
+                n_buf = 0;
+                consecutive_outliers = 0;
+                // Fall through to buffer this observation.
+            } else {
+                last_k = k;
+                last_det = detected_start;
+                ++n_obs;
+                return false;
+            }
+        } else {
+            consecutive_outliers = 0;
+            // Slow first-order phase (t0) tracking (replaces full freeze):
+            // absorb slow clock drift without re-entering Learning.  Only
+            // the intercept t0 tracks (first-order PLL); the period T stays
+            // frozen at the learned value (SFO is a fixed ppm, so the
+            // learned T suffices).  The gain is small so a single noisy
+            // observation barely moves the estimate.
+            t0_exact += hold_track_phase_gain * resid;
+            bias_t0 = t0_exact - nominal_t0;
+            last_k = k;
+            last_det = detected_start;
+            ++n_obs;
+            ++lock_updates; // each applied Hold tracking nudge (updates>1)
+            return true; // apply the tracked schedule
+        }
+    }
+
+    // Searching / Learning: buffer unique schedule indices.
+    if (state == State::Searching)
+        state = State::Learning;
+
+    // Reject duplicate k (keep latest det for that slot).
+    bool replaced = false;
+    for (size_t i = 0; i < n_buf; ++i) {
+        if (buf_k_[i] == k) {
+            buf_det_[i] = detected_start;
+            replaced = true;
+            break;
+        }
+    }
+    if (!replaced) {
+        if (n_buf >= kMaxBuf || n_buf >= max_buffer) {
+            // Drop oldest to keep a sliding learning window.
+            for (size_t i = 1; i < n_buf; ++i) {
+                buf_k_[i - 1] = buf_k_[i];
+                buf_det_[i - 1] = buf_det_[i];
+            }
+            if (n_buf > 0)
+                --n_buf;
+        }
+        buf_k_[n_buf] = k;
+        buf_det_[n_buf] = detected_start;
+        ++n_buf;
+    }
+    last_k = k;
+    last_det = detected_start;
+    ++n_obs;
+
+    if (n_buf < 2)
+        return false;
+
+    double fit_t0 = 0.0;
+    double fit_T = 0.0;
+    if (!fit_linear(n_buf, fit_t0, fit_T))
+        return false;
+
+    const double rel =
+        std::abs(fit_T - nominal_period) / nominal_period;
+    if (rel > max_period_rel_err)
+        return false; // outlier fit; keep learning
+
+    // Always stage the latest good fit while learning (for diagnostics).
+    t0_exact = fit_t0;
+    period_samples = fit_T;
+    delta_period = fit_T - nominal_period;
+    bias_t0 = fit_t0 - nominal_t0;
+
+    if (n_buf < min_observations)
+        return false;
+
+    // Convergence: all buffer residuals small under the fit.
+    double max_resid = 0.0;
+    for (size_t i = 0; i < n_buf; ++i) {
+        const double pred =
+            fit_t0 + static_cast<double>(buf_k_[i]) * fit_T;
+        max_resid = std::max(
+            max_resid,
+            std::abs(static_cast<double>(buf_det_[i]) - pred));
+    }
+    if (max_resid > converge_residual_samples)
+        return false;
+
+    // Freeze.
+    state = State::Hold;
+    consecutive_outliers = 0;
+    ++lock_updates;
+    return true;
+}
+
+bool ScheduleLockTracker::fit_linear(size_t n,
+                                     double& out_t0,
+                                     double& out_T) const
+{
+    // det ≈ t0 + k * T  (ordinary least squares)
+    if (n < 2)
+        return false;
+    long double sk = 0, sd = 0, skk = 0, skd = 0;
+    for (size_t i = 0; i < n; ++i) {
+        const long double kk = static_cast<long double>(buf_k_[i]);
+        const long double dd = static_cast<long double>(buf_det_[i]);
+        sk += kk;
+        sd += dd;
+        skk += kk * kk;
+        skd += kk * dd;
+    }
+    const long double nn = static_cast<long double>(n);
+    const long double den = nn * skk - sk * sk;
+    if (std::abs(den) < 1.0e-18L)
+        return false;
+    const long double T = (nn * skd - sk * sd) / den;
+    if (T <= 0.0L)
+        return false;
+    const long double t0 = (sd - T * sk) / nn;
+    out_T = static_cast<double>(T);
+    out_t0 = static_cast<double>(t0);
+    return true;
+}
+
+bool verify_template_in_window(const std::complex<float>* window_iq,
+                               size_t n,
+                               const std::complex<float>* template_iq,
+                               size_t L,
+                               size_t search_start,
+                               size_t search_len,
+                               float threshold,
+                               float* out_metric,
+                               size_t* out_offset,
+                               size_t coarse_stride)
+{
+    if (out_metric)
+        *out_metric = 0.0f;
+    if (out_offset)
+        *out_offset = 0;
+    if (!window_iq || !template_iq || L == 0 || n < L)
+        return false;
+
+    const float t_energy = openuwb::core::sample_power_sum(template_iq, L);
+    if (t_energy < 1e-20f)
+        return false;
+
+    const size_t max_align = n - L + 1;
+    if (search_start >= max_align)
+        return false;
+    const size_t end =
+        std::min(search_start + (search_len > 0 ? search_len : max_align),
+                 max_align);
+    const size_t stride = std::max<size_t>(1, coarse_stride);
+
+    float best = 0.0f;
+    size_t best_j = search_start;
+    auto score_at = [&](size_t j) {
+        std::complex<float> corr{};
+        float power = 0.0f;
+        for (size_t k = 0; k < L; ++k) {
+            const auto sample = window_iq[j + k];
+            corr += sample * std::conj(template_iq[k]);
+            power += std::norm(sample);
+        }
+        return openuwb::core::normalized_correlation_power(corr, power,
+                                                          t_energy);
+    };
+    // Coarse (or full-rate when stride==1).
+    for (size_t j = search_start; j < end; j += stride) {
+        const float m = score_at(j);
+        if (m > best) {
+            best = m;
+            best_j = j;
+        }
+    }
+    // Fine refine around the coarse peak when striding.
+    if (stride > 1 && end > search_start) {
+        const size_t fine_lo =
+            best_j > search_start + stride ? best_j - stride : search_start;
+        const size_t fine_hi = std::min(best_j + stride + 1, end);
+        for (size_t j = fine_lo; j < fine_hi; ++j) {
+            const float m = score_at(j);
+            if (m > best) {
+                best = m;
+                best_j = j;
+            }
+        }
+    }
+    if (out_metric)
+        *out_metric = best;
+    if (out_offset)
+        *out_offset = best_j;
+    return best >= threshold;
+}
+
+void ScheduledWindowCore::configure(const ScheduleConfig& cfg)
+{
+    abort_active_window();
+    drain_ready_to_free();
+    {
+        std::lock_guard<std::mutex> lock(pool_mutex_);
+        // Never wipe slots still checked out to the worker.
+        if (checked_out_ != 0) {
+            // Soft recovery: only rebuild free list from non-checked-out
+            // handles; leave worker-owned samples intact until release.
+            rebuild_free_excluding_checked_out_locked();
+            cfg_ = cfg;
+            if (cfg_.pool_size == 0)
+                cfg_.pool_size = 1;
+            if (cfg_.pool_size > kMaxPoolSize)
+                cfg_.pool_size = kMaxPoolSize;
+            // Do not clear checked-out pool entries.
+            for (size_t i = 0; i < kMaxPoolSize; ++i) {
+                if (checked_out_flags_[i])
+                    continue;
+                const size_t cap = cfg_.window_capacity();
+                pool_[i].samples.clear();
+                pool_[i].samples_sc16.clear();
+                if (sc16_mode_)
+                    pool_[i].samples_sc16.reserve(cap);
+                else
+                    pool_[i].samples.reserve(cap);
+                pool_[i].filled = 0;
+                pool_[i].active = false;
+                pool_[i].meta = WindowMeta{};
+            }
+        } else {
+            cfg_ = cfg;
+            if (cfg_.pool_size == 0)
+                cfg_.pool_size = 1;
+            if (cfg_.pool_size > kMaxPoolSize)
+                cfg_.pool_size = kMaxPoolSize;
+            const size_t cap = cfg_.window_capacity();
+            for (size_t i = 0; i < kMaxPoolSize; ++i) {
+                pool_[i].samples.clear();
+                pool_[i].samples_sc16.clear();
+                if (sc16_mode_)
+                    pool_[i].samples_sc16.reserve(cap);
+                else
+                    pool_[i].samples.reserve(cap);
+                pool_[i].filled = 0;
+                pool_[i].active = false;
+                pool_[i].meta = WindowMeta{};
+                checked_out_flags_[i] = false;
+            }
+            free_count_ = cfg_.pool_size;
+            for (size_t i = 0; i < cfg_.pool_size; ++i)
+                free_[i] = cfg_.pool_size - 1 - i;
+            checked_out_ = 0;
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lock(pool_mutex_);
+        ready_head_ = ready_tail_ = ready_count_ = 0;
+    }
+    active_ = kInvalid;
+    next_k_ = 0;
+    abs_cursor_ = 0;
+    state_ = ScheduleMachineState::Unlocked;
+    clear_stats();
+    paused_ = false;
+    ++generation_;
+}
+
+void ScheduledWindowCore::set_schedule(double first_packet_sample_exact,
+                                       double packet_interval_s,
+                                       double sample_rate)
+{
+    if (sample_rate > 0.0)
+        cfg_.sample_rate = sample_rate;
+    if (packet_interval_s > 0.0)
+        cfg_.packet_interval_s = packet_interval_s;
+    cfg_.first_packet_sample_exact = first_packet_sample_exact;
+    abort_active_window();
+    next_k_ = 0;
+    advance_k_to_abs(abs_cursor_);
+    state_ = paused_ ? ScheduleMachineState::Paused
+                     : ScheduleMachineState::WaitWindow;
+    ++generation_;
+    schedule_updates_.fetch_add(1, std::memory_order_relaxed);
+}
+
+void ScheduledWindowCore::update_guards_keep_generation(size_t pre_guard,
+                                                        size_t capture,
+                                                        size_t post_guard)
+{
+    cfg_.pre_guard_samples = pre_guard;
+    cfg_.capture_samples = capture;
+    cfg_.post_guard_samples = post_guard;
+    const size_t cap = cfg_.window_capacity();
+    {
+        std::lock_guard<std::mutex> lock(pool_mutex_);
+        for (size_t i = 0; i < kMaxPoolSize; ++i) {
+            if (checked_out_flags_[i])
+                continue;
+            if (sc16_mode_) {
+                if (pool_[i].samples_sc16.capacity() < cap)
+                    pool_[i].samples_sc16.reserve(cap);
+            } else if (pool_[i].samples.capacity() < cap) {
+                pool_[i].samples.reserve(cap);
+            }
+        }
+    }
+    if (state_ != ScheduleMachineState::Unlocked) {
+        abort_active_window();
+        advance_k_to_abs(abs_cursor_);
+        state_ = paused_ ? ScheduleMachineState::Paused
+                         : ScheduleMachineState::WaitWindow;
+    }
+}
+
+bool ScheduledWindowCore::update_locked_params(double first_packet_sample_exact,
+                                               double packet_interval_s,
+                                               bool force_t0)
+{
+    if (packet_interval_s <= 0.0 || cfg_.sample_rate <= 0.0)
+        return false;
+    const double new_period = packet_interval_s * cfg_.sample_rate;
+    if (new_period <= 0.0)
+        return false;
+
+    const double old_period = cfg_.period_samples_exact();
+    const double old_t0 = cfg_.first_packet_sample_exact;
+    const double old_pred_next =
+        old_t0 + static_cast<double>(next_k_) * old_period;
+    const int64_t abs = static_cast<int64_t>(abs_cursor_);
+    const int64_t margin =
+        static_cast<int64_t>(cfg_.pre_guard_samples / 8 + 64);
+
+    auto try_apply = [&](double new_t0) -> bool {
+        const WindowBounds nb = window_bounds_for_slot(
+            new_t0, new_period, next_k_, cfg_.pre_guard_samples,
+            cfg_.capture_samples, cfg_.post_guard_samples);
+        if (nb.window_start < abs + margin)
+            return false;
+        cfg_.first_packet_sample_exact = new_t0;
+        cfg_.packet_interval_s = packet_interval_s;
+        schedule_updates_.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    };
+
+    // Prefer absolute learned t0 (bias b) when requested and still safe.
+    if (force_t0 && try_apply(first_packet_sample_exact))
+        return true;
+
+    // Continuity at next_k: keep imminent predicted_start fixed.
+    const double new_t0_cont =
+        old_pred_next - static_cast<double>(next_k_) * new_period;
+    return try_apply(new_t0_cont);
+}
+
+void ScheduledWindowCore::set_guards(size_t pre_guard, size_t capture,
+                                     size_t post_guard)
+{
+    cfg_.pre_guard_samples = pre_guard;
+    cfg_.capture_samples = capture;
+    cfg_.post_guard_samples = post_guard;
+    const size_t cap = cfg_.window_capacity();
+    {
+        std::lock_guard<std::mutex> lock(pool_mutex_);
+        for (size_t i = 0; i < kMaxPoolSize; ++i) {
+            if (checked_out_flags_[i])
+                continue;
+            if (pool_[i].samples.capacity() < cap)
+                pool_[i].samples.reserve(cap);
+        }
+    }
+    if (state_ != ScheduleMachineState::Unlocked) {
+        abort_active_window();
+        advance_k_to_abs(abs_cursor_);
+        state_ = paused_ ? ScheduleMachineState::Paused
+                         : ScheduleMachineState::WaitWindow;
+        ++generation_;
+    }
+}
+
+void ScheduledWindowCore::reset()
+{
+    abort_active_window();
+    drain_ready_to_free();
+    next_k_ = 0;
+    abs_cursor_ = 0;
+    state_ = ScheduleMachineState::Unlocked;
+    paused_ = false;
+    clear_stats();
+    {
+        std::lock_guard<std::mutex> lock(pool_mutex_);
+        if (checked_out_ == 0) {
+            free_count_ = cfg_.pool_size;
+            for (size_t i = 0; i < cfg_.pool_size; ++i) {
+                free_[i] = cfg_.pool_size - 1 - i;
+                pool_[i].samples.clear();
+                pool_[i].filled = 0;
+                pool_[i].active = false;
+                pool_[i].meta = WindowMeta{};
+                checked_out_flags_[i] = false;
+            }
+        } else {
+            rebuild_free_excluding_checked_out_locked();
+        }
+    }
+    ++generation_;
+}
+
+size_t ScheduledWindowCore::process_chunk(const std::complex<float>* in,
+                                          size_t n,
+                                          uint64_t abs_start)
+{
+    if (n == 0)
+        return 0;
+    if (abs_cursor_ == 0 && abs_start > 0 &&
+        state_ == ScheduleMachineState::Unlocked) {
+        abs_cursor_ = abs_start;
+    }
+    if (abs_start != abs_cursor_) {
+        abort_active_window();
+        abs_cursor_ = abs_start;
+        if (state_ == ScheduleMachineState::WaitWindow ||
+            state_ == ScheduleMachineState::CopyWindow) {
+            advance_k_to_abs(abs_cursor_);
+            state_ = ScheduleMachineState::WaitWindow;
+        }
+    }
+
+    size_t offset = 0;
+    while (offset < n) {
+        if (state_ == ScheduleMachineState::Unlocked ||
+            state_ == ScheduleMachineState::Paused) {
+            const size_t take = n - offset;
+            abs_cursor_ += take;
+            offset += take;
+            continue;
+        }
+
+        const WindowBounds bounds = bounds_for(next_k_);
+        const int64_t abs = static_cast<int64_t>(abs_cursor_);
+
+        if (state_ == ScheduleMachineState::WaitWindow) {
+            if (abs >= bounds.window_end) {
+                dropped_windows_.fetch_add(1, std::memory_order_relaxed);
+                scheduled_windows_.fetch_add(1, std::memory_order_relaxed);
+                ++next_k_;
+                continue;
+            }
+            if (abs < bounds.window_start) {
+                const int64_t gap = bounds.window_start - abs;
+                const size_t take = static_cast<size_t>(std::min(
+                    gap, static_cast<int64_t>(n - offset)));
+                abs_cursor_ += take;
+                offset += take;
+                continue;
+            }
+            if (!begin_window(bounds, abs)) {
+                const int64_t remain = bounds.window_end - abs;
+                const size_t take = static_cast<size_t>(std::min(
+                    remain, static_cast<int64_t>(n - offset)));
+                abs_cursor_ += take;
+                offset += take;
+                if (static_cast<int64_t>(abs_cursor_) >= bounds.window_end) {
+                    scheduled_windows_.fetch_add(1,
+                                                 std::memory_order_relaxed);
+                    dropped_windows_.fetch_add(1, std::memory_order_relaxed);
+                    ++next_k_;
+                }
+                continue;
+            }
+            state_ = ScheduleMachineState::CopyWindow;
+        }
+
+        WindowSlot& slot = pool_[active_];
+        const int64_t win_end = slot.meta.window_end_sample;
+        const int64_t remain_abs =
+            win_end - static_cast<int64_t>(abs_cursor_);
+        const size_t need = slot.meta.sample_count > slot.filled
+                                ? slot.meta.sample_count - slot.filled
+                                : 0;
+        const size_t take = std::min(
+            { static_cast<size_t>(std::max(remain_abs, int64_t{ 0 })),
+              need,
+              n - offset });
+        if (take > 0) {
+            std::memcpy(slot.samples.data() + slot.filled,
+                        in + offset,
+                        take * sizeof(std::complex<float>));
+            slot.filled += take;
+            abs_cursor_ += take;
+            offset += take;
+        }
+        if (slot.filled >= slot.meta.sample_count ||
+            static_cast<int64_t>(abs_cursor_) >= win_end) {
+            finish_active_window(/*partial=*/slot.filled <
+                                 slot.meta.sample_count);
+        } else if (take == 0) {
+            abs_cursor_ += 1;
+            offset += 1;
+        }
+    }
+    return n;
+}
+
+size_t ScheduledWindowCore::process_chunk_sc16(const std::complex<int16_t>* in,
+                                               size_t n,
+                                               uint64_t abs_start)
+{
+    sc16_mode_ = true;
+    if (n == 0)
+        return 0;
+    if (abs_cursor_ == 0 && abs_start > 0 &&
+        state_ == ScheduleMachineState::Unlocked) {
+        abs_cursor_ = abs_start;
+    }
+    if (abs_start != abs_cursor_) {
+        abort_active_window();
+        abs_cursor_ = abs_start;
+        if (state_ == ScheduleMachineState::WaitWindow ||
+            state_ == ScheduleMachineState::CopyWindow) {
+            advance_k_to_abs(abs_cursor_);
+            state_ = ScheduleMachineState::WaitWindow;
+        }
+    }
+
+    size_t offset = 0;
+    while (offset < n) {
+        if (state_ == ScheduleMachineState::Unlocked ||
+            state_ == ScheduleMachineState::Paused) {
+            const size_t take = n - offset;
+            abs_cursor_ += take;
+            offset += take;
+            continue;
+        }
+
+        const WindowBounds bounds = bounds_for(next_k_);
+        const int64_t abs = static_cast<int64_t>(abs_cursor_);
+
+        if (state_ == ScheduleMachineState::WaitWindow) {
+            if (abs >= bounds.window_end) {
+                dropped_windows_.fetch_add(1, std::memory_order_relaxed);
+                scheduled_windows_.fetch_add(1, std::memory_order_relaxed);
+                ++next_k_;
+                continue;
+            }
+            if (abs < bounds.window_start) {
+                const int64_t gap = bounds.window_start - abs;
+                const size_t take = static_cast<size_t>(std::min(
+                    gap, static_cast<int64_t>(n - offset)));
+                abs_cursor_ += take;
+                offset += take;
+                continue;
+            }
+            if (!begin_window(bounds, abs)) {
+                const int64_t remain = bounds.window_end - abs;
+                const size_t take = static_cast<size_t>(std::min(
+                    remain, static_cast<int64_t>(n - offset)));
+                abs_cursor_ += take;
+                offset += take;
+                if (static_cast<int64_t>(abs_cursor_) >= bounds.window_end) {
+                    scheduled_windows_.fetch_add(1,
+                                                 std::memory_order_relaxed);
+                    dropped_windows_.fetch_add(1, std::memory_order_relaxed);
+                    ++next_k_;
+                }
+                continue;
+            }
+            state_ = ScheduleMachineState::CopyWindow;
+        }
+
+        WindowSlot& slot = pool_[active_];
+        const int64_t win_end = slot.meta.window_end_sample;
+        const int64_t remain_abs =
+            win_end - static_cast<int64_t>(abs_cursor_);
+        const size_t need = slot.meta.sample_count > slot.filled
+                                ? slot.meta.sample_count - slot.filled
+                                : 0;
+        const size_t take = std::min(
+            { static_cast<size_t>(std::max(remain_abs, int64_t{ 0 })),
+              need,
+              n - offset });
+        if (take > 0) {
+            std::memcpy(slot.samples_sc16.data() + slot.filled,
+                        in + offset,
+                        take * sizeof(std::complex<int16_t>));
+            slot.filled += take;
+            abs_cursor_ += take;
+            offset += take;
+        }
+        if (slot.filled >= slot.meta.sample_count ||
+            static_cast<int64_t>(abs_cursor_) >= win_end) {
+            finish_active_window(/*partial=*/slot.filled <
+                                 slot.meta.sample_count);
+        } else if (take == 0) {
+            abs_cursor_ += 1;
+            offset += 1;
+        }
+    }
+    return n;
+}
+
+void ScheduledWindowCore::flush_eos()
+{
+    if (active_ == kInvalid)
+        return;
+    WindowSlot& slot = pool_[active_];
+    const bool partial = slot.filled < slot.meta.sample_count;
+    if (partial && cfg_.partial_eos_policy == PartialEosPolicy::Drop) {
+        partial_windows_.fetch_add(1, std::memory_order_relaxed);
+        dropped_windows_.fetch_add(1, std::memory_order_relaxed);
+        release_to_free(active_);
+        active_ = kInvalid;
+        state_ = ScheduleMachineState::WaitWindow;
+        return;
+    }
+    slot.meta.partial = partial;
+    slot.meta.sample_count = slot.filled;
+    finish_active_window(partial);
+}
+
+ScheduledWindowCore::WindowHandle ScheduledWindowCore::take_window()
+{
+    std::lock_guard<std::mutex> lock(pool_mutex_);
+    if (ready_count_ == 0)
+        return kInvalid;
+    const WindowHandle h = ready_[ready_head_];
+    ready_head_ = (ready_head_ + 1) % kMaxPoolSize;
+    --ready_count_;
+    if (h < kMaxPoolSize) {
+        checked_out_flags_[h] = true;
+        ++checked_out_;
+    }
+    return h;
+}
+
+ScheduledWindowCore::Stats ScheduledWindowCore::stats() const
+{
+    Stats s;
+    s.scheduled_windows =
+        scheduled_windows_.load(std::memory_order_relaxed);
+    s.completed_windows =
+        completed_windows_.load(std::memory_order_relaxed);
+    s.emitted_windows = emitted_windows_.load(std::memory_order_relaxed);
+    s.partial_windows = partial_windows_.load(std::memory_order_relaxed);
+    s.dropped_windows = dropped_windows_.load(std::memory_order_relaxed);
+    s.queue_high_watermark =
+        queue_high_watermark_.load(std::memory_order_relaxed);
+    s.schedule_updates =
+        schedule_updates_.load(std::memory_order_relaxed);
+    s.verification_failures =
+        verification_failures_.load(std::memory_order_relaxed);
+    s.collisions = collisions_.load(std::memory_order_relaxed);
+    return s;
+}
+
+void ScheduledWindowCore::advance_k_to_abs(uint64_t abs)
+{
+    const double period = cfg_.period_samples_exact();
+    if (period <= 0.0)
+        return;
+    const double first = cfg_.first_packet_sample_exact;
+    const size_t pre = cfg_.pre_guard_samples;
+    if (static_cast<double>(abs) + static_cast<double>(pre) < first) {
+        next_k_ = 0;
+        return;
+    }
+    const long double k_est =
+        (static_cast<long double>(abs) + static_cast<long double>(pre) -
+         static_cast<long double>(first)) /
+        static_cast<long double>(period);
+    uint64_t k = k_est > 0 ? static_cast<uint64_t>(k_est) : 0;
+    while (true) {
+        const WindowBounds b = bounds_for(k);
+        if (b.window_end > static_cast<int64_t>(abs)) {
+            next_k_ = k;
+            return;
+        }
+        ++k;
+        if (k > next_k_ + 100000000ULL) {
+            next_k_ = k;
+            return;
+        }
+    }
+}
+
+bool ScheduledWindowCore::begin_window(const WindowBounds& bounds,
+                                       int64_t abs_now)
+{
+    const int64_t actual_start = std::max(abs_now, bounds.window_start);
+    if (actual_start >= bounds.window_end)
+        return false;
+    const size_t remaining =
+        static_cast<size_t>(bounds.window_end - actual_start);
+    const bool partial_start = actual_start > bounds.window_start;
+
+    WindowHandle h = kInvalid;
+    {
+        std::lock_guard<std::mutex> lock(pool_mutex_);
+        if (free_count_ == 0)
+            return false;
+        h = free_[--free_count_];
+    }
+
+    WindowSlot& slot = pool_[h];
+    slot.active = true;
+    slot.filled = 0;
+    slot.meta = WindowMeta{};
+    slot.meta.schedule_index = next_k_;
+    slot.meta.predicted_start_sample = bounds.predicted_start;
+    slot.meta.window_start_sample = actual_start;
+    slot.meta.window_end_sample = bounds.window_end;
+    slot.meta.sample_count = remaining;
+    slot.meta.partial = partial_start || remaining < bounds.capacity;
+    slot.meta.schedule_generation = generation_;
+    if (sc16_mode_) {
+        if (slot.samples_sc16.size() < remaining)
+            slot.samples_sc16.resize(remaining);
+    } else if (slot.samples.size() < remaining) {
+        slot.samples.resize(remaining);
+    }
+    active_ = h;
+    scheduled_windows_.fetch_add(1, std::memory_order_relaxed);
+    if (slot.meta.partial)
+        partial_windows_.fetch_add(1, std::memory_order_relaxed);
+    return true;
+}
+
+void ScheduledWindowCore::finish_active_window(bool partial)
+{
+    if (active_ == kInvalid)
+        return;
+    WindowSlot& slot = pool_[active_];
+    slot.meta.partial = slot.meta.partial || partial;
+    slot.meta.sample_count = slot.filled;
+    const WindowHandle h = active_;
+    active_ = kInvalid;
+    ++next_k_;
+    state_ = paused_ ? ScheduleMachineState::Paused
+                     : ScheduleMachineState::WaitWindow;
+
+    {
+        std::lock_guard<std::mutex> lock(pool_mutex_);
+        if (ready_count_ < kMaxPoolSize) {
+            ready_[ready_tail_] = h;
+            ready_tail_ = (ready_tail_ + 1) % kMaxPoolSize;
+            ++ready_count_;
+            completed_windows_.fetch_add(1, std::memory_order_relaxed);
+            const uint64_t depth = ready_count_;
+            // Atomic watermark update (also used from worker path).
+            uint64_t prev =
+                queue_high_watermark_.load(std::memory_order_relaxed);
+            while (depth > prev &&
+                   !queue_high_watermark_.compare_exchange_weak(
+                       prev, depth, std::memory_order_relaxed)) {
+            }
+            return;
+        }
+    }
+    // Ready full — return slot under free-list lock path.
+    release_to_free(h);
+    dropped_windows_.fetch_add(1, std::memory_order_relaxed);
+}
+
+void ScheduledWindowCore::drain_ready_to_free()
+{
+    for (;;) {
+        WindowHandle h = kInvalid;
+        {
+            std::lock_guard<std::mutex> lock(pool_mutex_);
+            if (ready_count_ == 0)
+                break;
+            h = ready_[ready_head_];
+            ready_head_ = (ready_head_ + 1) % kMaxPoolSize;
+            --ready_count_;
+        }
+        release_to_free(h);
+    }
+}
+
+void ScheduledWindowCore::release_to_free(WindowHandle h)
+{
+    if (h >= kMaxPoolSize)
+        return;
+    // Clear meta/samples before returning to free so a subsequent
+    // begin_window does not observe stale IQ.  Worker finishes publish
+    // before calling release_window.
+    pool_[h].active = false;
+    pool_[h].filled = 0;
+    pool_[h].meta = WindowMeta{};
+    // Keep vector capacity; do not free memory.
+    {
+        std::lock_guard<std::mutex> lock(pool_mutex_);
+        if (checked_out_flags_[h]) {
+            checked_out_flags_[h] = false;
+            if (checked_out_ > 0)
+                --checked_out_;
+        }
+        // Avoid double-free: only push if not already present.
+        // free list is small; scan is acceptable.
+        for (size_t i = 0; i < free_count_; ++i) {
+            if (free_[i] == h)
+                return;
+        }
+        if (free_count_ < cfg_.pool_size)
+            free_[free_count_++] = h;
+    }
+}
+
+} // namespace core
+} // namespace openuwb
